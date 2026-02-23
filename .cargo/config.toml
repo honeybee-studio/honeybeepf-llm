@@ -1,0 +1,4 @@
+[target."cfg(all())"]
+# runner = "sudo -E"
+[alias]
+xtask = "run --package xtask --"

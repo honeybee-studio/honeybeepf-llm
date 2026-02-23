@@ -1,0 +1,303 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: false
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            arch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            arch: aarch64
+            cross: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Rust nightly (for eBPF)
+        run: |
+          rustup install nightly
+          rustup component add rust-src --toolchain nightly
+          rustup target add ${{ matrix.target }} --toolchain nightly
+
+      - name: Install bpf-linker
+        run: cargo install bpf-linker
+
+      - name: Install cross-compilation tools
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Setup cross-compilation env
+        if: matrix.cross
+        run: |
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Build
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p honeybeepf-llm
+
+      - name: Strip binary
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            aarch64-linux-gnu-strip target/${{ matrix.target }}/release/honeybeepf-llm
+          else
+            strip target/${{ matrix.target }}/release/honeybeepf-llm
+          fi
+
+      - name: Create artifact
+        run: |
+          mkdir -p artifacts
+          cp target/${{ matrix.target }}/release/honeybeepf-llm artifacts/honeybeepf-llm-${{ matrix.arch }}
+          cp example.env artifacts/honeybeepf-llm.env.example
+          chmod +x artifacts/honeybeepf-llm-${{ matrix.arch }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: honeybeepf-llm-${{ matrix.arch }}
+          path: artifacts/
+          retention-days: 7
+
+  # Package job - creates tarballs
+  package:
+    name: Package
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create packages
+        run: |
+          mkdir -p dist
+          
+          for arch in x86_64 aarch64; do
+            if [ -d "artifacts/honeybeepf-llm-${arch}" ]; then
+              pkg_dir="honeybeepf-llm-${arch}"
+              mkdir -p "$pkg_dir"
+              
+              cp "artifacts/honeybeepf-llm-${arch}/honeybeepf-llm-${arch}" "$pkg_dir/honeybeepf-llm"
+              cp "artifacts/honeybeepf-llm-${arch}/honeybeepf-llm.env.example" "$pkg_dir/" 2>/dev/null || true
+              chmod +x "$pkg_dir/honeybeepf-llm"
+              
+              # Create install script
+              cat > "$pkg_dir/install.sh" << 'INSTALL_EOF'
+          #!/bin/bash
+          set -e
+          INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+          CONFIG_DIR="${CONFIG_DIR:-/etc/honeybeepf-llm}"
+          echo "Installing honeybeepf-llm..."
+          sudo install -m 755 honeybeepf-llm "$INSTALL_DIR/honeybeepf-llm"
+          sudo mkdir -p "$CONFIG_DIR"
+          if [ -f honeybeepf-llm.env.example ]; then
+              sudo cp honeybeepf-llm.env.example "$CONFIG_DIR/"
+              if [ ! -f "$CONFIG_DIR/honeybeepf-llm.env" ]; then
+                  sudo cp honeybeepf-llm.env.example "$CONFIG_DIR/honeybeepf-llm.env"
+              fi
+          fi
+          echo "✅ Installed to $INSTALL_DIR/honeybeepf-llm"
+          INSTALL_EOF
+              chmod +x "$pkg_dir/install.sh"
+              
+              # Create service install script
+              cat > "$pkg_dir/install-service.sh" << 'SERVICE_EOF'
+          #!/bin/bash
+          set -e
+          cat > /tmp/honeybeepf-llm.service << 'EOF'
+          [Unit]
+          Description=honeybeepf-llm LLM eBPF Observability Agent
+          After=network.target
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/honeybeepf-llm
+          Restart=on-failure
+          RestartSec=5
+          EnvironmentFile=-/etc/honeybeepf-llm/honeybeepf-llm.env
+          NoNewPrivileges=no
+          CapabilityBoundingSet=CAP_SYS_ADMIN CAP_BPF CAP_PERFMON
+          AmbientCapabilities=CAP_SYS_ADMIN CAP_BPF CAP_PERFMON
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          sudo mv /tmp/honeybeepf-llm.service /etc/systemd/system/honeybeepf-llm.service
+          sudo systemctl daemon-reload
+          sudo systemctl enable honeybeepf-llm
+          echo "✅ Systemd service installed. Start with: sudo systemctl start honeybeepf-llm"
+          SERVICE_EOF
+              chmod +x "$pkg_dir/install-service.sh"
+              
+              # Create tarball
+              tar -czf "dist/honeybeepf-llm-linux-${arch}.tar.gz" "$pkg_dir"
+              rm -rf "$pkg_dir"
+            fi
+          done
+          
+          ls -la dist/
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: honeybeepf-llm-packages
+          path: dist/
+          retention-days: 30
+
+  # Release job - auto bump version on merge to main
+  release:
+    name: Release
+    needs: package
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          # Get latest tag, default to v0.0.0 if none exists
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo "Latest tag: $LATEST_TAG"
+
+      - name: Bump version
+        id: bump
+        run: |
+          LATEST_TAG="${{ steps.get_tag.outputs.latest_tag }}"
+          
+          # Remove 'v' prefix
+          VERSION=${LATEST_TAG#v}
+          
+          # Split into major.minor.patch
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          
+          # Default bump type is patch (can be overridden by workflow_dispatch)
+          BUMP_TYPE="${{ github.event.inputs.bump || 'patch' }}"
+          
+          case $BUMP_TYPE in
+            major)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            minor)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            patch|*)
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+          
+          NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "Bumping from $LATEST_TAG to $NEW_VERSION ($BUMP_TYPE)"
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          name: honeybeepf-llm-packages
+          path: dist
+
+      - name: Create checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > checksums.sha256
+          cat checksums.sha256
+
+      - name: Create tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a ${{ steps.bump.outputs.new_version }} -m "Release ${{ steps.bump.outputs.new_version }}"
+          git push origin ${{ steps.bump.outputs.new_version }}
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.bump.outputs.new_version }}
+          name: honeybeepf-llm ${{ steps.bump.outputs.new_version }}
+          draft: false
+          prerelease: false
+          files: |
+            dist/*.tar.gz
+            dist/checksums.sha256
+          body: |
+            ## honeybeepf-llm ${{ steps.bump.outputs.new_version }}
+            
+            ### Downloads
+            
+            | Architecture | File |
+            |--------------|------|
+            | x86_64 | `honeybeepf-llm-linux-x86_64.tar.gz` |
+            | aarch64 (ARM64) | `honeybeepf-llm-linux-aarch64.tar.gz` |
+            
+            ### Quick Install
+            
+            ```bash
+            # Download and extract (x86_64)
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ steps.bump.outputs.new_version }}/honeybeepf-llm-linux-x86_64.tar.gz
+            tar xzf honeybeepf-llm-linux-x86_64.tar.gz
+            cd honeybeepf-llm-x86_64
+            
+            # Install binary
+            sudo ./install.sh
+            
+            # Install systemd service (optional)
+            sudo ./install-service.sh
+            sudo systemctl start honeybeepf-llm
+            ```
+            
+            ### Verify checksums
+            
+            ```bash
+            sha256sum -c checksums.sha256
+            ```
+            
+            ### Changes
+            
+            See [commit history](https://github.com/${{ github.repository }}/compare/${{ steps.get_tag.outputs.latest_tag }}...${{ steps.bump.outputs.new_version }}) for details.

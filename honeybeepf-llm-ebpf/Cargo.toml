@@ -1,0 +1,32 @@
+[package]
+name = "honeybeepf-llm-ebpf"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+honeybeepf-llm-common = { path = "../honeybeepf-llm-common" }
+
+aya-ebpf = { workspace = true }
+aya-log-ebpf = { workspace = true }
+
+[build-dependencies]
+which = { workspace = true }
+
+[[bin]]
+name = "honeybeepf-llm"
+path = "src/main.rs"
+
+[profile.dev]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = true
+panic = "abort"
+incremental = false
+codegen-units = 1
+
+[profile.release]
+lto = true
+panic = "abort"
+codegen-units = 1
