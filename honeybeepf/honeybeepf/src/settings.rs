@@ -20,6 +20,7 @@ pub struct Settings {
     pub otel_exporter_otlp_protocol: Option<String>,
     pub builtin_probes: BuiltinProbes,
     pub custom_probe_config: Option<String>,
+    pub debug: Option<bool>,
 }
 
 impl Settings {

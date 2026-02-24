@@ -6,7 +6,7 @@ use std::{collections::HashSet, sync::atomic::Ordering, time::Duration};
 use anyhow::Result;
 use aya::Ebpf;
 use aya_log::EbpfLogger;
-use log::{info, warn};
+use log::{debug, info, warn};
 use tokio::signal;
 
 use crate::settings::Settings;
@@ -35,9 +35,18 @@ impl HoneyBeeEngine {
     pub fn new(settings: Settings, bytecode: &[u8]) -> Result<Self> {
         bump_memlock_rlimit()?;
         let mut bpf = Ebpf::load(bytecode)?;
-        if let Err(e) = EbpfLogger::init(&mut bpf) {
-            warn!("Failed to initialize eBPF logger: {}", e);
+
+        // Initialize the eBPF Logger only in debug mode
+        if settings.debug.unwrap_or(false) {
+            if let Err(e) = EbpfLogger::init(&mut bpf) {
+                warn!("Failed to initialize eBPF logger: {}", e);
+            } else {
+                debug!("eBPF logger enabled (debug mode)");
+            }
+        } else {
+            debug!("eBPF logger disabled (production mode)");
         }
+
         Ok(Self { settings, bpf })
     }
 

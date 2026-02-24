@@ -6,6 +6,7 @@ metadata:
     {{- include "honeybeepf.labels" . | nindent 4 }}
 data:
   RUST_LOG: {{ .Values.rustLog | quote }}
+  DEBUG: {{ .Values.debug | quote }}
   {{- if .Values.output.otlp.endpoint }}
   {{- $otlpEndpoint := .Values.output.otlp.endpoint -}}
   {{- if or (hasPrefix "http://" $otlpEndpoint) (hasPrefix "https://" $otlpEndpoint) }}
