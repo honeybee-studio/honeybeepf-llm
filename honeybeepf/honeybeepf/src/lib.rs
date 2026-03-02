@@ -1,7 +1,7 @@
 pub mod settings;
 pub mod telemetry;
 
-use std::{collections::HashSet, sync::atomic::Ordering, time::Duration};
+use std::{sync::atomic::Ordering, time::Duration};
 
 use anyhow::Result;
 use aya::Ebpf;
@@ -13,14 +13,11 @@ use crate::settings::Settings;
 
 pub mod probes;
 use crate::probes::{
-    Probe,
+    DynamicProbe, Probe, ProcessInfo,
     builtin::{
         block_io::BlockIoProbe,
         gpu_usage::GpuUsageProbe,
-        llm::{
-            ExecNotify, ExecPidQueue, LlmProbe, attach_new_targets_for_pids, discovery,
-            setup_exec_watch,
-        },
+        llm::{ExecNotify, ExecPidQueue, LlmProbe, setup_exec_watch},
         network::NetworkLatencyProbe,
     },
     request_shutdown, shutdown_flag,
@@ -29,6 +26,7 @@ use crate::probes::{
 pub struct HoneyBeeEngine {
     pub settings: Settings,
     bpf: Ebpf,
+    dynamic_probes: Vec<Box<dyn DynamicProbe>>,
 }
 
 impl HoneyBeeEngine {
@@ -47,7 +45,16 @@ impl HoneyBeeEngine {
             debug!("eBPF logger disabled (production mode)");
         }
 
-        Ok(Self { settings, bpf })
+        let mut dynamic_probes: Vec<Box<dyn DynamicProbe>> = Vec::new();
+        if settings.builtin_probes.llm.unwrap_or(false) {
+            dynamic_probes.push(Box::new(LlmProbe::default()));
+        }
+
+        Ok(Self {
+            settings,
+            bpf,
+            dynamic_probes,
+        })
     }
 
     pub async fn run(mut self) -> Result<()> {
@@ -60,10 +67,10 @@ impl HoneyBeeEngine {
 
         self.attach_probes()?;
 
-        // Start LLM dynamic discovery if enabled
-        if self.settings.builtin_probes.llm.unwrap_or(false) {
+        // Start dynamic probe discovery if any dynamic probes are enabled
+        if !self.dynamic_probes.is_empty() {
             let (queue, notify) = setup_exec_watch(&mut self.bpf)?;
-            self.run_llm_discovery(queue, notify).await?;
+            self.run_discovery(queue, notify).await?;
         } else {
             info!("Monitoring active. Press Ctrl-C to exit.");
             signal::ctrl_c().await?;
@@ -74,15 +81,13 @@ impl HoneyBeeEngine {
         Ok(())
     }
 
-    /// Run the LLM discovery loop that monitors for new processes and attaches SSL probes.
-    async fn run_llm_discovery(&mut self, queue: ExecPidQueue, notify: ExecNotify) -> Result<()> {
+    /// Run the dynamic discovery loop that monitors for new processes and notifies probes.
+    async fn run_discovery(&mut self, queue: ExecPidQueue, notify: ExecNotify) -> Result<()> {
         const BATCH_WAIT_MS: u64 = 50;
 
-        // Seed with initial targets to avoid duplicate attachments
-        let mut known_targets: HashSet<String> = discovery::find_all_targets().unwrap_or_default();
         let shutdown = shutdown_flag();
 
-        info!("LLM discovery active. Press Ctrl-C to exit.");
+        info!("Dynamic discovery active. Press Ctrl-C to exit.");
 
         loop {
             tokio::select! {
@@ -96,10 +101,32 @@ impl HoneyBeeEngine {
                         q.drain(..).collect()
                     };
 
-                    if !pids.is_empty()
-                        && let Err(e) = attach_new_targets_for_pids(&mut self.bpf, &mut known_targets, &pids) {
-                            warn!("LLM re-discovery error: {}", e);
+                    if !pids.is_empty() {
+                        for pid in pids {
+                            // Pre-fetch libraries once per process to avoid redundant I/O
+                            let libs = match crate::probes::discovery::get_process_libraries(pid) {
+                                Ok(l) => l,
+                                Err(e) => {
+                                    // Debug level because this can happen for short-lived processes
+                                    log::debug!("Failed to get libraries for PID {}: {}", pid, e);
+                                    continue;
+                                }
+                            };
+
+                            // Check if useful
+                            if libs.is_empty() {
+                                continue;
+                            }
+
+                            let process_info = ProcessInfo { pid, libs };
+
+                            for probe in &self.dynamic_probes {
+                                if let Err(e) = probe.on_exec(&mut self.bpf, &process_info) {
+                                    warn!("Probe on_exec error: {}", e);
+                                }
+                            }
                         }
+                    }
                 }
             }
 
@@ -135,8 +162,8 @@ impl HoneyBeeEngine {
             telemetry::record_active_probe("gpu_usage", 1);
         }
 
-        if self.settings.builtin_probes.llm.unwrap_or(false) {
-            LlmProbe.attach(&mut self.bpf)?;
+        for probe in &self.dynamic_probes {
+            probe.attach(&mut self.bpf)?;
             telemetry::record_active_probe("llm", 1);
         }
 
