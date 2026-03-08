@@ -16,7 +16,9 @@ use log::{info, warn};
 use processor::StreamProcessor;
 use types::LlmDirection;
 
-use crate::probes::{DynamicProbe, Probe, ProcessInfo, attach_uprobe, spawn_ringbuf_handler};
+use crate::probes::{
+    DynamicProbe, IdentityResolver, Probe, ProcessInfo, attach_uprobe, spawn_ringbuf_handler,
+};
 // Re-export exec watch types and functions for lib.rs
 pub use crate::probes::{ExecNotify, ExecPidQueue, setup_exec_watch};
 
@@ -113,7 +115,7 @@ impl DynamicProbe for LlmProbe {
 type StreamMap = Arc<Mutex<HashMap<(u32, u32), StreamProcessor>>>;
 
 impl Probe for LlmProbe {
-    fn attach(&self, bpf: &mut Ebpf) -> Result<()> {
+    fn attach(&self, bpf: &mut Ebpf, _resolver: IdentityResolver) -> Result<()> {
         let targets = discovery::find_all_targets()?;
 
         if targets.is_empty() {
@@ -154,11 +156,25 @@ impl Probe for LlmProbe {
                 return;
             }
 
+            // Resolve pod identity (result is used for future telemetry enrichment)
+            #[cfg(feature = "k8s")]
+            let pod_info = _resolver.resolve_pod(event.metadata.pid, event.metadata.cgroup_id);
+
             let key = (event.metadata.pid, event.metadata._pad);
             let mut map = handler_state.lock().unwrap_or_else(|e| e.into_inner());
             let processor = map.entry(key).or_default();
 
             let data_len = std::cmp::min(event.len as usize, honeybeepf_common::MAX_SSL_BUF_SIZE);
+
+            #[cfg(feature = "k8s")]
+            processor.handle_event(
+                direction,
+                &event.buf[..data_len],
+                event.metadata.pid,
+                pod_info,
+            );
+
+            #[cfg(not(feature = "k8s"))]
             processor.handle_event(direction, &event.buf[..data_len], event.metadata.pid);
         })?;
 

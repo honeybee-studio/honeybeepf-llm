@@ -96,6 +96,7 @@ mod tests {
                 interval: None,        // Should default to constant
             },
             custom_probe_config: None,
+            debug: None,
         };
 
         let common = settings.to_common_config();

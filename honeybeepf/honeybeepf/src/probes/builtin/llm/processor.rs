@@ -31,6 +31,14 @@ enum ProcessorState {
     Finished,
 }
 
+#[cfg(feature = "k8s")]
+fn fmt_pod(pod_info: &Option<std::sync::Arc<crate::k8s::PodInfo>>) -> String {
+    pod_info
+        .as_ref()
+        .map(|p| format!(" | Pod: {}/{}", p.namespace, p.pod_name))
+        .unwrap_or_default()
+}
+
 pub struct StreamProcessor {
     state: ProcessorState,
     write_buf: Vec<u8>,
@@ -65,7 +73,13 @@ impl StreamProcessor {
         )
     }
 
-    pub fn handle_event(&mut self, direction: LlmDirection, data: &[u8], pid: u32) {
+    pub fn handle_event(
+        &mut self,
+        direction: LlmDirection,
+        data: &[u8],
+        pid: u32,
+        #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
+    ) {
         self.last_activity = Instant::now();
 
         // Early return if finished (except for new Write which triggers reset)
@@ -120,7 +134,15 @@ impl StreamProcessor {
             ProcessorState::Detecting => {
                 // Try H1
                 if let Some(path) = http::Http11Parser.detect_request(&self.write_buf) {
-                    info!("[LLM] Detected HTTP/1.1: {} (PID: {})", path, pid);
+                    #[cfg(feature = "k8s")]
+                    let pod_str = fmt_pod(&pod_info);
+                    #[cfg(not(feature = "k8s"))]
+                    let pod_str = "";
+
+                    info!(
+                        "[LLM] Detected HTTP/1.1: {} (PID: {}){}",
+                        path, pid, pod_str
+                    );
                     ProcessorState::ProcessingRequest {
                         start_time: Instant::now(),
                         parser: Box::new(http::Http11Parser),
@@ -128,7 +150,12 @@ impl StreamProcessor {
                 }
                 // Try H2
                 else if let Some(path) = http::Http2Parser.detect_request(&self.write_buf) {
-                    info!("[LLM] Detected HTTP/2: {} (PID: {})", path, pid);
+                    #[cfg(feature = "k8s")]
+                    let pod_str = fmt_pod(&pod_info);
+                    #[cfg(not(feature = "k8s"))]
+                    let pod_str = "";
+
+                    info!("[LLM] Detected HTTP/2: {} (PID: {}){}", path, pid, pod_str);
                     ProcessorState::ProcessingRequest {
                         start_time: Instant::now(),
                         parser: Box::new(http::Http2Parser),
@@ -162,12 +189,18 @@ impl StreamProcessor {
                     let latency = start_time.elapsed();
                     let model_str = usage.model.as_deref().unwrap_or("unknown");
 
+                    #[cfg(feature = "k8s")]
+                    let pod_str = fmt_pod(&pod_info);
+                    #[cfg(not(feature = "k8s"))]
+                    let pod_str = "";
+
                     if usage.prompt_tokens == 0 && usage.completion_tokens == 0 {
                         info!(
-                            "LLM FAILED/ERROR | PID: {} | Model: {} | Latency: {:.2}s",
+                            "LLM FAILED/ERROR | PID: {} | Model: {} | Latency: {:.2}s{}",
                             pid,
                             model_str,
-                            latency.as_secs_f64()
+                            latency.as_secs_f64(),
+                            pod_str
                         );
                     } else {
                         let thoughts_str = usage
@@ -175,14 +208,15 @@ impl StreamProcessor {
                             .map(|t| format!(", Thoughts: {}", t))
                             .unwrap_or_default();
                         info!(
-                            "LLM SUCCESS | PID: {} | Model: {} | Latency: {:.2}s | Tokens: {} (Prompt: {}, Compl: {}{})",
+                            "LLM SUCCESS | PID: {} | Model: {} | Latency: {:.2}s | Tokens: {} (Prompt: {}, Compl: {}{}){}",
                             pid,
                             model_str,
                             latency.as_secs_f64(),
                             usage.prompt_tokens + usage.completion_tokens,
                             usage.prompt_tokens,
                             usage.completion_tokens,
-                            thoughts_str
+                            thoughts_str,
+                            pod_str
                         );
                     }
 
