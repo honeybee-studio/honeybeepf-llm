@@ -1,4 +1,6 @@
-pub mod block_io;
-pub mod gpu_usage;
+pub mod filesystem;
 pub mod llm;
-pub mod network;
+
+// Re-export all probes for convenience
+pub use filesystem::FileAccessProbe;
+pub use llm::LlmProbe;

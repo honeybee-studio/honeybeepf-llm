@@ -1,11 +1,11 @@
 # eBPF Observability Platform
 
-**Lightweight eBPF observability for AI workloads (GPU & token usage)**
+**Lightweight eBPF observability for AI workloads**
 
 ---
 
 ## 1. Project Overview
-A lightweight, eBPF-based observability platform designed to identify cost and performance bottlenecks in AI workloads by selectively collecting essential data such as GPU utilization and token usage.
+A lightweight, eBPF-based observability platform designed to identify cost and performance bottlenecks in AI workloads by selectively collecting essential data such as LLM token usage and system metrics.
 
 ---
 

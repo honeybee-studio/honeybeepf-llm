@@ -85,6 +85,10 @@ spec:
             - mountPath: /sys/kernel/debug
               name: debugfs
               readOnly: false
+            # Host filesystem for uprobe targets (SSL libraries)
+            - mountPath: /host
+              name: host-root
+              readOnly: true
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -101,4 +105,8 @@ spec:
         - name: debugfs
           hostPath:
             path: /sys/kernel/debug
+            type: Directory
+        - name: host-root
+          hostPath:
+            path: /
             type: Directory

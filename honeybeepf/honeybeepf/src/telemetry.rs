@@ -2,14 +2,16 @@
 //!
 //! Exports eBPF metrics collected by honeybeepf to OpenTelemetry Collector.
 //!
+//! ## Metrics Categories
+//! - **Filesystem**: File access auditing
+//!
 //! ## OTLP Endpoint Priority
 //! 1. Helm values (injected via environment variables)
 //! 2. Direct environment variable configuration
-//! 3. Code default value (FQDN)
 
 use anyhow::{Context, Result};
 use log::info;
-use opentelemetry::metrics::{Counter, Histogram, Meter};
+use opentelemetry::metrics::{Counter, Meter};
 use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::Resource;
@@ -38,51 +40,18 @@ fn active_probes_map() -> &'static RwLock<HashMap<String, u64>> {
 }
 
 /// honeybeepf metrics collection
-///
-/// Note: Do NOT add _total suffix to Counter names (Prometheus adds it automatically)
 pub struct HoneyBeeMetrics {
-    pub block_io_events: Counter<u64>,
-    pub block_io_bytes: Counter<u64>,
-    pub block_io_latency_ns: Histogram<u64>,
-    pub network_latency_ns: Histogram<u64>,
-    pub network_connection_attempts: Counter<u64>,
-    pub gpu_open_events: Counter<u64>,
-    // Note: active_probes is registered as ObservableGauge in init_metrics()
+    // === Filesystem metrics ===
+    pub file_access_events: Counter<u64>,
 }
 
 impl HoneyBeeMetrics {
     fn new(meter: &Meter) -> Self {
-        // Note: Do NOT add _total suffix to Counter names!
-        // Prometheus automatically adds _total suffix
         Self {
-            block_io_events: meter
-                .u64_counter("block_io_events")
-                .with_description("Number of block I/O events")
-                .with_unit("events")
-                .build(),
-            block_io_bytes: meter
-                .u64_counter("block_io_bytes")
-                .with_description("Total bytes of block I/O operations")
-                .with_unit("bytes")
-                .build(),
-            block_io_latency_ns: meter
-                .u64_histogram("block_io_latency_ns")
-                .with_description("Block I/O operation latency in nanoseconds")
-                .with_unit("ns")
-                .build(),
-            network_latency_ns: meter
-                .u64_histogram("network_latency_ns")
-                .with_description("Network operation latency in nanoseconds")
-                .with_unit("ns")
-                .build(),
-            network_connection_attempts: meter
-                .u64_counter("network_connection_attempts")
-                .with_description("Number of network connection attempts")
-                .with_unit("events")
-                .build(),
-            gpu_open_events: meter
-                .u64_counter("gpu_open_events")
-                .with_description("Number of GPU device open events")
+            // === Filesystem ===
+            file_access_events: meter
+                .u64_counter("file_access_events")
+                .with_description("Number of monitored file access events")
                 .with_unit("events")
                 .build(),
         }
@@ -172,97 +141,6 @@ pub fn metrics() -> Option<&'static HoneyBeeMetrics> {
     METRICS.get()
 }
 
-/// Build process identity attributes.
-///
-/// Always includes `process.name`. When the `k8s` feature is enabled and
-/// pod info is available, also includes K8s attributes following OTEL
-/// semantic conventions.
-fn process_attrs(
-    process_name: &str,
-    #[cfg(feature = "k8s")] pod: Option<&PodInfo>,
-) -> Vec<KeyValue> {
-    let attrs = vec![KeyValue::new("process.name", process_name.to_string())];
-
-    #[cfg(feature = "k8s")]
-    let attrs = {
-        let mut attrs = attrs;
-        if let Some(info) = pod {
-            attrs.push(KeyValue::new("k8s.pod.name", info.pod_name.clone()));
-            attrs.push(KeyValue::new("k8s.namespace.name", info.namespace.clone()));
-            if let Some(ref name) = info.workload_name {
-                attrs.push(KeyValue::new("k8s.workload.name", name.clone()));
-            }
-            if let Some(ref kind) = info.workload_kind {
-                attrs.push(KeyValue::new("k8s.workload.kind", kind.clone()));
-            }
-        }
-        attrs
-    };
-
-    attrs
-}
-
-pub fn record_block_io_event(
-    event_type: &str,
-    bytes: u64,
-    latency_ns: Option<u64>,
-    device: &str,
-    process_name: &str,
-    #[cfg(feature = "k8s")] pod: Option<&PodInfo>,
-) {
-    if let Some(m) = metrics() {
-        let mut attrs = vec![
-            KeyValue::new("event_type", event_type.to_string()),
-            KeyValue::new("device", device.to_string()),
-        ];
-        attrs.extend(process_attrs(
-            process_name,
-            #[cfg(feature = "k8s")]
-            pod,
-        ));
-
-        m.block_io_events.add(1, &attrs);
-        m.block_io_bytes.add(bytes, &attrs);
-
-        if let Some(lat) = latency_ns {
-            m.block_io_latency_ns.record(lat, &attrs);
-        }
-    }
-}
-
-pub fn record_network_latency(
-    latency_ns: u64,
-    protocol: &str,
-    process_name: &str,
-    #[cfg(feature = "k8s")] pod: Option<&PodInfo>,
-) {
-    if let Some(m) = metrics() {
-        let mut attrs = vec![KeyValue::new("protocol", protocol.to_string())];
-        attrs.extend(process_attrs(
-            process_name,
-            #[cfg(feature = "k8s")]
-            pod,
-        ));
-        m.network_latency_ns.record(latency_ns, &attrs);
-    }
-}
-
-pub fn record_gpu_open_event(
-    device_path: &str,
-    process_name: &str,
-    #[cfg(feature = "k8s")] pod: Option<&PodInfo>,
-) {
-    if let Some(m) = metrics() {
-        let mut attrs = vec![KeyValue::new("device", device_path.to_string())];
-        attrs.extend(process_attrs(
-            process_name,
-            #[cfg(feature = "k8s")]
-            pod,
-        ));
-        m.gpu_open_events.add(1, &attrs);
-    }
-}
-
 /// Record active probe count
 /// Updates the global active probes map for ObservableGauge callback
 pub fn record_active_probe(probe_name: &str, count: u64) {
@@ -270,6 +148,18 @@ pub fn record_active_probe(probe_name: &str, count: u64) {
     if let Ok(mut probes) = active_probes_map().write() {
         probes.insert(probe_name.to_string(), count);
         info!("Active probe registered: {} = {}", probe_name, count);
+    }
+}
+
+pub fn record_file_access_event(filename: &str, flags: &str, comm: &str, cgroup_id: u64) {
+    if let Some(m) = metrics() {
+        let attrs = [
+            KeyValue::new("filename", filename.to_string()),
+            KeyValue::new("flags", flags.to_string()),
+            KeyValue::new("process", comm.to_string()),
+            KeyValue::new("cgroup_id", cgroup_id as i64),
+        ];
+        m.file_access_events.add(1, &attrs);
     }
 }
 
@@ -283,26 +173,6 @@ pub fn shutdown_metrics() {
         } else {
             info!("OpenTelemetry metrics shutdown complete");
         }
-    }
-}
-
-pub fn record_network_connection(
-    protocol: &str,
-    dest: &str,
-    process_name: &str,
-    #[cfg(feature = "k8s")] pod: Option<&PodInfo>,
-) {
-    if let Some(m) = metrics() {
-        let mut attrs = vec![
-            KeyValue::new("protocol", protocol.to_string()),
-            KeyValue::new("destination", dest.to_string()),
-        ];
-        attrs.extend(process_attrs(
-            process_name,
-            #[cfg(feature = "k8s")]
-            pod,
-        ));
-        m.network_connection_attempts.add(1, &attrs);
     }
 }
 
@@ -333,10 +203,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_get_otlp_endpoint_from_env() {
-        unsafe {
-            std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://custom:4317");
-        }
-
+        unsafe { std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://custom:4317") };
         let endpoint = get_otlp_endpoint();
         assert_eq!(endpoint, Some("http://custom:4317".to_string()));
         unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT") };
@@ -345,10 +212,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_get_otlp_endpoint_adds_http_prefix() {
-        unsafe {
-            std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "collector:4317");
-        }
-
+        unsafe { std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "collector:4317") };
         let endpoint = get_otlp_endpoint();
         assert_eq!(endpoint, Some("http://collector:4317".to_string()));
         unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT") };

@@ -1,5 +1,6 @@
 /// Common tracepoint header for syscall events (sys_enter_*, sys_exit_*)
 #[repr(C)]
+#[allow(dead_code)]
 pub struct SyscallTraceHeader {
     pub common_type: u16,
     pub common_flags: u8,
@@ -14,6 +15,7 @@ pub struct SyscallTraceHeader {
 // ============================================================
 
 #[repr(C)]
+#[allow(dead_code)]
 pub struct SysEnterOpenat {
     pub header: SyscallTraceHeader,
     pub dfd: i64,
@@ -23,6 +25,7 @@ pub struct SysEnterOpenat {
 }
 
 #[repr(C)]
+#[allow(dead_code)]
 pub struct SysExitOpenat {
     pub header: SyscallTraceHeader,
     pub ret: i64,
@@ -33,6 +36,7 @@ pub struct SysExitOpenat {
 // ============================================================
 
 #[repr(C)]
+#[allow(dead_code)]
 pub struct SysEnterClose {
     pub header: SyscallTraceHeader,
     pub fd: i64,

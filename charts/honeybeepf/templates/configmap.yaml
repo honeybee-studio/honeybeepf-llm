@@ -16,15 +16,23 @@ data:
   {{- end }}
   OTEL_SERVICE_NAME: "honeybeepf"
   {{- end }}
-  BUILTIN_PROBES__BLOCK_IO: {{ .Values.builtinProbes.block_io.enabled | quote }}
-  BUILTIN_PROBES__NETWORK_LATENCY: {{ .Values.builtinProbes.network_latency.enabled | quote }}
-  BUILTIN_PROBES__GPU_USAGE: {{ .Values.builtinProbes.gpu_usage.enabled | quote }}
+
+  # === Filesystem Probes ===
+  BUILTIN_PROBES__FILESYSTEM__FILE_ACCESS: {{ .Values.builtinProbes.filesystem.file_access.enabled | quote }}
+  {{- if .Values.builtinProbes.filesystem.file_access.watched_paths }}
+  BUILTIN_PROBES__FILESYSTEM__WATCHED_PATHS: {{ .Values.builtinProbes.filesystem.file_access.watched_paths | join "," | quote }}
+  {{- end }}
+
+  # === LLM Probes ===
   BUILTIN_PROBES__LLM: {{ .Values.builtinProbes.llm.enabled | quote }}
   {{- if .Values.builtinProbes.llm.providers }}
-  # LLM Providers Configuration
   LLM_PROVIDERS_CONFIG: {{ dict "providers" .Values.builtinProbes.llm.providers | toJson | quote }}
   {{- end }}
+
+  # === Collection Interval ===
   BUILTIN_PROBES__INTERVAL: {{ .Values.builtinProbes.interval | quote }}
+
+  # === Custom Probes ===
   {{- if or .Values.customProbes.kprobes .Values.customProbes.uprobes .Values.customProbes.tracepoints }}
   CUSTOM_PROBE_CONFIG: {{ toJson .Values.customProbes | quote }}
   {{- end }}

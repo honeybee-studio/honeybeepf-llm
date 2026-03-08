@@ -17,12 +17,8 @@ use crate::settings::Settings;
 pub mod probes;
 use crate::probes::{
     DynamicProbe, IdentityResolver, Probe, ProcessInfo,
-    builtin::{
-        block_io::BlockIoProbe,
-        gpu_usage::GpuUsageProbe,
-        llm::{ExecNotify, ExecPidQueue, LlmProbe, setup_exec_watch},
-        network::NetworkLatencyProbe,
-    },
+    builtin::FileAccessProbe,
+    builtin::llm::{ExecNotify, ExecPidQueue, LlmProbe, setup_exec_watch},
     request_shutdown, shutdown_flag,
 };
 
@@ -184,32 +180,35 @@ impl HoneyBeeEngine {
     }
 
     fn attach_probes(&mut self) -> Result<()> {
+        // File Access Probe
         if self
             .settings
             .builtin_probes
-            .network_latency
+            .filesystem
+            .file_access
             .unwrap_or(false)
         {
-            NetworkLatencyProbe.attach(&mut self.bpf, self.resolver.clone())?;
-            // Note: network_latency probe currently logs connection events only,
-            // latency measurement not yet implemented
-        }
+            let watched_paths = self
+                .settings
+                .builtin_probes
+                .filesystem
+                .watched_paths
+                .clone()
+                .unwrap_or_default();
 
-        if self.settings.builtin_probes.block_io.unwrap_or(false) {
-            BlockIoProbe.attach(&mut self.bpf, self.resolver.clone())?;
-            telemetry::record_active_probe("block_io", 1);
-        }
-
-        if self.settings.builtin_probes.gpu_usage.unwrap_or(false) {
-            GpuUsageProbe.attach(&mut self.bpf, self.resolver.clone())?;
-            telemetry::record_active_probe("gpu_usage", 1);
+            if watched_paths.is_empty() {
+                info!("FileAccessProbe is ENABLED but no watched_paths configured, skipping...");
+            } else {
+                info!("FileAccessProbe is ENABLED, attaching...");
+                let probe = FileAccessProbe::new(watched_paths);
+                probe.attach(&mut self.bpf, self.resolver.clone())?;
+            }
         }
 
         for probe in &self.dynamic_probes {
             probe.attach(&mut self.bpf, self.resolver.clone())?;
             telemetry::record_active_probe("llm", 1);
         }
-
         Ok(())
     }
 }
