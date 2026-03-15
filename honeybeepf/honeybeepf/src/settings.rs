@@ -1,13 +1,49 @@
 use config::{Config, ConfigError, Environment};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 const DEFAULT_PROBE_INTERVAL_SECONDS: u32 = 60;
+
+/// Deserializes a comma-separated string (or an actual sequence) into `Option<Vec<String>>`.
+/// Use `#[serde(default, deserialize_with = "deserialize_comma_separated")]` on any
+/// `Option<Vec<String>>` field that is populated via an environment variable like
+/// `MY_FIELD=foo,bar,baz`.
+fn deserialize_comma_separated<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match raw {
+        None => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect(),
+        )),
+        Some(serde_json::Value::Array(arr)) => {
+            let items = arr
+                .into_iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(|s| s.to_string())
+                        .ok_or_else(|| D::Error::custom("expected string in array"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Some(items))
+        }
+        Some(other) => Err(D::Error::custom(format!(
+            "expected string or array, got {other}"
+        ))),
+    }
+}
 
 /// Filesystem probe configuration
 #[derive(Debug, Deserialize, Clone, Default)]
 #[allow(unused)]
 pub struct FilesystemProbes {
     pub file_access: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_comma_separated")]
     pub watched_paths: Option<Vec<String>>,
 }
 
@@ -43,12 +79,7 @@ impl Settings {
         }
 
         let s = Config::builder()
-            .add_source(
-                Environment::default()
-                    .separator("__")
-                    .list_separator(",")
-                    .try_parsing(true),
-            )
+            .add_source(Environment::default().separator("__").try_parsing(true))
             .build()?;
 
         let settings: Self = s.try_deserialize()?;
