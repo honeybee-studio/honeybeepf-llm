@@ -187,14 +187,26 @@ impl StreamProcessor {
                 // Try parsing response
                 if let Some(usage) = parser.parse_response(&self.read_buf) {
                     let latency = start_time.elapsed();
+                    let latency_secs = latency.as_secs_f64();
                     let model_str = usage.model.as_deref().unwrap_or("unknown");
+                    let is_error = usage.prompt_tokens == 0 && usage.completion_tokens == 0;
+
+                    crate::telemetry::record_llm_request(
+                        model_str,
+                        latency_secs,
+                        usage.prompt_tokens,
+                        usage.completion_tokens,
+                        is_error,
+                        #[cfg(feature = "k8s")]
+                        pod_info.as_ref(),
+                    );
 
                     #[cfg(feature = "k8s")]
                     let pod_str = fmt_pod(&pod_info);
                     #[cfg(not(feature = "k8s"))]
                     let pod_str = "";
 
-                    if usage.prompt_tokens == 0 && usage.completion_tokens == 0 {
+                    if is_error {
                         info!(
                             "LLM FAILED/ERROR | PID: {} | Model: {} | Latency: {:.2}s{}",
                             pid,

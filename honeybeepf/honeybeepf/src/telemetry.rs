@@ -11,7 +11,7 @@
 
 use anyhow::{Context, Result};
 use log::info;
-use opentelemetry::metrics::{Counter, Meter};
+use opentelemetry::metrics::{Counter, Histogram, Meter};
 use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::Resource;
@@ -43,6 +43,10 @@ fn active_probes_map() -> &'static RwLock<HashMap<String, u64>> {
 pub struct HoneyBeeMetrics {
     // === Filesystem metrics ===
     pub file_access_events: Counter<u64>,
+    // === LLM metrics ===
+    pub llm_requests_total: Counter<u64>,
+    pub llm_tokens_total: Counter<u64>,
+    pub llm_latency_seconds: Histogram<f64>,
 }
 
 impl HoneyBeeMetrics {
@@ -53,6 +57,23 @@ impl HoneyBeeMetrics {
                 .u64_counter("file_access_events")
                 .with_description("Number of monitored file access events")
                 .with_unit("events")
+                .build(),
+
+            // === LLM ===
+            llm_requests_total: meter
+                .u64_counter("llm_requests_total")
+                .with_description("Total number of LLM requests")
+                .with_unit("requests")
+                .build(),
+            llm_tokens_total: meter
+                .u64_counter("llm_tokens_total")
+                .with_description("Total number of LLM tokens processed")
+                .with_unit("tokens")
+                .build(),
+            llm_latency_seconds: meter
+                .f64_histogram("llm_latency_seconds")
+                .with_description("Latency of LLM requests")
+                .with_unit("s")
                 .build(),
         }
     }
@@ -160,6 +181,50 @@ pub fn record_file_access_event(filename: &str, flags: &str, comm: &str, cgroup_
             KeyValue::new("cgroup_id", cgroup_id as i64),
         ];
         m.file_access_events.add(1, &attrs);
+    }
+}
+
+// Record LLM request metrics
+pub fn record_llm_request(
+    model: &str,
+    latency_secs: f64,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    is_error: bool,
+    #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
+) {
+    if let Some(m) = metrics() {
+        let status = if is_error { "error" } else { "success" };
+
+        #[allow(unused_mut)]
+        let mut attrs = vec![
+            KeyValue::new("model", model.to_string()),
+            KeyValue::new("status", status.to_string()),
+        ];
+
+        // Only add pod info if k8s feature is enabled
+        #[cfg(feature = "k8s")]
+        if let Some(pod) = pod_info {
+            attrs.push(KeyValue::new("target.namespace", pod.namespace.clone()));
+            attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
+        }
+
+        // 1. total requests
+        m.llm_requests_total.add(1, &attrs);
+
+        // 2. latency
+        m.llm_latency_seconds.record(latency_secs, &attrs);
+
+        // 3. tokens
+        if !is_error {
+            let mut prompt_attrs = attrs.clone();
+            prompt_attrs.push(KeyValue::new("token_type", "prompt"));
+            m.llm_tokens_total.add(prompt_tokens, &prompt_attrs);
+
+            let mut comp_attrs = attrs; // move ownership
+            comp_attrs.push(KeyValue::new("token_type", "completion"));
+            m.llm_tokens_total.add(completion_tokens, &comp_attrs);
+        }
     }
 }
 
