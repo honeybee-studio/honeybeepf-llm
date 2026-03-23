@@ -54,8 +54,13 @@ builtinProbes:
     #       completion_tokens: "eval_count"    # Field name for output tokens
     #       model_path: "model"
     #     request_extractor: "messages"       # How to extract prompt text (messages, contents, prompt)
+  process_lifecycle:
+    enabled: true
 
   interval: 1000
+
+  process_lifecycle:
+    enabled: false
 
 customProbes:
   kprobes: []

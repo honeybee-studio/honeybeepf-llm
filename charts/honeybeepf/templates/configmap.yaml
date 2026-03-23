@@ -30,6 +30,11 @@ data:
   {{- end }}
 
   # === Collection Interval ===
+  # === Process Lifecycle Probes ===
+  {{- if .Values.builtinProbes.process_lifecycle }}
+  BUILTIN_PROBES__PROCESS_LIFECYCLE: {{ .Values.builtinProbes.process_lifecycle.enabled | quote }}
+  {{- end }}
+
   BUILTIN_PROBES__INTERVAL: {{ .Values.builtinProbes.interval | quote }}
 
   # === Custom Probes ===

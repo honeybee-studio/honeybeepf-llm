@@ -41,9 +41,14 @@ fn active_probes_map() -> &'static RwLock<HashMap<String, u64>> {
 
 /// honeybeepf metrics collection
 pub struct HoneyBeeMetrics {
-    // === Filesystem metrics ===
+    pub block_io_events: Counter<u64>,
+    pub block_io_bytes: Counter<u64>,
+    pub block_io_latency_ns: Histogram<u64>,
+    pub network_latency_ns: Histogram<u64>,
+    pub gpu_open_events: Counter<u64>,
+    pub process_exit_total: Counter<u64>,
+    pub process_lifetime_seconds: Histogram<u64>,
     pub file_access_events: Counter<u64>,
-    // === LLM metrics ===
     pub llm_requests_total: Counter<u64>,
     pub llm_tokens_total: Counter<u64>,
     pub llm_latency_seconds: Histogram<f64>,
@@ -52,11 +57,39 @@ pub struct HoneyBeeMetrics {
 impl HoneyBeeMetrics {
     fn new(meter: &Meter) -> Self {
         Self {
-            // === Filesystem ===
+            block_io_events: meter
+                .u64_counter("block_io_events")
+                .with_description("Number of block I/O events")
+                .build(),
+            block_io_bytes: meter
+                .u64_counter("block_io_bytes")
+                .with_description("Total block I/O bytes")
+                .build(),
+            block_io_latency_ns: meter
+                .u64_histogram("block_io_latency_ns")
+                .with_description("Block I/O latency in nanoseconds")
+                .build(),
+            network_latency_ns: meter
+                .u64_histogram("network_latency_ns")
+                .with_description("Network latency in nanoseconds")
+                .build(),
+            gpu_open_events: meter
+                .u64_counter("gpu_open`_events")
+                .with_description("Number of GPU open events")
+                .build(),
             file_access_events: meter
                 .u64_counter("file_access_events")
                 .with_description("Number of monitored file access events")
                 .with_unit("events")
+                .build(),
+            process_exit_total: meter
+                .u64_counter("process_exit")
+                .with_description("Total number of process exits")
+                .build(),
+            process_lifetime_seconds: meter
+                .u64_histogram("process_lifetime_seconds")
+                .with_description("Process lifetime in seconds")
+                .with_unit("s")
                 .build(),
 
             // === LLM ===
@@ -281,5 +314,17 @@ mod tests {
         let endpoint = get_otlp_endpoint();
         assert_eq!(endpoint, Some("http://collector:4317".to_string()));
         unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT") };
+    }
+}
+
+pub fn record_process_exit(cause: &str, exit_code: u32, lifetime_secs: u64, cgroup_id: u64) {
+    if let Some(m) = metrics() {
+        let attrs = [
+            KeyValue::new("cause", cause.to_string()),
+            KeyValue::new("exit_code", exit_code.to_string()),
+            KeyValue::new("cgroup_id", cgroup_id.to_string()),
+        ];
+        m.process_exit_total.add(1, &attrs);
+        m.process_lifetime_seconds.record(lifetime_secs, &attrs);
     }
 }

@@ -53,6 +53,8 @@ pub struct BuiltinProbes {
     #[serde(default)]
     pub filesystem: FilesystemProbes,
     pub llm: Option<bool>,
+    pub gpu_usage: Option<bool>,
+    pub process_lifecycle: Option<bool>,
     pub interval: Option<u32>,
 }
 

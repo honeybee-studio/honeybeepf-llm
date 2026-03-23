@@ -142,10 +142,10 @@ pub fn attach_tracepoint(bpf: &mut Ebpf, config: TracepointConfig) -> Result<boo
     Ok(true)
 }
 
-pub fn spawn_ringbuf_handler<T, F>(bpf: &mut Ebpf, map_name: &str, handler: F) -> Result<()>
+pub fn spawn_ringbuf_handler<T, F>(bpf: &mut Ebpf, map_name: &str, mut handler: F) -> Result<()>
 where
     T: Copy + Send + 'static,
-    F: Fn(T) + Send + 'static,
+    F: FnMut(T) + Send + 'static,
 {
     let mut ring_buf = RingBuf::try_from(bpf.take_map(map_name).context("Failed to get map")?)?;
     let shutdown = shutdown_flag();

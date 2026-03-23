@@ -100,6 +100,21 @@ pub struct ExecEvent {
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for ExecEvent {}
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct ProcessExitEvent {
+    pub pid: u32,
+    pub ppid: u32,
+    pub exit_code: i32,
+    pub _pad: u32,
+    pub start_time: u64,
+    pub exit_time: u64,
+    pub cgroup_id: u64,
+    pub comm: [u8; 16],
+}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for ProcessExitEvent {}
 // ============================================================
 // File Access Events
 // ============================================================

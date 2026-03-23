@@ -17,8 +17,11 @@ use crate::settings::Settings;
 pub mod probes;
 use crate::probes::{
     DynamicProbe, IdentityResolver, Probe, ProcessInfo,
-    builtin::FileAccessProbe,
-    builtin::llm::{ExecNotify, ExecPidQueue, LlmProbe, setup_exec_watch},
+    builtin::{
+        FileAccessProbe,
+        llm::{ExecNotify, ExecPidQueue, LlmProbe, setup_exec_watch},
+        process_lifecycle::ProcessLifecycleProbe,
+    },
     request_shutdown, shutdown_flag,
 };
 
@@ -208,6 +211,17 @@ impl HoneyBeeEngine {
         for probe in &self.dynamic_probes {
             probe.attach(&mut self.bpf, self.resolver.clone())?;
             telemetry::record_active_probe("llm", 1);
+        }
+
+        if self
+            .settings
+            .builtin_probes
+            .process_lifecycle
+            .unwrap_or(false)
+        {
+            ProcessLifecycleProbe.attach(&mut self.bpf, self.resolver.clone())?;
+            telemetry::record_active_probe("process_lifecycle", 1);
+            info!("Process lifecycle probe attached");
         }
         Ok(())
     }
