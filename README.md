@@ -54,8 +54,21 @@ The agent can be deployed via Helm Charts in Kubernetes environments or as a sta
 > container images using `publish.sh` once CI pipelines pass.
 
 ---
+## 7. Building
 
-## 7. How to Contribute
+```bash
+# Standard build (without Kubernetes support)
+cargo build --release --package honeybeepf
+
+# With Kubernetes pod metadata support (namespace, pod name in metrics)
+cargo build --release --features k8s --package honeybeepf
+```
+
+> **Note:** The `k8s` feature is **not** enabled by default. When deploying to Kubernetes, always build with `--features k8s` to include pod metadata resolution. The Docker build (`Dockerfile`) already includes this flag.
+
+---
+
+## 8. How to Contribute
 - **Issues:** Use GitHub Issues for bug reports or feature requests  
 - **PRs:** Contributions must open PRs  
 - **Guide:** Follow [`CONTRIBUTING.md`](CONTRIBUTING.md) for coding standards and
@@ -63,14 +76,14 @@ The agent can be deployed via Helm Charts in Kubernetes environments or as a sta
 
 ---
 
-## 8. Resources & Links
+## 9. Resources & Links
 - GitHub Repository: [github.com/jundorok/honeybeePF](https://github.com/jundorok/honeybeePF)
 - Helm Charts: [`charts/honeybeepf`](charts/honeybeepf)
 - Governance: [`GOVERNANCE.md`](GOVERNANCE.md)
 
 ---
 
-## 9. Governance & Community
+## 10. Governance & Community
 - **Code of Conduct:** See [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Report
 	incidents privately via [GitHub Issues](https://github.com/jundorok/honeybeePF/issues).
 - **Decision Process:** Maintainers document proposals via Issues/Discussions
@@ -80,7 +93,7 @@ The agent can be deployed via Helm Charts in Kubernetes environments or as a sta
 - **Membership:** Active contributors who review and merge work over two
 	consecutive releases are invited to join the maintainer group.
 
-## 10. Licensing
+## 11. Licensing
 - **Source Code:** MIT License (`LICENSE`).  
 - **Documentation:** MIT License unless otherwise noted within the document.  
 - **Third-Party Assets:** Refer to each component's directory for licensing
