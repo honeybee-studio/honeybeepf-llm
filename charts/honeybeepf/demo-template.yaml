@@ -1,0 +1,25 @@
+output:
+  otlp:
+    endpoint: "<REPLACE_ME: OTEL_COLLECTOR_ENDPOINT>"
+    collectorReleaseName: "<REPLACE_ME: OTEL_COLLECTOR_RELEASE_NAME>"
+    port: 4317
+
+builtinProbes:
+  filesystem:
+    file_access:
+      enabled: true
+  
+  llm:
+    enabled: true
+    providers: [] # Add your own providers here (e.g. Ollama, vLLM, private models).
+    # Example:
+    # providers:
+    #   - name: "ollama"
+    #     hosts: ["localhost", "ollama.internal"]
+    #     paths: ["/api/generate", "/api/chat"]
+    #     response:
+    #       usage_path: "usage"               # JSON path to usage object
+    #       prompt_tokens: "prompt_eval_count" # Field name for input tokens
+    #       completion_tokens: "eval_count"    # Field name for output tokens
+    #       model_path: "model"
+    #     request_extractor: "messages"       # How to extract prompt text (messages, contents, prompt)
