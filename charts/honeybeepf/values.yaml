@@ -68,18 +68,14 @@ customProbes:
   tracepoints: []
 
 securityContext:
-  privileged: true
   readOnlyRootFilesystem: false
   capabilities:
     drop:
       - ALL
     add:
-      - SYS_ADMIN
       - BPF
       - NET_ADMIN
-      - SYS_RESOURCE
-      - SYS_PTRACE
-      - DAC_OVERRIDE
+      - PERFMON
 
 resources:
   limits:
