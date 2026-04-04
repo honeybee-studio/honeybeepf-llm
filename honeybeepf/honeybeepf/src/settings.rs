@@ -53,7 +53,6 @@ pub struct BuiltinProbes {
     #[serde(default)]
     pub filesystem: FilesystemProbes,
     pub llm: Option<bool>,
-    pub gpu_usage: Option<bool>,
     pub process_lifecycle: Option<bool>,
     pub interval: Option<u32>,
 }
@@ -146,6 +145,7 @@ mod tests {
                     watched_paths: None,
                 },
                 llm: None,
+                process_lifecycle: None,
                 interval: None,
             },
             custom_probe_config: None,

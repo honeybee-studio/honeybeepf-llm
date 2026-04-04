@@ -205,14 +205,28 @@ pub fn record_active_probe(probe_name: &str, count: u64) {
     }
 }
 
-pub fn record_file_access_event(filename: &str, flags: &str, comm: &str, cgroup_id: u64) {
+pub fn record_file_access_event(
+    filename: &str,
+    flags: &str,
+    comm: &str,
+    cgroup_id: u64,
+    #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
+) {
     if let Some(m) = metrics() {
-        let attrs = [
+        #[allow(unused_mut)]
+        let mut attrs = vec![
             KeyValue::new("filename", filename.to_string()),
             KeyValue::new("flags", flags.to_string()),
             KeyValue::new("process", comm.to_string()),
             KeyValue::new("cgroup_id", cgroup_id as i64),
         ];
+
+        #[cfg(feature = "k8s")]
+        if let Some(pod) = pod_info {
+            attrs.push(KeyValue::new("target.namespace", pod.namespace.clone()));
+            attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
+        }
+
         m.file_access_events.add(1, &attrs);
     }
 }
@@ -274,6 +288,18 @@ pub fn shutdown_metrics() {
     }
 }
 
+pub fn record_process_exit(cause: &str, exit_code: u32, lifetime_secs: u64, cgroup_id: u64) {
+    if let Some(m) = metrics() {
+        let attrs = [
+            KeyValue::new("cause", cause.to_string()),
+            KeyValue::new("exit_code", exit_code.to_string()),
+            KeyValue::new("cgroup_id", cgroup_id.to_string()),
+        ];
+        m.process_exit_total.add(1, &attrs);
+        m.process_lifetime_seconds.record(lifetime_secs, &attrs);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,17 +340,5 @@ mod tests {
         let endpoint = get_otlp_endpoint();
         assert_eq!(endpoint, Some("http://collector:4317".to_string()));
         unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT") };
-    }
-}
-
-pub fn record_process_exit(cause: &str, exit_code: u32, lifetime_secs: u64, cgroup_id: u64) {
-    if let Some(m) = metrics() {
-        let attrs = [
-            KeyValue::new("cause", cause.to_string()),
-            KeyValue::new("exit_code", exit_code.to_string()),
-            KeyValue::new("cgroup_id", cgroup_id.to_string()),
-        ];
-        m.process_exit_total.add(1, &attrs);
-        m.process_lifetime_seconds.record(lifetime_secs, &attrs);
     }
 }

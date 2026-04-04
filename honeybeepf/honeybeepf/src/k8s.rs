@@ -95,7 +95,11 @@ impl PodResolver {
         let container_id = extract_container_id(pid);
 
         // Cache the result only on cgroup v2 where IDs are meaningful.
+        // Only cache if we actually found a container_id. If the process already
+        // exited (/proc/{pid} gone), we'd cache None and overwrite a valid
+        // pre-warmed entry.
         if self.cgroup_v2
+            && container_id.is_some()
             && let Ok(mut cache) = self.cgroup_cache.write()
         {
             cache.insert(cgroup_id, container_id.clone());
@@ -182,6 +186,18 @@ impl PodResolver {
                 });
             }
         } else {
+            // Pre-warm cgroup_id cache: resolve cgroup_id from cgroup path on disk
+            // so that short-lived processes (e.g. cat, curl) can be mapped to pods
+            // even after they exit.
+            if self.cgroup_v2 {
+                for cid in &container_ids {
+                    if let Some(cgroup_id) = lookup_cgroup_id_by_container(cid)
+                        && let Ok(mut cache) = self.cgroup_cache.write()
+                    {
+                        cache.insert(cgroup_id, Some(cid.clone()));
+                    }
+                }
+            }
             // Extract workload info from ownerReferences
             let (workload_kind, workload_name) = metadata
                 .owner_references
@@ -344,6 +360,46 @@ fn parse_container_id_from_cgroup_line(line: &str) -> Option<String> {
 /// Check if a string looks like a 64-char hex container ID.
 fn is_container_id(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Look up the cgroup_id (inode number) for a container by scanning cgroup paths.
+///
+/// On cgroup v2, each container has a directory under /sys/fs/cgroup whose inode
+/// number matches `bpf_get_current_cgroup_id()`. We find it by searching for the
+/// container ID in the cgroup filesystem.
+fn lookup_cgroup_id_by_container(short_container_id: &str) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+
+    fn walk_dir(dir: &std::path::Path, needle: &str) -> Option<u64> {
+        let entries = std::fs::read_dir(dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.contains(needle)
+                && let Ok(meta) = std::fs::metadata(&path)
+            {
+                return Some(meta.ino());
+            }
+            if let Some(id) = walk_dir(&path, needle) {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    // In Kubernetes, host root is mounted at /host. Try that first,
+    // falling back to /sys/fs/cgroup for non-containerized environments.
+    let host_path = std::path::Path::new("/host/sys/fs/cgroup");
+    let path = if host_path.exists() {
+        host_path
+    } else {
+        std::path::Path::new("/sys/fs/cgroup")
+    };
+    walk_dir(path, short_container_id)
 }
 
 #[cfg(test)]

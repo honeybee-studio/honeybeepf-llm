@@ -55,7 +55,7 @@ impl Probe for FileAccessProbe {
             info!("  - {}", path);
         }
 
-        self.spawn_event_handler(bpf)?;
+        self.spawn_event_handler(bpf, _resolver)?;
 
         telemetry::record_active_probe("file_access", 1);
         info!("FileAccessProbe attached successfully");
@@ -81,7 +81,8 @@ impl FileAccessProbe {
 
         Ok(())
     }
-    fn spawn_event_handler(&self, bpf: &mut Ebpf) -> Result<()> {
+
+    fn spawn_event_handler(&self, bpf: &mut Ebpf, _resolver: IdentityResolver) -> Result<()> {
         let ring_buf = RingBuf::try_from(
             bpf.take_map("FILE_ACCESS_EVENTS")
                 .context("Failed to find FILE_ACCESS_EVENTS map")?,
@@ -99,6 +100,10 @@ impl FileAccessProbe {
                             std::ptr::read_unaligned(item.as_ptr() as *const FileAccessEvent)
                         };
 
+                        #[cfg(feature = "k8s")]
+                        let pod_info =
+                            _resolver.resolve_pod(event.metadata.pid, event.metadata.cgroup_id);
+
                         let comm = std::str::from_utf8(&event.comm)
                             .unwrap_or("<invalid>")
                             .trim_matches(char::from(0));
@@ -109,6 +114,30 @@ impl FileAccessProbe {
 
                         let flags_str = format_open_flags(event.flags);
 
+                        #[cfg(feature = "k8s")]
+                        if let Some(pod) = pod_info.as_ref() {
+                            info!(
+                                "FILE_ACCESS pid={} comm={} file={} flags={} cgroup={} namespace={} pod={}",
+                                event.metadata.pid,
+                                comm,
+                                filename,
+                                flags_str,
+                                event.metadata.cgroup_id,
+                                pod.namespace,
+                                pod.pod_name,
+                            );
+                        } else {
+                            info!(
+                                "FILE_ACCESS pid={} comm={} file={} flags={} cgroup={}",
+                                event.metadata.pid,
+                                comm,
+                                filename,
+                                flags_str,
+                                event.metadata.cgroup_id,
+                            );
+                        }
+
+                        #[cfg(not(feature = "k8s"))]
                         info!(
                             "FILE_ACCESS pid={} comm={} file={} flags={} cgroup={}",
                             event.metadata.pid, comm, filename, flags_str, event.metadata.cgroup_id,
@@ -119,6 +148,8 @@ impl FileAccessProbe {
                             &flags_str,
                             comm,
                             event.metadata.cgroup_id,
+                            #[cfg(feature = "k8s")]
+                            pod_info.as_ref(),
                         );
                     }
                 }
