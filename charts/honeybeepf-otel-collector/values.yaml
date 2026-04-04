@@ -1,0 +1,123 @@
+opentelemetry-collector:
+  mode: deployment
+  replicaCount: 1  
+  image:
+    repository: otel/opentelemetry-collector-contrib
+    tag: "0.143.0"
+  ports:
+    otlp:
+      enabled: true
+      containerPort: 4317
+      servicePort: 4317
+      protocol: TCP
+    otlp-http:
+      enabled: true
+      containerPort: 4318
+      servicePort: 4318
+      protocol: TCP
+    prometheus:
+      enabled: true
+      containerPort: 8889
+      servicePort: 8889
+      protocol: TCP
+    jaeger-compact:
+      enabled: false
+    jaeger-thrift:
+      enabled: false
+    jaeger-grpc:
+      enabled: false
+    zipkin:
+      enabled: false
+    metrics:
+      enabled: false  
+  presets:
+    logsCollection:
+      enabled: false
+    kubernetesAttributes:
+      enabled: false
+    kubeletMetrics:
+      enabled: false
+    kubernetesEvents:
+      enabled: false
+    clusterMetrics:
+      enabled: false
+    hostMetrics:
+      enabled: false
+
+  # CRITICAL: Use complete config replacement, not merge
+  # Set unused receivers to null to prevent Helm from merging defaults
+  config:
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+      jaeger: null
+      zipkin: null
+      prometheus: null
+
+    processors:
+      batch:
+        timeout: 10s
+        send_batch_size: 1024
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 409
+        spike_limit_mib: 102
+
+    exporters:
+      prometheus:
+        endpoint: 0.0.0.0:8889
+        namespace: honeybeepf
+        const_labels:
+          collector: otel
+        resource_to_telemetry_conversion:
+          enabled: true
+        send_timestamps: true
+        metric_expiration: 5m
+      debug:
+        verbosity: basic
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
+    service:
+      extensions: [health_check]
+      telemetry:
+        logs:
+          level: info
+        metrics:
+          level: none  
+      pipelines:
+        traces: null
+        logs: null
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [prometheus]
+
+  service:
+    enabled: true
+    type: ClusterIP
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "8889"
+      prometheus.io/path: "/metrics"
+
+  # ServiceMonitor is disabled because we use annotation-based scraping defined above.
+  serviceMonitor:
+    enabled: false
+
+  podMonitor:
+    enabled: false
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi

@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 env:
-  REGISTRY: ${{ secrets.REGISTRY_IP }}:${{ secrets.REGISTRY_PORT }}
-  IMAGE_NAME: honeybeepf-studio/honeybeepf-llm
+  REGISTRY: docker.io
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/honeybeepf
 
 jobs:
   lint:
@@ -27,11 +27,11 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: honeybeepf-llm
+          workspaces: honeybeepf
           cache-on-failure: true
 
       - name: Check formatting
-        working-directory: .
+        working-directory: honeybeepf
         run: cargo fmt --all -- --check
 
   build-and-test:
@@ -66,18 +66,16 @@ jobs:
         run: cargo install bpf-linker --version 0.9.15 --locked
 
       - name: Build eBPF
-        working-directory: ./honeybeepf-llm-ebpf
+        working-directory: ./honeybeepf/honeybeepf-ebpf
         run: cargo build --release --target=bpfel-unknown-none -Z build-std=core
 
       - name: Build userspace
-        working-directory: ./honeybeepf-llm
+        working-directory: ./honeybeepf/honeybeepf
         run: cargo build --release
 
   docker:
     name: Build and publish Docker image
     needs: build-and-test
-    # Only push on main branch merges, not on PRs
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -85,52 +83,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Connect to Tailscale
-        uses: tailscale/github-action@v2
-        with:
-          oauth-client-id: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TAILSCALE_OAUTH_SECRET }}
-          tags: tag:ci
-          args: --accept-dns --accept-routes
-
       - name: Set up QEMU (multi-arch)
         uses: docker/setup-qemu-action@v3
 
-      - name: Configure Docker for insecure registry
-        run: |
-          # Allow plain-HTTP push for dockerd (login step)
-          sudo mkdir -p /etc/docker
-          echo '{"insecure-registries":["${{ secrets.REGISTRY_IP }}:${{ secrets.REGISTRY_PORT }}"]}' \
-            | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          # Run buildkitd on the HOST network so it can reach the Tailscale tunnel
-          driver-opts: network=host
-          buildkitd-config-inline: |
-            [registry."${{ secrets.REGISTRY_IP }}:${{ secrets.REGISTRY_PORT }}"]
-              http = true
-              insecure = true
 
-      - name: Log in to private registry
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.REGISTRY_USERNAME }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract Docker metadata (tags, labels)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # latest tag on every main push
-            type=raw,value=latest
-            # short SHA tag for traceability
-            type=sha
+            # Tag PR builds using PR number only (e.g., pr-123)
+            type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ github.event_name == 'pull_request' }}
+            # Publish latest only on main
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            # Also publish short SHA tag on main merges
+            type=sha,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -147,5 +124,5 @@ jobs:
 
       - name: Summary
         run: |
-          echo "Images pushed to ${{ env.REGISTRY }}:" >> $GITHUB_STEP_SUMMARY
+          echo "Images pushed:" >> $GITHUB_STEP_SUMMARY
           echo "${{ steps.meta.outputs.tags }}" | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY

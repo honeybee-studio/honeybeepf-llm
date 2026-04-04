@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "honeybeepf",
+    "honeybeepf-common",
+    "honeybeepf-ebpf",
+    "xtask",
+]
+default-members = ["honeybeepf", "honeybeepf-common"]
+
+[workspace.package]
+license = "MIT OR Apache-2.0"
+edition = "2024"
+
+# [workspace.dependencies]
+# aya = { git = "https://github.com/aya-rs/aya", default-features = false }
+# aya-build = { git = "https://github.com/aya-rs/aya", default-features = false }
+# aya-ebpf = { git = "https://github.com/aya-rs/aya", default-features = false }
+# aya-log = { git = "https://github.com/aya-rs/aya", default-features = false }
+# aya-log-ebpf = { git = "https://github.com/aya-rs/aya", default-features = false }
+[workspace.dependencies]
+aya = "0.13"
+aya-ebpf = "0.1.0"
+aya-log = "0.2"
+aya-log-ebpf = "0.1.0"
+aya-build = "0.1"
+aya-log-common = "0.1.15"
+
+anyhow = { version = "1", default-features = false }
+cargo_metadata = { version = "0.23.0", default-features = false }
+# `std` feature is currently required to build `clap`.
+#
+# See https://github.com/clap-rs/clap/blob/61f5ee5/clap_builder/src/lib.rs#L15.
+clap = { version = "4.5.20", default-features = false, features = ["std"] }
+env_logger = { version = "0.11.5", default-features = false }
+libc = { version = "0.2.159", default-features = false }
+log = { version = "0.4.22", default-features = false }
+tokio = { version = "1.40.0", default-features = false }
+which = { version = "6.0.0", default-features = false }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release.package.honeybeepf-ebpf]
+debug = 2
+codegen-units = 1

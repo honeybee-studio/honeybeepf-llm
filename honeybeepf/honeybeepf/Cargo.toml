@@ -1,0 +1,66 @@
+[package]
+name = "honeybeepf"
+version = "0.1.0"
+edition.workspace = true
+
+license.workspace = true
+
+[features]
+default = []
+k8s = ["dep:kube", "dep:k8s-openapi", "dep:futures"]
+
+[dependencies]
+honeybeepf-common = { path = "../honeybeepf-common", features = ["user"] }
+
+anyhow = { workspace = true, default-features = true }
+aya = { workspace = true }
+aya-log = { workspace = true }
+chrono = "0.4"
+env_logger = { workspace = true }
+libc = { workspace = true }
+log = { workspace = true }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "net",
+    "signal",
+    "sync",
+    "time",
+] }
+clap = { workspace = true, features = ["derive", "env"] }
+config = { version = "0.14", features = ["yaml"] }
+dotenvy = "0.15"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bytes = "1"
+httparse = "1.10"
+once_cell = "1.21"
+flate2 = "1.1"
+procfs = "0.18"
+regex = "1"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# OpenTelemetry dependencies for metrics export
+opentelemetry = { version = "0.27", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "metrics"] }
+opentelemetry-otlp = { version = "0.27", features = ["metrics", "grpc-tonic"] }
+
+# Kubernetes pod resolution (optional, behind "k8s" feature)
+kube = { version = "0.98", features = ["runtime", "client", "derive"], optional = true }
+k8s-openapi = { version = "0.24", features = ["v1_32"], optional = true }
+futures = { version = "0.3", optional = true }
+
+[dev-dependencies]
+serial_test = "3.2.0"
+
+[build-dependencies]
+anyhow = { workspace = true }
+aya-build = { workspace = true }
+cargo_metadata = { workspace = true }
+honeybeepf-ebpf = { path = "../honeybeepf-ebpf" }
+
+[[bin]]
+name = "honeybeepf"
+path = "src/main.rs"

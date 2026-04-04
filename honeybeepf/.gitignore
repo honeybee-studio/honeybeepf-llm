@@ -42,17 +42,6 @@ terraform.rc
 .idea/
 .vscode/
 
-# Test/temp files
-*.txt
-*.log
-*.json
-*.tar
-check-status.ps1
-install.bat
+.envdist/
 
-# Helm dependencies (auto-downloaded)
-charts/*/charts/*.tgz
-charts/**/Chart.lock
-
-# Rust build artifacts
-honeybeepf/target/
+dist/

@@ -1,0 +1,15 @@
+apiVersion: v2
+name: honeybeepf
+description: eBPF-based observability agent for kernel-level monitoring
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - ebpf
+  - observability
+  - monitoring
+  - rust
+  - aya
+home: https://github.com/jundorok/honeybeepf
+
+# maintainers (hope to add more in the future)

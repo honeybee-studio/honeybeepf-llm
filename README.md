@@ -1,196 +1,197 @@
-# honeybeepf-llm
+# eBPF Observability Platform
 
-An eBPF-based LLM observability agent written in Rust. It intercepts TLS traffic at the kernel level — without requiring any code changes or proxies — and extracts LLM API usage metrics (model name, token counts, latency) for any process using OpenSSL on the host.
+**Lightweight eBPF observability for AI workloads**
 
-## How It Works
+---
 
-`honeybeepf-llm` uses Linux uprobes to attach to `SSL_read` and `SSL_write` in OpenSSL, capturing plaintext LLM API traffic after TLS decryption. The captured data is processed in user space to identify LLM API calls and extract usage metrics.
+# About
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Kernel Space                                                │
-│                                                             │
-│   uprobes (SSL_read)          uprobes (SSL_write)           │
-│       │  Capture (buf, len)       │  Capture (buf, len)     │
-│       └──────────────────┬────────┘                        │
-│                          ▼                                  │
-│                  SSL_EVENTS RingBuf                         │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│ User Space                                                  │
-│                                                             │
-│              RingBufHandler (Consumer Thread)               │
-│                     │ Consume Events                        │
-│                     ▼                                       │
-│              StreamMap (Lookup PID+FD)                      │
-│                     │ Get/Create                            │
-│                     ▼                                       │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │                  StreamProcessor                     │   │
-│  │                                                      │   │
-│  │  WriteBuf ──► Protocol Detection ──► ProcessingReq   │   │
-│  │  (User       HTTP/1.1 or HTTP/2     (Extract Prompt) │   │
-│  │  Request)                               │            │   │
-│  │                                   Count Tokens       │   │
-│  │  ReadBuf ◄─────────────────────── ProcessingResp     │   │
-│  │  (LLM Resp,  Accumulate until              │         │   │
-│  │  streaming)  response complete             ▼         │   │
-│  │                                    Dechunk & Gunzip  │   │
-│  │                                         │            │   │
-│  │                                    Parse Usage JSON  │   │
-│  │                                    (Extract Metrics) │   │
-│  │                                         │            │   │
-│  │                                      UsageInfo       │   │
-│  └─────────────────────────────────────────┼────────────┘   │
-│                                            ▼                │
-│                                          OTEL               │
-└─────────────────────────────────────────────────────────────┘
-```
+## 1. Project Overview
+A lightweight, eBPF-based observability platform designed to identify cost and performance bottlenecks in AI workloads by selectively collecting essential data such as LLM token usage and system metrics.
 
-### Key Components
+## 2. Background / Introduction
+Traditional observability tools often introduce significant operational overhead due to excessive resource consumption, required application code changes, and complex configuration processes.  
 
-| Component | Description |
-|---|---|
-| **uprobes** | eBPF uprobes on `SSL_read` / `SSL_write` / `SSL_do_handshake` to capture TLS plaintext buffers |
-| **SSL_EVENTS RingBuf** | Kernel ring buffer for efficient, low-overhead transfer of captured events to user space |
-| **RingBufHandler** | Consumer thread that processes incoming `LlmEvent`s from the ring buffer |
-| **StreamMap** | `HashMap<(PID, FD), StreamProcessor>` — maintains per-connection state |
-| **StreamProcessor** | State machine per connection: `Detecting → ProcessingRequest → ProcessingResponse → Finished` |
-| **Protocol Detection** | Detects HTTP/1.1 and HTTP/2 framing from the write buffer |
-| **Dechunk & Gunzip** | Handles chunked transfer encoding (SSE streaming) and gzip-compressed responses |
-| **Parse Usage JSON** | Extracts `prompt_tokens`, `completion_tokens`, `model` from provider-specific JSON payloads |
-| **OTEL** | Exports metrics via OpenTelemetry OTLP to any compatible collector |
+To address these limitations, our platform is built around a Rust-based eBPF agent that collects only essential data at the kernel level without any code modifications.  
 
-### Dynamic SSL Discovery
+The agent can be deployed via Helm Charts in Kubernetes environments or as a standalone binary in traditional AI data centers, enabling cost reduction and performance optimization across heterogeneous infrastructures.
 
-At startup, `honeybeepf-llm` scans all running processes for loaded OpenSSL / libssl libraries and attaches uprobes automatically. A `sched_process_exec` tracepoint watches for new processes and triggers re-discovery, so probes are attached to newly launched processes without restarting the agent.
+## 3. Core Values
+- We practice selective observability—collecting only decision-driving data directly from the kernel.  
+- Minimal overhead by design  
+- Infrastructure-agnostic: works on Kubernetes and traditional AI data centers  
+- Built for AI efficiency: enabling cheaper, faster, and more efficient AI workloads  
 
-### Supported LLM Providers
+---
 
-Providers are configured via `providers.yaml`. Any HTTP-based LLM API that returns a standard `usage` JSON field is supported. Built-in support includes OpenAI-compatible APIs (OpenAI, Anthropic, Google, Fireworks, etc.).
+# Getting Started
 
-## Quick Start
+## 4. Prerequisites
 
-### Pre-built Binary
+| Item | Minimum Requirement |
+|------|-------------------|
+| Kubernetes | v1.23+ |
+| Helm | v3.0+ |
+| Node CPU | 200m (request) / 1000m (limit) |
+| Node Memory | 512Mi (request) / 1Gi (limit) |
+| Kernel | Linux 5.8+ (eBPF support required) |
+| Capabilities | CAP_BPF, CAP_NET_ADMIN, CAP_PERFMON |
 
-Download from [GitHub Releases](https://github.com/honeybee-studio/honeybeepf-llm/releases):
+**Required tools:**
+- `kubectl` — cluster access and verification
+- `helm` — chart installation
+- `git` — source cloning
+
+## 5. Installation (under 5 minutes)
+
+### 1) Add Helm repositories and update dependencies
 
 ```bash
-curl -LO https://github.com/honeybee-studio/honeybeepf-llm/releases/latest/download/honeybeepf-llm-linux-x86_64.tar.gz
-tar xzf honeybeepf-llm-linux-x86_64.tar.gz
-cd honeybeepf-llm-x86_64
-sudo ./install.sh
-sudo honeybeepf-llm --verbose
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+helm repo update
 ```
 
-### Build from Source
+### 2) Clone and install charts
 
 ```bash
-# Build release
-cargo xtask build --release
+git clone https://github.com/jundorok/honeybeePF.git
+cd honeybeePF
 
-# Deploy to remote server
-cargo xtask deploy --host user@server --release --restart
+# Create namespace
+kubectl create namespace <your-namespace>
 
-# Create distribution package
-cargo xtask package --output dist
+# 1. Install Prometheus
+helm dependency build ./charts/honeybeepf-prometheus
+helm install honeybeepf-prometheus ./charts/honeybeepf-prometheus -n <your-namespace>
+
+# 2. Install OTel Collector
+helm dependency build ./charts/honeybeepf-otel-collector
+helm install honeybeepf-otel-collector ./charts/honeybeepf-otel-collector -n <your-namespace>
+
+# 3. Install HoneybeePF agent (edit demo-template.yaml before running)
+helm install honeybeepf ./charts/honeybeepf -n <your-namespace> \
+  -f ./charts/honeybeepf/values.yaml \
+  -f ./charts/honeybeepf/demo-template.yaml
 ```
 
-See [Binary Deployment Guide](docs/BINARY_DEPLOYMENT.md) for detailed instructions.
+> **Note:** Before installing, edit `charts/honeybeepf/demo-template.yaml` and replace `<REPLACE_ME: ...>` placeholders with your actual environment values.
 
-## Prerequisites
-
-- Rust toolchains:
-  - Stable: `rustup toolchain install stable`
-  - Nightly (for eBPF builds): `rustup toolchain install nightly --component rust-src`
-- `bpf-linker`: `cargo install bpf-linker` (use `--no-default-features` on macOS)
-- Linux kernel with eBPF and uprobe support (kernel ≥ 5.8 recommended)
-
-## Build & Run (macOS via Lima VM)
-
-eBPF programs require a Linux kernel. On macOS, use a lightweight VM via Lima.
-
-### 1) Create a VM and install packages
+### 3) Verify installation
 
 ```bash
-brew install lima
-limactl start --name ebpf-dev --vm-type=vz --mount-writable --cpus=5 --memory=8 --disk=20
-lima
-
-echo 'export CARGO_TARGET_DIR=~/cargo-target' >> ~/.bashrc
-source ~/.bashrc
-sudo apt-get update && sudo apt-get install -y \
-    clang llvm pkg-config build-essential libelf-dev \
-    linux-tools-common linux-tools-generic \
-    linux-headers-$(uname -r) bpftool
-
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-rustup toolchain install nightly
-rustup component add rust-src --toolchain nightly
-rustup default nightly
-cargo install bpf-linker
+kubectl get pods -n <your-namespace>
 ```
 
-### 2) Build & run
+If all Pods show `Running` status, the installation is successful:
+
+```
+NAME                                          READY   STATUS    RESTARTS   AGE
+honeybeepf-XXXXX                              1/1     Running   0          1m
+honeybeepf-otel-collector-XXXXX               1/1     Running   0          2m
+honeybeepf-prometheus-server-XXXXX            2/2     Running   0          3m
+```
+
+### 4) Uninstall
 
 ```bash
-cd /<your-repo>/honeybeepf-llm/honeybeepf-llm
-cargo build --release
-sudo $(which cargo) run -- --verbose
+helm uninstall honeybeepf -n <your-namespace>
+helm uninstall honeybeepf-otel-collector -n <your-namespace>
+helm uninstall honeybeepf-prometheus -n <your-namespace>
+kubectl delete namespace <your-namespace>
 ```
 
-Manage the VM from macOS:
+## 6. First Scenario: Verify Probe Operation (under 10 minutes)
+
+Once installed, the LLM probe and file access probe are already enabled via `demo-template.yaml`.
+
+> **LLM Probe:** OpenAI, Anthropic, and Gemini are supported as built-in providers by default. No additional configuration is needed for these providers. If you use private or self-hosted LLMs (e.g., Ollama, vLLM), add them to the `providers` field in `demo-template.yaml`. See [`charts/honeybeepf/values.yaml`](charts/honeybeepf/values.yaml) for the full configuration example.
+
+### Step 1: Check agent logs
 
 ```bash
-limactl stop ebpf-dev      # stop
-limactl start ebpf-dev     # restart
-limactl delete ebpf-dev    # delete
+kubectl logs -n <your-namespace> -l app.kubernetes.io/name=honeybeepf --tail=50
 ```
 
-## Build & Run (native Linux)
+You should see logs indicating the LLM probe and file access probe are active.
+
+### Step 2: Check collected metrics
 
 ```bash
-cargo build
-sudo cargo run --release -- --verbose
+# Port-forward Prometheus
+kubectl port-forward -n <your-namespace> svc/honeybeepf-prometheus-server 9090:80 &
+
+# Open http://localhost:9090 in your browser
 ```
 
-The build script compiles eBPF artifacts and bundles them into the binary automatically.
+If metrics appear in the Prometheus UI, data collection is working correctly.
 
-## Configuration
+---
 
-Configure via environment variables or a `.env` file:
+# Development
+
+## 7. Building
 
 ```bash
-# Enable LLM probing
-BUILTIN_PROBES__LLM=true
+# Standard build (without Kubernetes support)
+cargo build --release --package honeybeepf
 
-# OpenTelemetry OTLP endpoint for metrics export
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+# With Kubernetes pod metadata support (namespace, pod name in metrics)
+cargo build --release --features k8s --package honeybeepf
 ```
 
-See `example.env` for all available options.
+> **Note:** The `k8s` feature is **not** enabled by default. When deploying to Kubernetes, always build with `--features k8s` to include pod metadata resolution. The Docker build (`Dockerfile`) already includes this flag.
 
-## Troubleshooting
+## 8. How to Contribute
+- **Issues:** Use GitHub Issues for bug reports or feature requests  
+- **PRs:** Contributions must open PRs  
+- **Guide:** Follow [`CONTRIBUTING.md`](CONTRIBUTING.md) for coding standards and
+	review expectations  
 
-- **Permission errors**: use `sudo` or grant the binary `CAP_SYS_ADMIN`, `CAP_BPF`, `CAP_PERFMON`.
-- **Missing kernel headers**: install `linux-headers-$(uname -r)` on the host/VM.
-- **No targets found**: ensure the target process loads OpenSSL (check with `ldd <binary> | grep ssl`).
-- **macOS path mounts**: verify the project path is mounted in Lima (`limactl list`).
+---
 
-## License
+# Project Info
 
-With the exception of eBPF code, honeybeepf-llm is distributed under either the [MIT license] or the [Apache License] (version 2.0), at your option.
+## 9. Team
 
-Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this crate by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
+| Name   | ID | Role       | SNS | Responsibilities                 |
+|--------|----|------------|-----|---------------------------------|
+| Jundorok |    | Team Leader | TBU | Roadmap & Feature Development   |
+| pmj-chosim |    | Core Dev   | TBU | CI/CD & Observability           |
+| sammiee5311 |    | Core Dev   | TBU | Feature Development             |
+| vanillaturtlechips |    | Core Dev   | TBU | CI/CD & Observability           |
 
-### eBPF licensing
+## 10. Tech Stack
+- **Languages:** eBPF, Kernel, Rust  
+- **Infrastructure:** Kubernetes, Helm, OpenTelemetry, Prometheus, Grafana  
+- **Communication:** Discord, GitHub Discussions  
 
-All eBPF code is distributed under either the terms of the [GNU General Public License, Version 2] or the [MIT license], at your option.
+## 11. Roadmap
+- **Phase 1:** CI/CD and Observability Setup  
+- **Phase 2:** Core Module Development  
+- **Phase 3:** Monitoring and Testing  
+- **Phase 4:** Release & Operator Integrations  
 
-Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project by you, as defined in the GPL-2 license, shall be dual licensed as above, without any additional terms or conditions.
+> We track roadmap execution via GitHub Projects and release multi-architecture
+> container images using `publish.sh` once CI pipelines pass.
 
-[Apache license]: LICENSE-APACHE
-[MIT license]: LICENSE-MIT
-[GNU General Public License, Version 2]: LICENSE-GPL2
+## 12. Resources & Links
+- GitHub Repository: [github.com/jundorok/honeybeePF](https://github.com/jundorok/honeybeePF)
+- Helm Charts: [`charts/honeybeepf`](charts/honeybeepf)
+- Governance: [`GOVERNANCE.md`](GOVERNANCE.md)
+
+## 13. Governance & Community
+- **Code of Conduct:** See [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Report
+	incidents privately via [GitHub Issues](https://github.com/jundorok/honeybeePF/issues).
+- **Decision Process:** Maintainers document proposals via Issues/Discussions
+	with a 72-hour community review window before landing major changes.  
+- **Meetings:** We host quarterly community syncs announced in GitHub
+	Discussions. Notes are published alongside meeting issues.  
+- **Membership:** Active contributors who review and merge work over two
+	consecutive releases are invited to join the maintainer group.
+
+## 14. Licensing
+- **Source Code:** MIT License (`LICENSE`).  
+- **Documentation:** MIT License unless otherwise noted within the document.  
+- **Third-Party Assets:** Refer to each component's directory for licensing
+	notices.

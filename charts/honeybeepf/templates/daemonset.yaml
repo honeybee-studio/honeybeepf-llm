@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "honeybeepf.fullname" . }}
+  labels:
+    {{- include "honeybeepf.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "honeybeepf.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        {{- include "honeybeepf.selectorLabels" . | nindent 8 }}
+    spec:
+      # Support for private registry image pull secrets
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      serviceAccountName: {{ include "honeybeepf.serviceAccountName" . }}
+      hostPID: true 
+      hostNetwork: true
+      # Required for cluster DNS resolution with hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+            {{- if .Values.debug }}
+            seLinuxOptions:
+              type: "spc_t"
+            {{- end }}
+
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "cat /proc/self/status"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "cat /proc/self/status"]
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          env:
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: K8S_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.namespace={{ .Release.Namespace }},deployment.environment={{ .Release.Namespace }},k8s.node.name=$(K8S_NODE_NAME),k8s.pod.name=$(K8S_POD_NAME)"
+
+              
+          envFrom:
+            - configMapRef:
+                name: {{ include "honeybeepf.fullname" . }}
+
+          volumeMounts:
+            - mountPath: /sys/fs/bpf
+              name: bpf-fs
+            - mountPath: /sys/kernel/tracing
+              name: tracefs
+              readOnly: false
+            - mountPath: /sys/kernel/debug
+              name: debugfs
+              readOnly: false
+            # Host filesystem for uprobe targets (SSL libraries)
+            - mountPath: /host
+              name: host-root
+              readOnly: true
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: bpf-fs
+          hostPath:
+            path: /sys/fs/bpf
+            type: Directory
+        - name: tracefs
+          hostPath:
+            path: /sys/kernel/tracing
+            type: Directory
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug
+            type: Directory
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory

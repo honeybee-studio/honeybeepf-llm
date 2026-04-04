@@ -1,0 +1,93 @@
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: "docker.io/dorokrok/honeybeepf"
+  tag: "latest"
+  pullPolicy: Always
+imagePullSecrets: [] 
+podAnnotations: {}
+
+output:
+  otlp:
+    endpoint: ""
+    collectorReleaseName: "honeybeepf-otel-collector"
+    port: 4317
+    protocol: "grpc"
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+rustLog: "info"
+
+builtinProbes:
+  filesystem:
+    file_access:
+      enabled: false
+      watched_paths:
+        # SSH keys - common user paths
+        - "/root/.ssh/authorized_keys"
+        - "/root/.ssh/id_rsa"
+        - "/root/.ssh/id_ed25519"
+        - "/home/ubuntu/.ssh/authorized_keys"
+        - "/home/ubuntu/.ssh/id_rsa"
+        - "/home/ubuntu/.ssh/id_ed25519"
+        - "/home/root/.ssh/authorized_keys"
+        - "/home/root/.ssh/id_rsa"
+        - "/home/root/.ssh/id_ed25519"
+
+  llm:
+    enabled: false
+    # Custom providers config (optional). Built-in: OpenAI, Anthropic, Gemini
+    # Add your own providers here (e.g. Ollama, vLLM, private models).
+    providers: []
+    # Example:
+    # providers:
+    #   - name: "ollama"
+    #     hosts: ["localhost", "ollama.internal"]
+    #     paths: ["/api/generate", "/api/chat"]
+    #     response:
+    #       usage_path: "usage"               # JSON path to usage object
+    #       prompt_tokens: "prompt_eval_count" # Field name for input tokens
+    #       completion_tokens: "eval_count"    # Field name for output tokens
+    #       model_path: "model"
+    #     request_extractor: "messages"       # How to extract prompt text (messages, contents, prompt)
+  process_lifecycle:
+    enabled: true
+
+  interval: 1000
+
+  process_lifecycle:
+    enabled: false
+
+customProbes:
+  kprobes: []
+  uprobes: []
+  tracepoints: []
+
+securityContext:
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+    add:
+      - BPF
+      - NET_ADMIN
+      - PERFMON
+      - SYS_ADMIN
+
+resources:
+  limits:
+    cpu: "1000m"
+    memory: "1Gi"
+  requests:
+    cpu: "200m"
+    memory: "512Mi"
+
+nodeSelector:
+  kubernetes.io/os: linux
+tolerations: []
+
+debug: false
