@@ -76,6 +76,7 @@ securityContext:
       - BPF
       - NET_ADMIN
       - PERFMON
+      - SYS_ADMIN
 
 resources:
   limits:
