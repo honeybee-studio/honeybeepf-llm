@@ -128,3 +128,24 @@ jobs:
         run: |
           echo "Images pushed:" >> $GITHUB_STEP_SUMMARY
           echo "${{ steps.meta.outputs.tags }}" | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY
+
+  helm:
+    name: Publish Helm charts
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Package and push Helm chart
+        run: |
+          helm package charts/honeybeepf-llm
+          helm push honeybeepf-llm-*.tgz oci://ghcr.io/honeybee-studio
+          echo "- Pushed honeybeepf-llm" >> $GITHUB_STEP_SUMMARY
