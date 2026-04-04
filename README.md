@@ -55,27 +55,27 @@ helm repo update
 ### 2) Clone and install charts
 
 ```bash
-git clone https://github.com/jundorok/honeybeePF.git
-cd honeybeePF
+git clone https://github.com/honeybee-studio/honeybeepf-llm.git
+cd honeybeepf-llm
 
 # Create namespace
 kubectl create namespace <your-namespace>
 
 # 1. Install Prometheus
-helm dependency build ./charts/honeybeepf-prometheus
-helm install honeybeepf-prometheus ./charts/honeybeepf-prometheus -n <your-namespace>
+helm dependency build ./charts/honeybeepf-llm-prometheus
+helm install honeybeepf-llm-prometheus ./charts/honeybeepf-llm-prometheus -n <your-namespace>
 
 # 2. Install OTel Collector
-helm dependency build ./charts/honeybeepf-otel-collector
-helm install honeybeepf-otel-collector ./charts/honeybeepf-otel-collector -n <your-namespace>
+helm dependency build ./charts/honeybeepf-llm-otel-collector
+helm install honeybeepf-llm-otel-collector ./charts/honeybeepf-llm-otel-collector -n <your-namespace>
 
 # 3. Install HoneybeePF agent (edit demo-template.yaml before running)
-helm install honeybeepf ./charts/honeybeepf -n <your-namespace> \
-  -f ./charts/honeybeepf/values.yaml \
-  -f ./charts/honeybeepf/demo-template.yaml
+helm install honeybeepf-llm ./charts/honeybeepf-llm -n <your-namespace> \
+  -f ./charts/honeybeepf-llm/values.yaml \
+  -f ./charts/honeybeepf-llm/demo-template.yaml
 ```
 
-> **Note:** Before installing, edit `charts/honeybeepf/demo-template.yaml` and replace `<REPLACE_ME: ...>` placeholders with your actual environment values.
+> **Note:** Before installing, edit `charts/honeybeepf-llm/demo-template.yaml` and replace `<REPLACE_ME: ...>` placeholders with your actual environment values.
 
 ### 3) Verify installation
 
@@ -87,17 +87,17 @@ If all Pods show `Running` status, the installation is successful:
 
 ```
 NAME                                          READY   STATUS    RESTARTS   AGE
-honeybeepf-XXXXX                              1/1     Running   0          1m
-honeybeepf-otel-collector-XXXXX               1/1     Running   0          2m
-honeybeepf-prometheus-server-XXXXX            2/2     Running   0          3m
+honeybeepf-llm-XXXXX                              1/1     Running   0          1m
+honeybeepf-llm-otel-collector-XXXXX               1/1     Running   0          2m
+honeybeepf-llm-prometheus-server-XXXXX            2/2     Running   0          3m
 ```
 
 ### 4) Uninstall
 
 ```bash
-helm uninstall honeybeepf -n <your-namespace>
-helm uninstall honeybeepf-otel-collector -n <your-namespace>
-helm uninstall honeybeepf-prometheus -n <your-namespace>
+helm uninstall honeybeepf-llm -n <your-namespace>
+helm uninstall honeybeepf-llm-otel-collector -n <your-namespace>
+helm uninstall honeybeepf-llm-prometheus -n <your-namespace>
 kubectl delete namespace <your-namespace>
 ```
 
@@ -105,12 +105,12 @@ kubectl delete namespace <your-namespace>
 
 Once installed, the LLM probe and file access probe are already enabled via `demo-template.yaml`.
 
-> **LLM Probe:** OpenAI, Anthropic, and Gemini are supported as built-in providers by default. No additional configuration is needed for these providers. If you use private or self-hosted LLMs (e.g., Ollama, vLLM), add them to the `providers` field in `demo-template.yaml`. See [`charts/honeybeepf/values.yaml`](charts/honeybeepf/values.yaml) for the full configuration example.
+> **LLM Probe:** OpenAI, Anthropic, and Gemini are supported as built-in providers by default. No additional configuration is needed for these providers. If you use private or self-hosted LLMs (e.g., Ollama, vLLM), add them to the `providers` field in `demo-template.yaml`. See [`charts/honeybeepf-llm/values.yaml`](charts/honeybeepf-llm/values.yaml) for the full configuration example.
 
 ### Step 1: Check agent logs
 
 ```bash
-kubectl logs -n <your-namespace> -l app.kubernetes.io/name=honeybeepf --tail=50
+kubectl logs -n <your-namespace> -l app.kubernetes.io/name=honeybeepf-llm --tail=50
 ```
 
 You should see logs indicating the LLM probe and file access probe are active.
@@ -119,7 +119,7 @@ You should see logs indicating the LLM probe and file access probe are active.
 
 ```bash
 # Port-forward Prometheus
-kubectl port-forward -n <your-namespace> svc/honeybeepf-prometheus-server 9090:80 &
+kubectl port-forward -n <your-namespace> svc/honeybeepf-llm-prometheus-server 9090:80 &
 
 # Open http://localhost:9090 in your browser
 ```
@@ -134,10 +134,10 @@ If metrics appear in the Prometheus UI, data collection is working correctly.
 
 ```bash
 # Standard build (without Kubernetes support)
-cargo build --release --package honeybeepf
+cargo build --release --package honeybeepf-llm
 
 # With Kubernetes pod metadata support (namespace, pod name in metrics)
-cargo build --release --features k8s --package honeybeepf
+cargo build --release --features k8s --package honeybeepf-llm
 ```
 
 > **Note:** The `k8s` feature is **not** enabled by default. When deploying to Kubernetes, always build with `--features k8s` to include pod metadata resolution. The Docker build (`Dockerfile`) already includes this flag.
@@ -176,13 +176,13 @@ cargo build --release --features k8s --package honeybeepf
 > container images using `publish.sh` once CI pipelines pass.
 
 ## 12. Resources & Links
-- GitHub Repository: [github.com/jundorok/honeybeePF](https://github.com/jundorok/honeybeePF)
-- Helm Charts: [`charts/honeybeepf`](charts/honeybeepf)
+- GitHub Repository: [github.com/honeybee-studio/honeybeepf-llm](https://github.com/honeybee-studio/honeybeepf-llm)
+- Helm Charts: [`charts/honeybeepf-llm`](charts/honeybeepf-llm)
 - Governance: [`GOVERNANCE.md`](GOVERNANCE.md)
 
 ## 13. Governance & Community
 - **Code of Conduct:** See [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Report
-	incidents privately via [GitHub Issues](https://github.com/jundorok/honeybeePF/issues).
+	incidents privately via [GitHub Issues](https://github.com/honeybee-studio/honeybeepf-llm/issues).
 - **Decision Process:** Maintainers document proposals via Issues/Discussions
 	with a 72-hour community review window before landing major changes.  
 - **Meetings:** We host quarterly community syncs announced in GitHub

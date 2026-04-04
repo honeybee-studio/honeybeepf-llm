@@ -55,4 +55,5 @@ charts/*/charts/*.tgz
 charts/**/Chart.lock
 
 # Rust build artifacts
-honeybeepf/target/
+target/
+honeybeepf-llm/target/

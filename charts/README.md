@@ -4,7 +4,7 @@
 
 ```
 ┌─────────────────┐      gRPC(4317)     ┌──────────────────────┐    scrape(8889)    ┌─────────────────┐
-│   honeybeepf    │ ─────────────────►  │  OTel Collector      │ ◄───────────────── │   Prometheus    │
+│   honeybeepf-llm    │ ─────────────────►  │  OTel Collector      │ ◄───────────────── │   Prometheus    │
 │   (DaemonSet)   │                     │  (Deployment)        │                    │   (Server)      │
 │                 │                     │                      │                    │                 │
 │  eBPF metrics   │                     │  OTLP → Prometheus   │                    │  hbpf_* metrics │
@@ -36,10 +36,10 @@ helm repo update
 ### Step 2. Update Helm Repository Dependencies
 
 ```bash
-cd charts/honeybeepf-otel-collector
+cd charts/honeybeepf-llm-otel-collector
 helm dependency update
 
-cd ../honeybeepf-prometheus
+cd ../honeybeepf-llm-prometheus
 helm dependency update
 ```
 
@@ -53,15 +53,15 @@ kubectl create namespace monitoring
 
 ```bash
 # 1. Install Prometheus (first, so it's ready to scrape)
-helm install honeybeepf-prometheus ./charts/honeybeepf-prometheus \
+helm install honeybeepf-llm-prometheus ./charts/honeybeepf-llm-prometheus \
   --namespace monitoring
 
 # 2. Install OpenTelemetry Collector
-helm install honeybeepf-otel-collector ./charts/honeybeepf-otel-collector \
+helm install honeybeepf-llm-otel-collector ./charts/honeybeepf-llm-otel-collector \
   --namespace monitoring
 
-# 3. Install honeybeepf DaemonSet
-helm install honeybeepf ./charts/honeybeepf \
+# 3. Install honeybeepf-llm DaemonSet
+helm install honeybeepf-llm ./charts/honeybeepf-llm \
   --namespace monitoring
 ```
 
@@ -119,7 +119,7 @@ Since the agent pushes metrics via OTLP, you must have an OTel Collector running
 | OTel Collector | 4318 | HTTP | OTLP HTTP receiver |
 | OTel Collector | 8889 | HTTP | Prometheus exporter |
 
-> **Note**: honeybeepf Agent does NOT expose metrics directly. All metrics flow through OTel Collector.
+> **Note**: honeybeepf-llm Agent does NOT expose metrics directly. All metrics flow through OTel Collector.
 
 ### Configuration Mapping Table
 
@@ -141,7 +141,7 @@ Since the agent pushes metrics via OTLP, you must have an OTel Collector running
 kubectl get endpoints -n monitoring
 
 # Check Prometheus targets page
-kubectl port-forward svc/honeybeepf-prometheus-server -n monitoring 9090:80
+kubectl port-forward svc/honeybeepf-llm-prometheus-server -n monitoring 9090:80
 # Open http://localhost:9090/targets in browser
 ```
 
@@ -151,12 +151,12 @@ kubectl port-forward svc/honeybeepf-prometheus-server -n monitoring 9090:80
 # Check OTel Collector logs
 kubectl logs -n monitoring -l app.kubernetes.io/name=opentelemetry-collector
 
-# Check honeybeepf logs (verify OTLP endpoint output)
-kubectl logs -n monitoring -l app.kubernetes.io/name=honeybeepf
+# Check honeybeepf-llm logs (verify OTLP endpoint output)
+kubectl logs -n monitoring -l app.kubernetes.io/name=honeybeepf-llm
 
 # Check OTel Collector metrics directly
-kubectl port-forward svc/honeybeepf-otel-collector-opentelemetry-collector -n monitoring 8889:8889
-curl http://localhost:8889/metrics | grep honeybeepf_
+kubectl port-forward svc/honeybeepf-llm-otel-collector-opentelemetry-collector -n monitoring 8889:8889
+curl http://localhost:8889/metrics | grep honeybeepf-llm_
 ```
 
 ---
@@ -165,4 +165,4 @@ curl http://localhost:8889/metrics | grep honeybeepf_
 
 | Metric Name | Type | Description |
 |-------------|------|-------------|
-| `honeybeepf_active_probes` | Gauge | Number of currently active eBPF probes |
+| `honeybeepf-llm_active_probes` | Gauge | Number of currently active eBPF probes |

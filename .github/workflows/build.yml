@@ -67,29 +67,29 @@ jobs:
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
       - name: Build
-        working-directory: honeybeepf
+        working-directory: honeybeepf-llm
         run: |
-          cargo build --release --target ${{ matrix.target }} -p honeybeepf
+          cargo build --release --target ${{ matrix.target }} -p honeybeepf-llm
 
       - name: Strip binary
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            aarch64-linux-gnu-strip honeybeepf/target/${{ matrix.target }}/release/honeybeepf
+            aarch64-linux-gnu-strip honeybeepf-llm/target/${{ matrix.target }}/release/honeybeepf-llm
           else
-            strip honeybeepf/target/${{ matrix.target }}/release/honeybeepf
+            strip honeybeepf-llm/target/${{ matrix.target }}/release/honeybeepf-llm
           fi
 
       - name: Create artifact
         run: |
           mkdir -p artifacts
-          cp honeybeepf/target/${{ matrix.target }}/release/honeybeepf artifacts/honeybeepf-${{ matrix.arch }}
-          cp honeybeepf/example.env artifacts/honeybeepf.env.example
-          chmod +x artifacts/honeybeepf-${{ matrix.arch }}
+          cp honeybeepf-llm/target/${{ matrix.target }}/release/honeybeepf-llm artifacts/honeybeepf-llm-${{ matrix.arch }}
+          cp honeybeepf-llm/example.env artifacts/honeybeepf-llm.env.example
+          chmod +x artifacts/honeybeepf-llm-${{ matrix.arch }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: honeybeepf-${{ matrix.arch }}
+          name: honeybeepf-llm-${{ matrix.arch }}
           path: artifacts/
           retention-days: 7
 
@@ -112,30 +112,30 @@ jobs:
           mkdir -p dist
           
           for arch in x86_64 aarch64; do
-            if [ -d "artifacts/honeybeepf-${arch}" ]; then
-              pkg_dir="honeybeepf-${arch}"
+            if [ -d "artifacts/honeybeepf-llm-${arch}" ]; then
+              pkg_dir="honeybeepf-llm-${arch}"
               mkdir -p "$pkg_dir"
               
-              cp "artifacts/honeybeepf-${arch}/honeybeepf-${arch}" "$pkg_dir/honeybeepf"
-              cp "artifacts/honeybeepf-${arch}/honeybeepf.env.example" "$pkg_dir/" 2>/dev/null || true
-              chmod +x "$pkg_dir/honeybeepf"
+              cp "artifacts/honeybeepf-llm-${arch}/honeybeepf-llm-${arch}" "$pkg_dir/honeybeepf-llm"
+              cp "artifacts/honeybeepf-llm-${arch}/honeybeepf-llm.env.example" "$pkg_dir/" 2>/dev/null || true
+              chmod +x "$pkg_dir/honeybeepf-llm"
               
               # Create install script
               cat > "$pkg_dir/install.sh" << 'INSTALL_EOF'
           #!/bin/bash
           set -e
           INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
-          CONFIG_DIR="${CONFIG_DIR:-/etc/honeybeepf}"
-          echo "Installing honeybeepf..."
-          sudo install -m 755 honeybeepf "$INSTALL_DIR/honeybeepf"
+          CONFIG_DIR="${CONFIG_DIR:-/etc/honeybeepf-llm}"
+          echo "Installing honeybeepf-llm..."
+          sudo install -m 755 honeybeepf-llm "$INSTALL_DIR/honeybeepf-llm"
           sudo mkdir -p "$CONFIG_DIR"
-          if [ -f honeybeepf.env.example ]; then
-              sudo cp honeybeepf.env.example "$CONFIG_DIR/"
-              if [ ! -f "$CONFIG_DIR/honeybeepf.env" ]; then
-                  sudo cp honeybeepf.env.example "$CONFIG_DIR/honeybeepf.env"
+          if [ -f honeybeepf-llm.env.example ]; then
+              sudo cp honeybeepf-llm.env.example "$CONFIG_DIR/"
+              if [ ! -f "$CONFIG_DIR/honeybeepf-llm.env" ]; then
+                  sudo cp honeybeepf-llm.env.example "$CONFIG_DIR/honeybeepf-llm.env"
               fi
           fi
-          echo "✅ Installed to $INSTALL_DIR/honeybeepf"
+          echo "✅ Installed to $INSTALL_DIR/honeybeepf-llm"
           INSTALL_EOF
               chmod +x "$pkg_dir/install.sh"
               
@@ -143,17 +143,17 @@ jobs:
               cat > "$pkg_dir/install-service.sh" << 'SERVICE_EOF'
           #!/bin/bash
           set -e
-          cat > /tmp/honeybeepf.service << 'EOF'
+          cat > /tmp/honeybeepf-llm.service << 'EOF'
           [Unit]
           Description=HoneybeePF eBPF Monitoring
           After=network.target
 
           [Service]
           Type=simple
-          ExecStart=/usr/local/bin/honeybeepf
+          ExecStart=/usr/local/bin/honeybeepf-llm
           Restart=on-failure
           RestartSec=5
-          EnvironmentFile=-/etc/honeybeepf/honeybeepf.env
+          EnvironmentFile=-/etc/honeybeepf-llm/honeybeepf-llm.env
           NoNewPrivileges=no
           CapabilityBoundingSet=CAP_SYS_ADMIN CAP_BPF CAP_PERFMON CAP_NET_ADMIN
           AmbientCapabilities=CAP_SYS_ADMIN CAP_BPF CAP_PERFMON CAP_NET_ADMIN
@@ -161,15 +161,15 @@ jobs:
           [Install]
           WantedBy=multi-user.target
           EOF
-          sudo mv /tmp/honeybeepf.service /etc/systemd/system/honeybeepf.service
+          sudo mv /tmp/honeybeepf-llm.service /etc/systemd/system/honeybeepf-llm.service
           sudo systemctl daemon-reload
-          sudo systemctl enable honeybeepf
-          echo "✅ Systemd service installed. Start with: sudo systemctl start honeybeepf"
+          sudo systemctl enable honeybeepf-llm
+          echo "✅ Systemd service installed. Start with: sudo systemctl start honeybeepf-llm"
           SERVICE_EOF
               chmod +x "$pkg_dir/install-service.sh"
               
               # Create tarball
-              tar -czf "dist/honeybeepf-linux-${arch}.tar.gz" "$pkg_dir"
+              tar -czf "dist/honeybeepf-llm-linux-${arch}.tar.gz" "$pkg_dir"
               rm -rf "$pkg_dir"
             fi
           done
@@ -179,7 +179,7 @@ jobs:
       - name: Upload packages
         uses: actions/upload-artifact@v4
         with:
-          name: honeybeepf-packages
+          name: honeybeepf-llm-packages
           path: dist/
           retention-days: 30
 
@@ -241,7 +241,7 @@ jobs:
       - name: Download packages
         uses: actions/download-artifact@v4
         with:
-          name: honeybeepf-packages
+          name: honeybeepf-llm-packages
           path: dist
 
       - name: Create checksums
@@ -274,23 +274,23 @@ jobs:
             
             | Architecture | File |
             |--------------|------|
-            | x86_64 | `honeybeepf-linux-x86_64.tar.gz` |
-            | aarch64 (ARM64) | `honeybeepf-linux-aarch64.tar.gz` |
+            | x86_64 | `honeybeepf-llm-linux-x86_64.tar.gz` |
+            | aarch64 (ARM64) | `honeybeepf-llm-linux-aarch64.tar.gz` |
             
             ### Quick Install
             
             ```bash
             # Download and extract (x86_64)
-            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ steps.bump.outputs.new_version }}/honeybeepf-linux-x86_64.tar.gz
-            tar xzf honeybeepf-linux-x86_64.tar.gz
-            cd honeybeepf-x86_64
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ steps.bump.outputs.new_version }}/honeybeepf-llm-linux-x86_64.tar.gz
+            tar xzf honeybeepf-llm-linux-x86_64.tar.gz
+            cd honeybeepf-llm-x86_64
             
             # Install binary
             sudo ./install.sh
             
             # Install systemd service (optional)
             sudo ./install-service.sh
-            sudo systemctl start honeybeepf
+            sudo systemctl start honeybeepf-llm
             ```
             
             ### Verify checksums

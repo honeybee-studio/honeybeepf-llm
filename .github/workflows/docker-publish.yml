@@ -9,7 +9,7 @@ on:
 
 env:
   REGISTRY: docker.io
-  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/honeybeepf
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/honeybeepf-llm
 
 jobs:
   lint:
@@ -27,11 +27,11 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: honeybeepf
+          workspaces: honeybeepf-llm
           cache-on-failure: true
 
       - name: Check formatting
-        working-directory: honeybeepf
+        working-directory: honeybeepf-llm
         run: cargo fmt --all -- --check
 
   build-and-test:
@@ -66,11 +66,11 @@ jobs:
         run: cargo install bpf-linker --version 0.9.15 --locked
 
       - name: Build eBPF
-        working-directory: ./honeybeepf/honeybeepf-ebpf
+        working-directory: ./honeybeepf-llm/honeybeepf-llm-ebpf
         run: cargo build --release --target=bpfel-unknown-none -Z build-std=core
 
       - name: Build userspace
-        working-directory: ./honeybeepf/honeybeepf
+        working-directory: ./honeybeepf-llm/honeybeepf-llm
         run: cargo build --release
 
   docker:

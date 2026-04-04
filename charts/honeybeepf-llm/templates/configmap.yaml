@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "honeybeepf-llm.fullname" . }}
+  labels:
+    {{- include "honeybeepf-llm.labels" . | nindent 4 }}
+data:
+  RUST_LOG: {{ .Values.rustLog | quote }}
+  DEBUG: {{ .Values.debug | quote }}
+  {{- if .Values.output.otlp.endpoint }}
+  {{- $otlpEndpoint := .Values.output.otlp.endpoint -}}
+  {{- if or (hasPrefix "http://" $otlpEndpoint) (hasPrefix "https://" $otlpEndpoint) }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ $otlpEndpoint | quote }}
+  {{- else }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ printf "http://%s" $otlpEndpoint | quote }}
+  {{- end }}
+  OTEL_SERVICE_NAME: "honeybeepf-llm"
+  {{- end }}
+
+  # === Filesystem Probes ===
+  BUILTIN_PROBES__FILESYSTEM__FILE_ACCESS: {{ .Values.builtinProbes.filesystem.file_access.enabled | quote }}
+  {{- if .Values.builtinProbes.filesystem.file_access.watched_paths }}
+  BUILTIN_PROBES__FILESYSTEM__WATCHED_PATHS: {{ .Values.builtinProbes.filesystem.file_access.watched_paths | join "," | quote }}
+  {{- end }}
+
+  # === LLM Probes ===
+  BUILTIN_PROBES__LLM: {{ .Values.builtinProbes.llm.enabled | quote }}
+  {{- if .Values.builtinProbes.llm.providers }}
+  LLM_PROVIDERS_CONFIG: {{ dict "providers" .Values.builtinProbes.llm.providers | toJson | quote }}
+  {{- end }}
+
+  # === Collection Interval ===
+  # === Process Lifecycle Probes ===
+  {{- if .Values.builtinProbes.process_lifecycle }}
+  BUILTIN_PROBES__PROCESS_LIFECYCLE: {{ .Values.builtinProbes.process_lifecycle.enabled | quote }}
+  {{- end }}
+
+  BUILTIN_PROBES__INTERVAL: {{ .Values.builtinProbes.interval | quote }}
+
+  # === Custom Probes ===
+  {{- if or .Values.customProbes.kprobes .Values.customProbes.uprobes .Values.customProbes.tracepoints }}
+  CUSTOM_PROBE_CONFIG: {{ toJson .Values.customProbes | quote }}
+  {{- end }}

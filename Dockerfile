@@ -22,18 +22,18 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo install bpf-linker --version 0.9.15 --locked && \
     cargo install cargo-chef --locked
 
-WORKDIR /app/honeybeepf
+WORKDIR /app/honeybeepf-llm
 
 FROM chef AS planner
 COPY . /app
-WORKDIR /app/honeybeepf
+WORKDIR /app/honeybeepf-llm
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 ARG TARGETARCH
-WORKDIR /app/honeybeepf
+WORKDIR /app/honeybeepf-llm
 
-COPY --from=planner /app/honeybeepf/recipe.json recipe.json
+COPY --from=planner /app/honeybeepf-llm/recipe.json recipe.json
 
 RUN case ${TARGETARCH} in \
     "amd64") rustup target add x86_64-unknown-linux-gnu ;; \
@@ -41,26 +41,26 @@ RUN case ${TARGETARCH} in \
     esac
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/app/honeybeepf/target,sharing=locked \
+    --mount=type=cache,target=/app/honeybeepf-llm/target,sharing=locked \
     export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc && \
     TARGET_TRIPLE=$(case ${TARGETARCH} in "amd64") echo "x86_64-unknown-linux-gnu" ;; "arm64") echo "aarch64-unknown-linux-gnu" ;; esac) && \
-    cargo chef cook --release --features k8s --recipe-path recipe.json --package honeybeepf --target $TARGET_TRIPLE
+    cargo chef cook --release --features k8s --recipe-path recipe.json --package honeybeepf-llm --target $TARGET_TRIPLE
 
 COPY . /app
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/app/honeybeepf/target,sharing=locked \
+    --mount=type=cache,target=/app/honeybeepf-llm/target,sharing=locked \
     export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc && \
     TARGET_TRIPLE=$(case ${TARGETARCH} in "amd64") echo "x86_64-unknown-linux-gnu" ;; "arm64") echo "aarch64-unknown-linux-gnu" ;; esac) && \
     # eBPF build, using rust-src to build the target from source
-    cargo build --release --package honeybeepf-ebpf --target=bpfel-unknown-none -Z build-std=core && \
-    cargo build --release --features k8s --package honeybeepf --target $TARGET_TRIPLE && \
-    cp target/$TARGET_TRIPLE/release/honeybeepf /app/honeybeepf-bin
+    cargo build --release --package honeybeepf-llm-ebpf --target=bpfel-unknown-none -Z build-std=core && \
+    cargo build --release --features k8s --package honeybeepf-llm --target $TARGET_TRIPLE && \
+    cp target/$TARGET_TRIPLE/release/honeybeepf-llm /app/honeybeepf-llm-bin
 
 FROM debian:trixie-slim AS runtime
 RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update && apt-get install -y libelf1 ca-certificates
 WORKDIR /app
-COPY --from=builder /app/honeybeepf-bin /usr/local/bin/honeybeepf
+COPY --from=builder /app/honeybeepf-llm-bin /usr/local/bin/honeybeepf-llm
 
-ENTRYPOINT ["/usr/local/bin/honeybeepf"]
+ENTRYPOINT ["/usr/local/bin/honeybeepf-llm"]
