@@ -184,7 +184,20 @@ impl ProtocolParser for Http2Parser {
             return None;
         }
 
-        // H2 body-based detection via JSON keys
+        // Check if buffer contains a known provider host before JSON detection.
+        // HTTP/2 HEADERS frames typically contain the :authority host string.
+        // This prevents false positives from non-LLM HTTP/2 traffic.
+        let has_known_host = PROVIDER_REGISTRY.providers.iter().any(|p| {
+            p.hosts
+                .iter()
+                .any(|h| byte_utils::contains_pattern(buffer, h.as_bytes()))
+        });
+
+        if !has_known_host {
+            return None;
+        }
+
+        // H2 body-based detection via JSON keys (only after host check)
         if byte_utils::contains_pattern(buffer, b"\"messages\"")
             || byte_utils::contains_pattern(buffer, b"\"contents\"")
             || byte_utils::contains_pattern(buffer, b"\"prompt\"")
