@@ -2,7 +2,7 @@ nameOverride: ""
 fullnameOverride: ""
 
 image:
-  repository: "docker.io/dorokrok/honeybeepf-llm"
+  repository: "ghcr.io/honeybee-studio/honeybeepf-llm"
   tag: "latest"
   pullPolicy: Always
 imagePullSecrets: [] 
