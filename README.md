@@ -9,6 +9,10 @@
 ## 1. Project Overview
 A lightweight, eBPF-based observability platform designed to identify cost and performance bottlenecks in AI workloads by selectively collecting essential data such as LLM token usage and system metrics.
 
+### Architecture
+
+![High Level Architecture](docs/images/architecture.png)
+
 ## 2. Background / Introduction
 Traditional observability tools often introduce significant operational overhead due to excessive resource consumption, required application code changes, and complex configuration processes.  
 
