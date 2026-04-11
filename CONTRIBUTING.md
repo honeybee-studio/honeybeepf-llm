@@ -108,8 +108,6 @@ For additional details, review the [Governance Model](GOVERNANCE.md).
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the project's licenses:
-
-- **Non-eBPF code**: [MIT License](LICENSE-MIT) or [Apache License 2.0](LICENSE-APACHE)
+By contributing, you agree that your contributions will be licensed under the [Apache License 2.0](LICENSE).
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project by you shall be licensed as above, without any additional terms or conditions.
