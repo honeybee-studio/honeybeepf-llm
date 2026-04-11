@@ -191,7 +191,7 @@ cargo build --release --features k8s --package honeybeepf-llm
 	consecutive releases are invited to join the maintainer group.
 
 ## 14. Licensing
-- **Source Code:** MIT License (`LICENSE`).  
-- **Documentation:** MIT License unless otherwise noted within the document.  
+- **Source Code:** Apache License 2.0 (`LICENSE`). See also `NOTICE`.  
+- **Documentation:** Apache License 2.0 unless otherwise noted within the document.  
 - **Third-Party Assets:** Refer to each component's directory for licensing
 	notices.
