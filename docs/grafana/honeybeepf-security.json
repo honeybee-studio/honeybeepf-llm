@@ -1,0 +1,614 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "File Access Overview",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "File Access Events / min",
+      "description": "Sensitive file access events — tracked by pod and file",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisLabel": "events/min",
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 0,
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (target_namespace, target_pod_name, filename) (rate(honeybeepf_file_access_events_total{process=~\"$process\"}[1m])) * 60",
+          "legendFormat": "{{ target_namespace }}/{{ target_pod_name }} — {{ filename }}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "File Access by Namespace",
+      "description": "File access event count by team",
+      "type": "piechart",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "values": [
+            "percent",
+            "value"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        },
+        "pieType": "donut",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (target_namespace) (increase(honeybeepf_file_access_events_total{process=~\"$process\"}[5m]))",
+          "legendFormat": "{{ target_namespace }}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Accessed Files (Top 10)",
+      "description": "Most-accessed sensitive files — namespace, pod, file path, process, flags",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Access Count (5m)"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "target_namespace"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Namespace"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "target_pod_name"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Pod"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "filename"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "File Path"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "process"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Process"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "flags"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Flags"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Access Count (5m)"
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Value",
+                "desc": true
+              }
+            ]
+          }
+        },
+        {
+          "id": "limit",
+          "options": {
+            "limitField": 10
+          }
+        }
+      ],
+      "targets": [
+        {
+          "expr": "topk(10, sum by (target_namespace, target_pod_name, filename, process, flags) (increase(honeybeepf_file_access_events_total{process=~\"$process\"}[5m])))",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Correlation & Hot Paths",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "LLM + File Access Correlation",
+      "description": "Correlation pattern: simultaneous LLM calls and file access in the same pod",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisLabel": "events/min",
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (target_namespace) (rate(honeybeepf_llm_requests_total[1m])) * 60",
+          "legendFormat": "{{ target_namespace }} (LLM calls)",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (target_namespace) (rate(honeybeepf_file_access_events_total[1m])) * 60",
+          "legendFormat": "{{ target_namespace }} (File access)",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "title": "File Access by File Path",
+      "description": "Access count per file — identify the most frequently accessed files",
+      "type": "bargauge",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-reds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "yellow",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "expr": "topk(10, sum by (filename) (increase(honeybeepf_file_access_events_total{process=~\"$process\"}[5m])))",
+          "legendFormat": "{{ filename }}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Summary (Last 5 Minutes)",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "Total File Access Events (5m)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 29
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(honeybeepf_file_access_events_total{process=~\"$process\"}[5m]))",
+          "legendFormat": "Events",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Unique Files Accessed (5m)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 29
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 3
+              },
+              {
+                "color": "red",
+                "value": 8
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "count(count by (filename) (increase(honeybeepf_file_access_events_total{process=~\"$process\"}[5m]) > 0))",
+          "legendFormat": "Files",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Active Probes",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 29
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(honeybeepf_active_probes)",
+          "legendFormat": "Probes",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": [
+    "honeybeepf",
+    "security",
+    "compliance"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "Prometheus",
+          "value": "Prometheus"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Datasource",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(honeybeepf_file_access_events_total, process)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Process",
+        "multi": true,
+        "name": "process",
+        "options": [],
+        "query": "label_values(honeybeepf_file_access_events_total, process)",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-5m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "HoneybeePF - Security & Compliance",
+  "uid": "honeybeepf-security",
+  "version": 1
+}

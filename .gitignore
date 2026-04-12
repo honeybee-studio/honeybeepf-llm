@@ -47,6 +47,9 @@ terraform.rc
 *.log
 *.json
 *.tar
+
+# Allow Grafana dashboard JSON files under docs/grafana/
+!docs/grafana/*.json
 check-status.ps1
 install.bat
 
