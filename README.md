@@ -130,11 +130,45 @@ kubectl port-forward -n <your-namespace> svc/honeybeepf-llm-prometheus-server 90
 
 If metrics appear in the Prometheus UI, data collection is working correctly.
 
+## 7. Grafana Dashboards
+
+Pre-built Grafana dashboards live under [`docs/grafana/`](docs/grafana/).
+
+| Dashboard | File | Focus |
+|-----------|------|-------|
+| LLM Cost Observability | [`honeybeepf-cost.json`](docs/grafana/honeybeepf-cost.json) | Requests, tokens, latency, and cost attribution by team / pod / model |
+| Security & Compliance | [`honeybeepf-security.json`](docs/grafana/honeybeepf-security.json) | File access monitoring and LLM ↔ file-access correlation |
+
+### Quick import (Grafana UI)
+
+1. Open Grafana → **Dashboards → New → Import**
+2. Upload one of the JSON files above
+3. Select your Prometheus data source when prompted
+4. Click **Import**
+
+### Automatic load via Grafana sidecar (Kubernetes)
+
+If your Grafana is configured with `sidecar.dashboards.enabled=true`, create
+a labeled ConfigMap and the sidecar will pick both dashboards up automatically:
+
+```bash
+kubectl -n monitoring create configmap honeybeepf-dashboards \
+  --from-file=docs/grafana/honeybeepf-cost.json \
+  --from-file=docs/grafana/honeybeepf-security.json
+
+kubectl -n monitoring label configmap honeybeepf-dashboards \
+  grafana_dashboard=1
+```
+
+See [`docs/grafana/README.md`](docs/grafana/README.md) for the full list
+of required metrics, template variables, and additional installation
+options.
+
 ---
 
 # Development
 
-## 7. Building
+## 8. Building
 
 ```bash
 # Standard build (without Kubernetes support)
@@ -146,7 +180,7 @@ cargo build --release --features k8s --package honeybeepf-llm
 
 > **Note:** The `k8s` feature is **not** enabled by default. When deploying to Kubernetes, always build with `--features k8s` to include pod metadata resolution. The Docker build (`Dockerfile`) already includes this flag.
 
-## 8. How to Contribute
+## 9. How to Contribute
 - **Issues:** Use GitHub Issues for bug reports or feature requests  
 - **PRs:** Contributions must open PRs  
 - **Guide:** Follow [`CONTRIBUTING.md`](CONTRIBUTING.md) for coding standards and
@@ -156,7 +190,7 @@ cargo build --release --features k8s --package honeybeepf-llm
 
 # Project Info
 
-## 9. Team
+## 10. Team
 
 | Name   | ID | Role       | SNS | Responsibilities                 |
 |--------|----|------------|-----|---------------------------------|
@@ -165,12 +199,12 @@ cargo build --release --features k8s --package honeybeepf-llm
 | sammiee5311 |    | Core Dev   | TBU | Feature Development             |
 | vanillaturtlechips |    | Core Dev   | TBU | CI/CD & Observability           |
 
-## 10. Tech Stack
+## 11. Tech Stack
 - **Languages:** eBPF, Kernel, Rust  
 - **Infrastructure:** Kubernetes, Helm, OpenTelemetry, Prometheus, Grafana  
 - **Communication:** Discord, GitHub Discussions  
 
-## 11. Roadmap
+## 12. Roadmap
 - **Phase 1:** CI/CD and Observability Setup  
 - **Phase 2:** Core Module Development  
 - **Phase 3:** Monitoring and Testing  
@@ -179,12 +213,12 @@ cargo build --release --features k8s --package honeybeepf-llm
 > We track roadmap execution via GitHub Projects and release multi-architecture
 > container images using `publish.sh` once CI pipelines pass.
 
-## 12. Resources & Links
+## 13. Resources & Links
 - GitHub Repository: [github.com/honeybee-studio/honeybeepf-llm](https://github.com/honeybee-studio/honeybeepf-llm)
 - Helm Charts: [`charts/honeybeepf-llm`](charts/honeybeepf-llm)
 - Governance: [`GOVERNANCE.md`](GOVERNANCE.md)
 
-## 13. Governance & Community
+## 14. Governance & Community
 - **Code of Conduct:** See [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Report
 	incidents privately via [GitHub Issues](https://github.com/honeybee-studio/honeybeepf-llm/issues).
 - **Decision Process:** Maintainers document proposals via Issues/Discussions
@@ -194,7 +228,7 @@ cargo build --release --features k8s --package honeybeepf-llm
 - **Membership:** Active contributors who review and merge work over two
 	consecutive releases are invited to join the maintainer group.
 
-## 14. Licensing
+## 15. Licensing
 - **Source Code:** Apache License 2.0 (`LICENSE`). See also `NOTICE`.  
 - **Documentation:** Apache License 2.0 unless otherwise noted within the document.  
 - **Third-Party Assets:** Refer to each component's directory for licensing
