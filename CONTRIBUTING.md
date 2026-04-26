@@ -59,6 +59,33 @@ make test
 
 All checks must pass before your PR can be merged.
 
+## AI Tooling Policy
+
+This policy is adapted from the Kubernetes project's
+[AI Guidance](https://www.kubernetes.dev/docs/guide/pull-requests/#ai-guidance).
+
+Using AI tools (e.g., LLM-based code assistants) to help prepare contributions
+is acceptable, but as the author you are solely responsible for understanding
+every change you submit. The following rules apply:
+
+- **Disclose AI assistance.** If you used AI tools in preparing your PR, you
+  must state this clearly in the PR description.
+- **No AI as co-author.** Do not list AI tooling as a co-author, co-sign
+  commits using an AI tool, or use `Assisted-by:`, `Co-developed-by:`, or
+  similar commit trailers that credit an AI.
+- **No large AI-generated PRs or commit messages.** Contributions must remain
+  human-authored in substance. Large AI-generated PRs and AI-generated commit
+  messages are not allowed.
+- **Review before you submit.** Do not leave the first review of AI-generated
+  changes to the reviewers. Verify the changes yourself (code review, local
+  testing, etc.) before opening the PR. Reviewers may ask questions about any
+  AI-assisted change, and if you cannot explain why it was made, the PR will
+  be closed.
+- **Respond to review comments yourself.** When responding to review comments,
+  you must do so without relying on AI tools. Reviewers want to engage
+  directly with you, not with generated responses. If you do not engage
+  directly with reviewers, the PR will be closed.
+
 ## Development Setup
 
 ### Prerequisites
