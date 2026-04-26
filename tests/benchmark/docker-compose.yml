@@ -1,0 +1,28 @@
+services:
+  mock-llm:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock
+    ports:
+      - "8080:8080"
+    environment:
+      - MOCK_RESPONSE_DELAY_MS=50
+      - MOCK_COMPLETION_TOKENS=30
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 2s
+      timeout: 2s
+      retries: 5
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
+    depends_on:
+      mock-llm:
+        condition: service_healthy
+    environment:
+      - LITELLM_LOG=ERROR
