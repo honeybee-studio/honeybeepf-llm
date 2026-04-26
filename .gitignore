@@ -44,6 +44,7 @@ terraform.rc
 
 # Test/temp files
 *.txt
+!requirements.txt
 *.log
 *.json
 *.tar
@@ -60,3 +61,11 @@ charts/**/Chart.lock
 # Rust build artifacts
 target/
 honeybeepf-llm/target/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Superpowers docs
+docs/superpowers/
