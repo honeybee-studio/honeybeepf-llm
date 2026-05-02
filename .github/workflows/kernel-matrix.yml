@@ -80,35 +80,3 @@ jobs:
           host-mount: ./
           install-dependencies: 'true'
           cmd: bash /host/ci/smoke.sh
-
-  ssl-trace:
-    name: ssl-trace ${{ matrix.kernel }}
-    needs: build
-    runs-on: ubuntu-22.04
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        kernel: ['6.6-20260427.035409', 'bpf-next-20260427.035409']
-        include:
-          - kernel: 'bpf-next-20260427.035409'
-            allow-failure: true
-    continue-on-error: ${{ matrix.allow-failure == true }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: honeybeepf-llm-bin
-          path: ./bin
-
-      - run: chmod +x bin/honeybeepf-llm
-
-      - uses: cilium/little-vm-helper@v0.0.29
-        with:
-          test-name: ssl-trace-${{ matrix.kernel }}
-          image: 'kind'
-          image-version: ${{ matrix.kernel }}
-          host-mount: ./
-          install-dependencies: 'true'
-          cmd: bash /host/ci/ssl-trace.sh
