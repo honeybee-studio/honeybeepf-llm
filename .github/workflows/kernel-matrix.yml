@@ -18,12 +18,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-04-30
           components: rust-src
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: honeybeepf-llm
+
       - name: Install bpf-linker
-        run: cargo install bpf-linker --locked
+        run: cargo install bpf-linker --locked --version 0.10.3
 
       - name: Build release
         working-directory: honeybeepf-llm
