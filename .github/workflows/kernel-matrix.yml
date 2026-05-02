@@ -46,15 +46,15 @@ jobs:
       fail-fast: false
       matrix:
         kernel:
-          - '5.10-main'
-          - '5.15-main'
-          - '6.1-main'
-          - '6.6-main'
-          - '6.12-main'
-          - '6.18-main'
-          - 'bpf-next-main'
+          - '5.10-20260427.035409'
+          - '5.15-20260427.035409'
+          - '6.1-20260427.035409'
+          - '6.6-20260427.035409'
+          - '6.12-20260427.035409'
+          - '6.18-20260427.035409'
+          - 'bpf-next-20260427.035409'
         include:
-          - kernel: 'bpf-next-main'
+          - kernel: 'bpf-next-20260427.035409'
             allow-failure: true
     continue-on-error: ${{ matrix.allow-failure == true }}
     steps:
@@ -90,9 +90,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kernel: ['6.6-main', 'bpf-next-main']
+        kernel: ['6.6-20260427.035409', 'bpf-next-20260427.035409']
         include:
-          - kernel: 'bpf-next-main'
+          - kernel: 'bpf-next-20260427.035409'
             allow-failure: true
     continue-on-error: ${{ matrix.allow-failure == true }}
     steps:
