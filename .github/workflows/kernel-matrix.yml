@@ -125,11 +125,21 @@ jobs:
             export RUST_LOG=info
             ./bin/honeybeepf-llm --verbose > /tmp/agent.log 2>&1 &
             sleep 10
-            curl -sk https://example.com -o /dev/null || true
-            curl -sk https://www.google.com -o /dev/null || true
-            sleep 3
+            for url in \
+              'https://api.openai.com/v1/chat/completions' \
+              'https://api.anthropic.com/v1/messages' \
+              'https://generativelanguage.googleapis.com/v1beta/models'; do
+              curl -sk -X POST "$url" \
+                -H 'Authorization: Bearer fake-test-key' \
+                -H 'Content-Type: application/json' \
+                -d '{"model":"test","messages":[{"role":"user","content":"hi"}]}' \
+                -o /dev/null -w 'curl %{url_effective} -> %{http_code}\n' || true
+            done
+            sleep 5
             pkill -INT honeybeepf-llm || true
             sleep 1
             echo '----- agent log -----'
             cat /tmp/agent.log
-            grep -qiE 'ssl|attach|probe|llm|openssl' /tmp/agent.log
+            echo '----- assertions -----'
+            grep -E 'Attaching LLM \(SSL\) probes' /tmp/agent.log
+            grep -E '\[LLM\] Detected HTTP' /tmp/agent.log
