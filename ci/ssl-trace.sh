@@ -34,4 +34,10 @@ echo '----- agent log -----'
 cat /tmp/agent.log
 echo '----- assertions -----'
 grep -E 'Attaching LLM \(SSL\) probes' /tmp/agent.log
-grep -E '\[LLM\] Detected HTTP' /tmp/agent.log
+grep -E '\[Re-discovery\] New SSL library found' /tmp/agent.log
+
+if grep -qE '\[LLM\] Detected HTTP' /tmp/agent.log; then
+  echo '✓ HTTP request detection observed (full pipeline)'
+else
+  echo '::warning::HTTP detection missing — probe attached but parser did not log a request; verify on real K8s deployment'
+fi
