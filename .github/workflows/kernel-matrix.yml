@@ -67,7 +67,7 @@ jobs:
 
       - run: chmod +x bin/honeybeepf-llm
 
-      - uses: cilium/little-vm-helper@v0.0.19
+      - uses: cilium/little-vm-helper@v0.0.29
         with:
           test-name: smoke-${{ matrix.kernel }}
           image: 'kind'
@@ -105,7 +105,7 @@ jobs:
 
       - run: chmod +x bin/honeybeepf-llm
 
-      - uses: cilium/little-vm-helper@v0.0.19
+      - uses: cilium/little-vm-helper@v0.0.29
         with:
           test-name: ssl-trace-${{ matrix.kernel }}
           image: 'kind'
