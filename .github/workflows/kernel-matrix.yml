@@ -74,17 +74,7 @@ jobs:
           image-version: ${{ matrix.kernel }}
           host-mount: ./
           install-dependencies: 'true'
-          cmd: |
-            set -e
-            uname -r
-            mount | grep bpf || true
-            cd /host
-            export BUILTIN_PROBES__LLM=true
-            export BUILTIN_PROBES__INTERVAL=2
-            export RUST_LOG=info
-            timeout --preserve-status 5 ./bin/honeybeepf-llm --verbose > /tmp/boot.log 2>&1 || true
-            cat /tmp/boot.log
-            grep -qE 'Monitoring active|Parsed settings' /tmp/boot.log
+          cmd: bash /host/ci/smoke.sh
 
   ssl-trace:
     name: ssl-trace ${{ matrix.kernel }}
@@ -116,30 +106,4 @@ jobs:
           image-version: ${{ matrix.kernel }}
           host-mount: ./
           install-dependencies: 'true'
-          cmd: |
-            set -e
-            cd /host
-            apt-get install -y --no-install-recommends curl ca-certificates >/dev/null 2>&1 || true
-            export BUILTIN_PROBES__LLM=true
-            export BUILTIN_PROBES__INTERVAL=2
-            export RUST_LOG=info
-            ./bin/honeybeepf-llm --verbose > /tmp/agent.log 2>&1 &
-            sleep 10
-            for url in \
-              'https://api.openai.com/v1/chat/completions' \
-              'https://api.anthropic.com/v1/messages' \
-              'https://generativelanguage.googleapis.com/v1beta/models'; do
-              curl -sk -X POST "$url" \
-                -H 'Authorization: Bearer fake-test-key' \
-                -H 'Content-Type: application/json' \
-                -d '{"model":"test","messages":[{"role":"user","content":"hi"}]}' \
-                -o /dev/null -w 'curl %{url_effective} -> %{http_code}\n' || true
-            done
-            sleep 5
-            pkill -INT honeybeepf-llm || true
-            sleep 1
-            echo '----- agent log -----'
-            cat /tmp/agent.log
-            echo '----- assertions -----'
-            grep -E 'Attaching LLM \(SSL\) probes' /tmp/agent.log
-            grep -E '\[LLM\] Detected HTTP' /tmp/agent.log
+          cmd: bash /host/ci/ssl-trace.sh
