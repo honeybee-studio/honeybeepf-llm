@@ -4,8 +4,6 @@ from load_generator import LoadProfile
 
 DIRECT_URL = "http://localhost:8080"
 PROXY_URL = "http://localhost:4000"
-PROXY_API_KEY = "sk-benchmark-key"
-
 CONTAINER_NAMES = ["benchmark-mock-llm-1", "benchmark-litellm-1"]
 
 
