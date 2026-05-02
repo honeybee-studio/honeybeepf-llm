@@ -16,6 +16,7 @@ export BUILTIN_PROBES__INTERVAL=2
 export RUST_LOG=info
 
 ./bin/honeybeepf-llm --verbose > /tmp/boot.log 2>&1 &
+AGENT_PID=$!
 sleep 8
 
 for url in \
@@ -29,9 +30,16 @@ for url in \
     -o /dev/null -w 'curl %{url_effective} -> %{http_code}\n' || true
 done
 
-sleep 5
-pkill -INT honeybeepf-llm 2>/dev/null || true
-wait 2>/dev/null || true
+sleep 3
+
+# graceful then forceful — agent occasionally ignores SIGINT, don't hang `wait`
+kill -INT "$AGENT_PID" 2>/dev/null || true
+for _ in $(seq 1 10); do
+  kill -0 "$AGENT_PID" 2>/dev/null || break
+  sleep 0.3
+done
+kill -KILL "$AGENT_PID" 2>/dev/null || true
+wait "$AGENT_PID" 2>/dev/null || true
 
 cat /tmp/boot.log
 
