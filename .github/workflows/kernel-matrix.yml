@@ -1,0 +1,130 @@
+name: Kernel Matrix
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install nightly + bpf-linker
+        run: |
+          rustup install nightly --profile minimal
+          rustup component add rust-src --toolchain nightly
+          cargo install bpf-linker --locked
+
+      - name: Build release
+        working-directory: honeybeepf-llm
+        run: cargo build --release -p honeybeepf-llm
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: honeybeepf-llm-bin
+          path: honeybeepf-llm/target/release/honeybeepf-llm
+          if-no-files-found: error
+          retention-days: 1
+
+  matrix:
+    name: vmtest ${{ matrix.kernel }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel:
+          - '5.10-main'
+          - '5.15-main'
+          - '6.1-main'
+          - '6.6-main'
+          - '6.12-main'
+          - '6.18-main'
+          - 'bpf-next-main'
+        include:
+          - kernel: 'bpf-next-main'
+            allow-failure: true
+    continue-on-error: ${{ matrix.allow-failure == true }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: honeybeepf-llm-bin
+          path: ./bin
+
+      - run: chmod +x bin/honeybeepf-llm
+
+      - uses: cilium/little-vm-helper@v0.0.19
+        with:
+          test-name: smoke-${{ matrix.kernel }}
+          image: 'kind'
+          image-version: ${{ matrix.kernel }}
+          host-mount: ./
+          install-dependencies: 'true'
+          cmd: |
+            set -e
+            uname -r
+            mount | grep bpf || true
+            cd /host
+            ./bin/honeybeepf-llm --version
+            ./bin/honeybeepf-llm --help | head -20
+
+  ssl-trace:
+    name: ssl-trace ${{ matrix.kernel }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel: ['6.6-main', 'bpf-next-main']
+        include:
+          - kernel: 'bpf-next-main'
+            allow-failure: true
+    continue-on-error: ${{ matrix.allow-failure == true }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: honeybeepf-llm-bin
+          path: ./bin
+
+      - run: chmod +x bin/honeybeepf-llm
+
+      - uses: cilium/little-vm-helper@v0.0.19
+        with:
+          test-name: ssl-trace-${{ matrix.kernel }}
+          image: 'kind'
+          image-version: ${{ matrix.kernel }}
+          host-mount: ./
+          install-dependencies: 'true'
+          cmd: |
+            set -e
+            cd /host
+            apt-get install -y --no-install-recommends curl ca-certificates >/dev/null 2>&1 || true
+            RUST_LOG=info ./bin/honeybeepf-llm --verbose > /tmp/agent.log 2>&1 &
+            AGENT=$!
+            sleep 8
+            curl -sk https://example.com -o /dev/null || true
+            curl -sk https://www.google.com -o /dev/null || true
+            sleep 3
+            kill -INT "$AGENT" || true
+            wait "$AGENT" 2>/dev/null || true
+            echo '----- agent log -----'
+            cat /tmp/agent.log
+            grep -qiE 'ssl|trace|attached|loaded|probe|tls' /tmp/agent.log
