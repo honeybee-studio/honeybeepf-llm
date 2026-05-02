@@ -78,5 +78,4 @@ fi
 
 grep -qE 'Attaching LLM \(SSL\) probes' /tmp/boot.log
 grep -qE 'Active probe registered: llm' /tmp/boot.log
-grep -qE '\[Re-discovery\] New SSL library found' /tmp/boot.log
-grep -E '\[LLM\] Detected HTTP' /tmp/boot.log || true
+grep -qE '\[LLM\] Detected HTTP' /tmp/boot.log
