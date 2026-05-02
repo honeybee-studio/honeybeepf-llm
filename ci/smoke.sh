@@ -7,7 +7,10 @@ set -euo pipefail
 cd /host
 
 uname -r
-mount | grep bpf || true
+if ! mount | grep -q ' on /sys/fs/bpf type bpf'; then
+  echo "::error::bpffs not mounted at /sys/fs/bpf — BPF probe load will fail"
+  exit 1
+fi
 
 apt-get install -y --no-install-recommends curl ca-certificates openssl python3 >/dev/null 2>&1 || true
 
@@ -29,7 +32,16 @@ PY
 
 python3 /tmp/mock.py >/dev/null 2>&1 &
 MOCK_PID=$!
-sleep 2
+
+# wait until mock accepts TLS (max ~10s)
+for _ in $(seq 1 20); do
+  curl -sk --connect-timeout 1 -o /dev/null https://127.0.0.1 2>/dev/null && break
+  sleep 0.5
+done
+curl -sk --connect-timeout 1 -o /dev/null https://127.0.0.1 || {
+  echo "::error::mock TLS server failed to start"
+  exit 1
+}
 
 cat >> /etc/hosts <<EOF
 127.0.0.1 api.openai.com
@@ -43,6 +55,7 @@ export RUST_LOG=info
 
 ./bin/honeybeepf-llm --verbose > /tmp/boot.log 2>&1 &
 AGENT_PID=$!
+# ~5s for BPF program load + verifier, ~3s for libssl scan / uprobe attach
 sleep 8
 
 for url in \
