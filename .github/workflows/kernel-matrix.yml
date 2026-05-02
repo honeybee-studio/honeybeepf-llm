@@ -18,13 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
 
-      - name: Install nightly + bpf-linker
-        run: |
-          rustup install nightly --profile minimal
-          rustup component add rust-src --toolchain nightly
-          cargo install bpf-linker --locked
+      - name: Install bpf-linker
+        run: cargo install bpf-linker --locked
 
       - name: Build release
         working-directory: honeybeepf-llm
