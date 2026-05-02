@@ -79,7 +79,7 @@ jobs:
             uname -r
             mount | grep bpf || true
             cd /host
-            ./bin/honeybeepf-llm --version
+            ./bin/honeybeepf-llm --help | head -1
             ./bin/honeybeepf-llm --help | head -20
 
   ssl-trace:
