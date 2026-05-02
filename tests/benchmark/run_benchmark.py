@@ -8,7 +8,7 @@ import httpx
 
 from config import DIRECT_URL, PROXY_URL, CONTAINER_NAMES, SCENARIOS, Scenario
 from load_generator import LoadGenerator, LoadProfile
-from report import format_report
+from report import format_markdown, format_report
 from stats import compute_latency_stats
 
 
@@ -101,6 +101,7 @@ def parse_args():
         default="quick",
     )
     parser.add_argument("--output", help="Save results to JSON file")
+    parser.add_argument("--markdown", help="Save results as markdown file")
     return parser.parse_args()
 
 
@@ -153,6 +154,11 @@ async def main():
         with open(args.output, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nResults saved to {args.output}")
+
+    if args.markdown:
+        with open(args.markdown, "w") as f:
+            f.write(format_markdown(results))
+        print(f"Markdown saved to {args.markdown}")
 
 
 if __name__ == "__main__":

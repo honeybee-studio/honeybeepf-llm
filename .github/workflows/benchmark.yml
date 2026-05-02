@@ -1,0 +1,52 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "Scenario to run"
+        required: true
+        default: "quick"
+        type: choice
+        options:
+          - quick
+          - steady
+          - burst
+          - stress
+          - all
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tests/benchmark
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: |
+          uv venv .venv
+          source .venv/bin/activate
+          uv pip install -r requirements.txt
+
+      - name: Start services
+        run: docker compose up -d --wait
+
+      - name: Run benchmark
+        run: |
+          source .venv/bin/activate
+          python run_benchmark.py \
+            --scenario ${{ inputs.scenario }} \
+            --output results.json \
+            --markdown summary.md
+
+      - name: Post results to Job Summary
+        run: cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Teardown
+        if: always()
+        run: docker compose down
