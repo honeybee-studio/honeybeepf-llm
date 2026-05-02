@@ -1,0 +1,90 @@
+name: Kernel Matrix
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/kernel-matrix.yml'
+      - 'ci/**'
+      - 'honeybeepf-llm/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/kernel-matrix.yml'
+      - 'ci/**'
+      - 'honeybeepf-llm/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (release)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-04-30
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: honeybeepf-llm
+
+      - name: Install bpf-linker
+        run: cargo install bpf-linker --locked --version 0.10.3
+
+      - name: Build release
+        working-directory: honeybeepf-llm
+        run: cargo build --release -p honeybeepf-llm
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: honeybeepf-llm-bin
+          path: honeybeepf-llm/target/release/honeybeepf-llm
+          if-no-files-found: error
+          retention-days: 1
+
+  matrix:
+    name: lvh ${{ matrix.kernel }}
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel:
+          - '5.10-20260427.035409'
+          - '5.15-20260427.035409'
+          - '6.1-20260427.035409'
+          - '6.6-20260427.035409'
+          - '6.12-20260427.035409'
+          - '6.18-20260427.035409'
+          - 'bpf-next-20260427.035409'
+        include:
+          - kernel: 'bpf-next-20260427.035409'
+            allow-failure: true
+    continue-on-error: ${{ matrix.allow-failure == true }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: honeybeepf-llm-bin
+          path: ./bin
+
+      - run: chmod +x bin/honeybeepf-llm
+
+      - uses: cilium/little-vm-helper@v0.0.29
+        with:
+          test-name: smoke-${{ matrix.kernel }}
+          image: 'kind'
+          image-version: ${{ matrix.kernel }}
+          host-mount: ./
+          install-dependencies: 'true'
+          cmd: bash /host/ci/smoke.sh
