@@ -1,0 +1,18 @@
+model_list:
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_base: http://mock-llm:8080/v1
+      api_key: fake-key-for-benchmark
+
+  - model_name: claude-sonnet-4-20250514
+    litellm_params:
+      model: openai/claude-sonnet-4-20250514
+      api_base: http://mock-llm:8080/v1
+      api_key: fake-key-for-benchmark
+
+  - model_name: gemini-2.0-flash
+    litellm_params:
+      model: openai/gemini-2.0-flash
+      api_base: http://mock-llm:8080/v1
+      api_key: fake-key-for-benchmark
