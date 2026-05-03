@@ -77,7 +77,7 @@ securityContext:
       - NET_ADMIN
       - PERFMON
       - SYS_ADMIN   # Ubuntu paranoid=4 workaround: https://bugs.launchpad.net/ubuntu/+source/linux/+bug/2131046
-      - SYS_PTRACE  # cross-pod /proc access for libssl discovery (Ubuntu/Debian ptrace_scope=1)
+      - SYS_PTRACE  # cross-pod /proc access for libssl discovery (blocked by container LSM profiles + yama on all major K8s distros)
 
 resources:
   limits:
