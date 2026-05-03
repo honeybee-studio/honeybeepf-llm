@@ -76,7 +76,8 @@ securityContext:
       - BPF
       - NET_ADMIN
       - PERFMON
-      - SYS_ADMIN
+      - SYS_ADMIN   # Ubuntu perf_event_paranoid=4 workaround; not needed on Jammy >=5.15.0-165 / Noble >=6.8.0-91 (https://bugs.launchpad.net/ubuntu/+source/linux/+bug/2131046)
+      - SYS_PTRACE  # cross-pod /proc access for libssl discovery (blocked by container LSM profiles + yama on all major K8s distros)
 
 resources:
   limits:
