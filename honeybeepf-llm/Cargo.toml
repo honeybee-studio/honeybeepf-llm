@@ -3,10 +3,11 @@ resolver = "2"
 members = [
     "honeybeepf-llm",
     "honeybeepf-llm-common",
+    "honeybeepf-llm-core",
     "honeybeepf-llm-ebpf",
     "xtask",
 ]
-default-members = ["honeybeepf-llm", "honeybeepf-llm-common"]
+default-members = ["honeybeepf-llm", "honeybeepf-llm-common", "honeybeepf-llm-core"]
 
 [workspace.package]
 license = "Apache-2.0"

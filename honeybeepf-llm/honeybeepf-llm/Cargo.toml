@@ -11,6 +11,7 @@ k8s = ["dep:kube", "dep:k8s-openapi", "dep:futures"]
 
 [dependencies]
 honeybeepf-llm-common = { path = "../honeybeepf-llm-common", features = ["user"] }
+honeybeepf-llm-core = { path = "../honeybeepf-llm-core" }
 
 anyhow = { workspace = true, default-features = true }
 aya = { workspace = true }
