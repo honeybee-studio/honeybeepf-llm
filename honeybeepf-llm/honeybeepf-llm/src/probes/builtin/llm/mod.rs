@@ -1,7 +1,6 @@
 mod discovery;
 pub mod http;
 pub mod processor;
-pub mod types;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -11,10 +10,9 @@ use std::{
 
 use anyhow::Result;
 use aya::Ebpf;
-use honeybeepf_llm_common::LlmEvent;
+use honeybeepf_llm_common::{LlmDirection, LlmEvent};
 use log::{info, warn};
 use processor::StreamProcessor;
-use types::LlmDirection;
 
 use crate::probes::{
     DynamicProbe, IdentityResolver, Probe, ProcessInfo, attach_uprobe, spawn_ringbuf_handler,

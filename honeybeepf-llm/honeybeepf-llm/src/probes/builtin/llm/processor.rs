@@ -1,11 +1,9 @@
 use std::time::Instant;
 
+use honeybeepf_llm_common::LlmDirection;
 use log::{info, warn};
 
-use crate::probes::builtin::llm::{
-    http::{self, ProtocolParser},
-    types::LlmDirection,
-};
+use crate::probes::builtin::llm::http::{self, ProtocolParser};
 
 // Buffer size constants
 const INITIAL_BUFFER_CAPACITY: usize = 8 * 1024; // 8KB initial allocation

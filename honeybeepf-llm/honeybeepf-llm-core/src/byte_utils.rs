@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use serde_json::Value;
+
 /// Find byte pattern in haystack
 pub fn find_pattern(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
@@ -86,6 +88,15 @@ pub fn extract_h2_json_all(buffer: &[u8]) -> Vec<Vec<u8>> {
     }
 
     results
+}
+
+/// Look up a value in a nested JSON object using dotted-path notation.
+pub fn get_nested_value<'a>(json: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut current = json;
+    for key in path.split('.') {
+        current = current.get(key)?;
+    }
+    Some(current)
 }
 
 fn extract_h2_json_nth(buffer: &[u8], n: usize) -> Cow<'_, [u8]> {

@@ -1,10 +1,11 @@
+use honeybeepf_llm_core::byte_utils::get_nested_value;
+use honeybeepf_llm_core::types::UsageInfo;
 use serde_json::Value;
 
 use super::{
     config::ProviderConfig,
     request::{RequestExtractor, get_extractor},
 };
-use crate::probes::builtin::llm::types::UsageInfo;
 
 /// A provider instance created from configuration
 pub struct ConfigurableProvider {
@@ -75,15 +76,6 @@ impl ConfigurableProvider {
             model,
         })
     }
-}
-
-/// Get a nested value using dot-notation path (e.g., "usage.prompt_tokens")
-fn get_nested_value<'a>(json: &'a Value, path: &str) -> Option<&'a Value> {
-    let mut current = json;
-    for key in path.split('.') {
-        current = current.get(key)?;
-    }
-    Some(current)
 }
 
 #[cfg(test)]
@@ -185,19 +177,5 @@ mod tests {
 
         let text = provider.extract_request_text(&request);
         assert_eq!(text, "Hello, world!");
-    }
-
-    #[test]
-    fn test_nested_path() {
-        let json = json!({
-            "outer": {
-                "inner": {
-                    "value": 42
-                }
-            }
-        });
-
-        let value = get_nested_value(&json, "outer.inner.value").unwrap();
-        assert_eq!(value.as_u64(), Some(42));
     }
 }
