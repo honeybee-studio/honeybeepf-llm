@@ -10,8 +10,7 @@ use std::{
 
 use anyhow::Result;
 use aya::Ebpf;
-use honeybeepf_llm_common::LlmEvent;
-use honeybeepf_llm_core::types::LlmDirection;
+use honeybeepf_llm_common::{LlmDirection, LlmEvent};
 use log::{info, warn};
 use processor::StreamProcessor;
 

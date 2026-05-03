@@ -48,12 +48,18 @@ jobs:
 
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: honeybeepf-llm
           cache-on-failure: true
+
+      - name: Clippy core crate
+        working-directory: honeybeepf-llm
+        run: cargo clippy -p honeybeepf-llm-core --all-targets -- -D warnings
 
       - name: Test core crate
         working-directory: honeybeepf-llm
