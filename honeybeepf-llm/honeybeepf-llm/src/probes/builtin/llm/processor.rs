@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use honeybeepf_llm_common::LlmDirection;
+use honeybeepf_llm_core::types::LlmDirection;
 use log::{info, warn};
 
 use crate::probes::builtin::llm::http::{self, ProtocolParser};
