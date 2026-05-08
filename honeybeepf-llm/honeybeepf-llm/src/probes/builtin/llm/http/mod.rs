@@ -5,7 +5,6 @@
 
 pub mod protocol;
 pub mod providers;
-pub mod utils;
 
 // Re-export main types
 pub use protocol::{Http2Parser, Http11Parser, ProtocolParser};

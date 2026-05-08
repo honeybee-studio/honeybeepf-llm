@@ -4,11 +4,10 @@ use flate2::read::GzDecoder;
 use once_cell::sync::Lazy;
 use serde_json::Value;
 
-use super::{
-    providers::{ConfigurableProvider, ProviderRegistry},
-    utils as byte_utils,
-};
-use crate::probes::builtin::llm::types::{SseChunkDelta, UsageInfo};
+use honeybeepf_llm_core::byte_utils;
+use honeybeepf_llm_core::types::{SseChunkDelta, UsageInfo};
+
+use super::providers::{ConfigurableProvider, ProviderRegistry};
 
 /// Cached providers - built once at initialization
 static CACHED_PROVIDERS: Lazy<Vec<ConfigurableProvider>> = Lazy::new(|| {

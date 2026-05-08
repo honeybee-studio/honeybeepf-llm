@@ -1110,6 +1110,7 @@ dependencies = [
  "flate2",
  "futures",
  "honeybeepf-llm-common",
+ "honeybeepf-llm-core",
  "honeybeepf-llm-ebpf",
  "httparse",
  "k8s-openapi",
@@ -1135,6 +1136,15 @@ name = "honeybeepf-llm-common"
 version = "0.1.0"
 dependencies = [
  "aya",
+]
+
+[[package]]
+name = "honeybeepf-llm-core"
+version = "0.1.0"
+dependencies = [
+ "honeybeepf-llm-common",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
