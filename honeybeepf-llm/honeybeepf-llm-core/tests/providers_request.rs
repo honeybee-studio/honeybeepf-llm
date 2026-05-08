@@ -1,3 +1,9 @@
+//! Provider request extractor tests.
+//!
+//! These go through the `get_extractor()` factory instead of constructing the
+//! individual extractor structs directly, so `MessagesExtractor`, `ContentsExtractor`,
+//! `PromptExtractor`, and `NoOpExtractor` can stay private to the `request` module.
+
 use honeybeepf_llm_core::providers::{RequestExtractorType, get_extractor};
 use serde_json::json;
 
@@ -57,4 +63,14 @@ fn test_prompt_extractor() {
     });
     let result = extractor.extract(&json);
     assert_eq!(result, "Complete this sentence:");
+}
+
+#[test]
+fn test_noop_extractor_returns_empty() {
+    let extractor = get_extractor(&RequestExtractorType::None);
+    let json = json!({
+        "messages": [{"role": "user", "content": "should be ignored"}],
+        "prompt": "should also be ignored"
+    });
+    assert_eq!(extractor.extract(&json), "");
 }
