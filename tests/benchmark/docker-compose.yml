@@ -26,3 +26,9 @@ services:
         condition: service_healthy
     environment:
       - LITELLM_LOG=ERROR
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')"]
+      interval: 2s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
