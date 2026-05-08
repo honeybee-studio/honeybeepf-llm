@@ -4,8 +4,6 @@
 //! LLM request/response data.
 
 pub mod protocol;
-pub mod providers;
 
 // Re-export main types
 pub use protocol::{Http2Parser, Http11Parser, ProtocolParser};
-pub use providers::{ConfigurableProvider, ProviderRegistry};

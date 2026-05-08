@@ -5,9 +5,8 @@ use once_cell::sync::Lazy;
 use serde_json::Value;
 
 use honeybeepf_llm_core::byte_utils;
+use honeybeepf_llm_core::providers::{ConfigurableProvider, ProviderRegistry};
 use honeybeepf_llm_core::types::{SseChunkDelta, UsageInfo};
-
-use super::providers::{ConfigurableProvider, ProviderRegistry};
 
 /// Cached providers - built once at initialization
 static CACHED_PROVIDERS: Lazy<Vec<ConfigurableProvider>> = Lazy::new(|| {
