@@ -4,12 +4,13 @@ services:
       context: .
       dockerfile: Dockerfile.mock
     ports:
-      - "8080:8080"
+      - "8443:8443"
     environment:
       - MOCK_RESPONSE_DELAY_MS=50
       - MOCK_COMPLETION_TOKENS=30
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      test: ["CMD", "python", "-c",
+        "import urllib.request, ssl; ctx=ssl._create_unverified_context(); urllib.request.urlopen('https://localhost:8443/health', context=ctx)"]
       interval: 2s
       timeout: 2s
       retries: 5
@@ -24,11 +25,25 @@ services:
     depends_on:
       mock-llm:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     environment:
       - LITELLM_LOG=ERROR
+      - OTEL_EXPORTER=otlp_grpc
+      - OTEL_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=litellm
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')"]
       interval: 2s
       timeout: 3s
       retries: 5
       start_period: 30s
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    command: ["--config=/etc/otel-collector.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otel-collector.yaml
+      - ./otel-output:/output
+    ports:
+      - "4317:4317"

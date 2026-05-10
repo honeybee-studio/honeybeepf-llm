@@ -67,5 +67,8 @@ __pycache__/
 *.pyc
 .venv/
 
+# Benchmark OTel collector output (runtime artifacts)
+tests/benchmark/otel-output/
+
 # Superpowers docs
 docs/superpowers/
