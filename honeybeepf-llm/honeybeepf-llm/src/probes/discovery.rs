@@ -19,6 +19,14 @@ pub fn resolve_host_path(pid: i32, container_path: &std::path::Path) -> PathBuf 
     root_path
 }
 
+/// (device, inode) of the file behind `path`; per-process paths to one library share it.
+pub fn file_identity(path: &str) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.dev(), meta.ino()))
+}
+
 /// Find libraries matching a regex pattern across all running processes.
 /// Also includes system libraries found via ldconfig.
 pub fn find_libraries_all(

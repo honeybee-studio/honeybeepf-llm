@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use aya::{
     Ebpf,
     maps::RingBuf,
-    programs::{TracePoint, UProbe},
+    programs::{TracePoint, UProbe, uprobe::UProbeLinkId},
 };
 use honeybeepf_llm_common::ExecEvent;
 use log::{info, warn};
@@ -170,7 +170,12 @@ where
 
 /// Attach a uprobe to a function in a shared library.
 /// Loads the program if not already loaded.
-pub fn attach_uprobe(bpf: &mut Ebpf, prog_name: &str, func_name: &str, path: &str) -> Result<()> {
+pub fn attach_uprobe(
+    bpf: &mut Ebpf,
+    prog_name: &str,
+    func_name: &str,
+    path: &str,
+) -> Result<UProbeLinkId> {
     let program: &mut UProbe = bpf
         .program_mut(prog_name)
         .with_context(|| format!("Failed to find program {}", prog_name))?
@@ -183,9 +188,18 @@ pub fn attach_uprobe(bpf: &mut Ebpf, prog_name: &str, func_name: &str, path: &st
 
     program
         .attach(Some(func_name), 0, path, None)
-        .with_context(|| format!("Failed to attach {} to {}", prog_name, func_name))?;
+        .with_context(|| format!("Failed to attach {} to {}", prog_name, func_name))
+}
 
-    Ok(())
+/// Detach a uprobe link returned by [`attach_uprobe`].
+pub fn detach_uprobe(bpf: &mut Ebpf, prog_name: &str, link_id: UProbeLinkId) -> Result<()> {
+    let program: &mut UProbe = bpf
+        .program_mut(prog_name)
+        .with_context(|| format!("Failed to find program {}", prog_name))?
+        .try_into()?;
+    program
+        .detach(link_id)
+        .with_context(|| format!("Failed to detach {}", prog_name))
 }
 
 /// Set up the `sched_process_exec` tracepoint and return a queue that collects
