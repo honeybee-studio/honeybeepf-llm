@@ -21,6 +21,17 @@ static CACHED_PROVIDERS: Lazy<Vec<ConfigurableProvider>> = Lazy::new(|| {
 /// Global provider registry - for host/path matching only
 static PROVIDER_REGISTRY: Lazy<ProviderRegistry> = Lazy::new(load_provider_registry);
 
+/// Distinct provider hosts: the HTTP/2 pre-check scans the whole buffer once per entry.
+static KNOWN_HOSTS: Lazy<Vec<&'static str>> = Lazy::new(|| {
+    let mut hosts: Vec<&'static str> = Vec::new();
+    for host in PROVIDER_REGISTRY.providers.iter().flat_map(|p| &p.hosts) {
+        if !hosts.contains(&host.as_str()) {
+            hosts.push(host);
+        }
+    }
+    hosts
+});
+
 fn load_provider_registry() -> ProviderRegistry {
     // 1. Try loading from config file
     // 1. Try loading from config file (supports YAML, JSON, TOML via config crate)
@@ -195,11 +206,9 @@ impl ProtocolParser for Http2Parser {
         // Check if buffer contains a known provider host before JSON detection.
         // HTTP/2 HEADERS frames typically contain the :authority host string.
         // This prevents false positives from non-LLM HTTP/2 traffic.
-        let has_known_host = PROVIDER_REGISTRY.providers.iter().any(|p| {
-            p.hosts
-                .iter()
-                .any(|h| byte_utils::contains_pattern(buffer, h.as_bytes()))
-        });
+        let has_known_host = KNOWN_HOSTS
+            .iter()
+            .any(|h| byte_utils::contains_pattern(buffer, h.as_bytes()));
 
         if !has_known_host {
             return None;
@@ -687,6 +696,18 @@ mod tests {
         );
         let get = b"GET /v1/responses/r1 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
         assert_eq!(Http11Parser.detect_request(get), None);
+    }
+
+    #[test]
+    fn known_hosts_are_distinct() {
+        let hosts = &*KNOWN_HOSTS;
+        assert!(hosts.contains(&"api.openai.com"));
+        assert!(
+            hosts
+                .iter()
+                .enumerate()
+                .all(|(i, h)| !hosts[..i].contains(h))
+        );
     }
 
     #[test]
