@@ -356,7 +356,10 @@ fn merge_sse_event(acc: &mut Value, update: Value) {
     };
     for (key, value) in update {
         match (acc.get_mut(&key), value) {
-            (Some(Value::Object(prev)), Value::Object(next)) => prev.extend(next),
+            // A null count in a later event (e.g. Anthropic message_delta) must not erase an earlier one.
+            (Some(Value::Object(prev)), Value::Object(next)) => {
+                prev.extend(next.into_iter().filter(|(_, v)| !v.is_null()))
+            }
             (Some(slot), value) => *slot = value,
             (None, value) => {
                 acc.insert(key, value);
@@ -591,6 +594,21 @@ mod tests {
             .expect("usage");
         assert_eq!((info.prompt_tokens, info.completion_tokens), (102_560, 300));
         assert_eq!(cache(&info), (Some(100_500), Some(2000)));
+    }
+
+    #[test]
+    fn anthropic_sse_null_delta_counts_keep_message_start_cache() {
+        let body = format!(
+            "{ANTHROPIC_SSE_CACHE_START}event: message_delta\n\
+             data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"input_tokens\":null,\
+             \"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":null,\"output_tokens\":300}}}}\n\n\
+             event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+        );
+        let info = Http11Parser
+            .parse_response(&http11_sse(&body))
+            .expect("usage");
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (102_050, 300));
+        assert_eq!(cache(&info), (Some(100_000), Some(2000)));
     }
 
     #[test]

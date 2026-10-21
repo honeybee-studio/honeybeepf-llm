@@ -36,6 +36,7 @@ pub struct ResponseConfig {
     pub thoughts_tokens: Option<String>,
 
     /// Optional: field name for prompt tokens read from the provider cache
+    #[serde(alias = "cached_tokens")]
     pub cache_read_tokens: Option<String>,
 
     /// Optional: field name for prompt tokens written to the provider cache
