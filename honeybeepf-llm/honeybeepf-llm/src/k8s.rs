@@ -456,12 +456,14 @@ mod tests {
     }
 
     #[test]
-    fn test_resolver_caches_negative_result() {
-        let resolver = PodResolver::new();
-        // First call caches
-        let _ = resolver.resolve(1, 99999);
-        // Verify cache was populated
-        assert!(resolver.cgroup_cache.read().unwrap().contains_key(&99999));
+    fn test_resolver_does_not_cache_exited_pid() {
+        let resolver = PodResolver {
+            cgroup_v2: true,
+            ..PodResolver::new()
+        };
+        // u32::MAX is above pid_max, so /proc/<pid>/cgroup never exists.
+        assert!(resolver.resolve(u32::MAX, 99999).is_none());
+        assert!(!resolver.cgroup_cache.read().unwrap().contains_key(&99999));
     }
 
     #[test]
