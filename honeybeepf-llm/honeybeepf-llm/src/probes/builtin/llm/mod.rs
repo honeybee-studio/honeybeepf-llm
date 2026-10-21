@@ -24,7 +24,9 @@ use crate::probes::{
     spawn_ringbuf_handler,
 };
 // Re-export exec watch types and functions for lib.rs
-pub use crate::probes::{ExecNotify, ExecPidQueue, setup_exec_watch};
+pub use crate::probes::{
+    ExecNotify, ExecPidQueue, LibOpenQueue, setup_exec_watch, setup_lib_open_watch,
+};
 
 // Timing constants
 const CLEANUP_INTERVAL_SECS: u64 = 30; // How often to run cleanup
@@ -190,9 +192,9 @@ impl Probe for LlmProbe {
     fn attach(&self, bpf: &mut Ebpf, _resolver: IdentityResolver) -> Result<()> {
         let targets = discovery::find_all_targets()?;
 
+        // Keep going: libssl opened later is attached by re-discovery and needs the reader below.
         if targets.is_empty() {
-            warn!("No targets found. LLM probing disabled.");
-            return Ok(());
+            warn!("No libssl loaded yet; waiting for processes that load it.");
         }
 
         let stats = PerCpuArray::try_from(

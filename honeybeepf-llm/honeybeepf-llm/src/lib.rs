@@ -4,24 +4,33 @@ pub mod telemetry;
 #[cfg(feature = "k8s")]
 pub mod k8s;
 
-use std::{sync::atomic::Ordering, time::Duration};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::atomic::Ordering,
+    time::Duration,
+};
 
 use anyhow::Result;
 use aya::Ebpf;
 use aya_log::EbpfLogger;
 use log::{debug, info, warn};
-use tokio::signal;
+use tokio::{signal, time::Instant};
 
 use crate::settings::Settings;
 
 pub mod probes;
 use crate::probes::{
-    DynamicProbe, IdentityResolver, Probe, ProcessInfo,
+    DynamicProbe, IdentityResolver, LibOpen, LibOpenSeen, Probe, ProcessInfo,
     builtin::{
         FileAccessProbe,
-        llm::{ExecNotify, ExecPidQueue, LlmProbe, setup_exec_watch},
+        llm::{
+            ExecNotify, ExecPidQueue, LibOpenQueue, LlmProbe, setup_exec_watch,
+            setup_lib_open_watch,
+        },
         process_lifecycle::ProcessLifecycleProbe,
     },
+    discovery::resolve_in_root,
     request_shutdown, shutdown_flag,
 };
 
@@ -111,8 +120,9 @@ impl HoneyBeeEngine {
 
         // Start dynamic probe discovery if any dynamic probes are enabled
         if !self.dynamic_probes.is_empty() {
-            let (queue, notify) = setup_exec_watch(&mut self.bpf)?;
-            self.run_discovery(queue, notify).await?;
+            let exec_watch = setup_exec_watch(&mut self.bpf)?;
+            let lib_watch = setup_lib_open_watch(&mut self.bpf)?;
+            self.run_discovery(exec_watch, lib_watch).await?;
         } else {
             info!("Monitoring active. Press Ctrl-C to exit.");
             signal::ctrl_c().await?;
@@ -124,20 +134,45 @@ impl HoneyBeeEngine {
     }
 
     /// Run the dynamic discovery loop that monitors for new processes and notifies probes.
-    async fn run_discovery(&mut self, queue: ExecPidQueue, notify: ExecNotify) -> Result<()> {
+    async fn run_discovery(
+        &mut self,
+        (queue, notify): (ExecPidQueue, ExecNotify),
+        (lib_queue, lib_notify, mut lib_seen): (LibOpenQueue, ExecNotify, LibOpenSeen),
+    ) -> Result<()> {
         const BATCH_WAIT_MS: u64 = 50;
 
         let shutdown = shutdown_flag();
+        // A deadline branch rather than a sleep inside a branch, so opens are handled while it waits.
+        let mut exec_due: Option<Instant> = None;
 
         info!("Dynamic discovery active. Press Ctrl-C to exit.");
 
         loop {
             tokio::select! {
                 _ = signal::ctrl_c() => break,
-                _ = notify.notified() => {
+                _ = lib_notify.notified() => {
+                    let opens: Vec<LibOpen> = {
+                        let mut q = lib_queue.lock().unwrap_or_else(|e| e.into_inner());
+                        q.drain(..).collect()
+                    };
+                    for open in opens {
+                        debug!("libssl open: {} (PID: {})", open.path, open.pid);
+                        let root = PathBuf::from(format!("/proc/{}/root", open.pid));
+                        // Process gone: not marked seen, so the kernel reports the next open again.
+                        let Some(host_path) = resolve_in_root(&root, Path::new(&open.path)) else {
+                            continue;
+                        };
+                        let libs = HashSet::from([host_path.to_string_lossy().into_owned()]);
+                        self.notify_probes(&ProcessInfo { pid: open.pid, libs });
+                        let _ = lib_seen.insert(open.seen_key, open.ts, 0);
+                    }
+                }
+                _ = notify.notified(), if exec_due.is_none() => {
                     // Brief delay to batch rapid exec events
-                    tokio::time::sleep(Duration::from_millis(BATCH_WAIT_MS)).await;
-
+                    exec_due = Some(Instant::now() + Duration::from_millis(BATCH_WAIT_MS));
+                }
+                _ = tokio::time::sleep_until(exec_due.unwrap_or_else(Instant::now)), if exec_due.is_some() => {
+                    exec_due = None;
                     let pids: Vec<u32> = {
                         let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
                         q.drain(..).collect()
@@ -160,13 +195,7 @@ impl HoneyBeeEngine {
                                 continue;
                             }
 
-                            let process_info = ProcessInfo { pid, libs };
-
-                            for probe in &self.dynamic_probes {
-                                if let Err(e) = probe.on_exec(&mut self.bpf, &process_info) {
-                                    warn!("Probe on_exec error: {}", e);
-                                }
-                            }
+                            self.notify_probes(&ProcessInfo { pid, libs });
                         }
                     }
                 }
@@ -181,6 +210,14 @@ impl HoneyBeeEngine {
         telemetry::shutdown_metrics();
 
         Ok(())
+    }
+
+    fn notify_probes(&mut self, process_info: &ProcessInfo) {
+        for probe in &self.dynamic_probes {
+            if let Err(e) = probe.on_exec(&mut self.bpf, process_info) {
+                warn!("Probe on_exec error: {}", e);
+            }
+        }
     }
 
     fn attach_probes(&mut self) -> Result<()> {

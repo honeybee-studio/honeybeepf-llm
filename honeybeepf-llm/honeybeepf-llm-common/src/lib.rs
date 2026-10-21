@@ -119,6 +119,26 @@ pub struct ExecEvent {
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for ExecEvent {}
 
+/// Emitted when a process opens a `libssl.so*` path for reading.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LibOpenEvent {
+    pub pid: u32,
+    /// Bytes in `path`, without the NUL.
+    pub len: u32,
+    /// `LIB_OPEN_SEEN` key; userspace writes it back once the file is handled.
+    pub seen_key: [u64; 2],
+    /// bpf_ktime_get_ns() at the open.
+    pub ts: u64,
+    pub path: [u8; MAX_FILENAME_LEN],
+}
+
+const _: () = assert!(core::mem::size_of::<LibOpenEvent>() == 4 + 4 + 16 + 8 + MAX_FILENAME_LEN);
+
+// SAFETY: repr(C), only integer fields and no padding (checked by the assert above).
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for LibOpenEvent {}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct ProcessExitEvent {
