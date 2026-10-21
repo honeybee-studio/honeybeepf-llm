@@ -13,7 +13,26 @@ pub fn get_extractor(extractor_type: &RequestExtractorType) -> Box<dyn RequestEx
         RequestExtractorType::Messages => Box::new(MessagesExtractor),
         RequestExtractorType::Contents => Box::new(ContentsExtractor),
         RequestExtractorType::Prompt => Box::new(PromptExtractor),
+        RequestExtractorType::Input => Box::new(InputExtractor),
         RequestExtractorType::None => Box::new(NoOpExtractor),
+    }
+}
+
+/// Push the text of each message's `content`, a string or an array of content blocks.
+fn push_message_texts(messages: &[Value], texts: &mut Vec<String>) {
+    for msg in messages {
+        if let Some(content) = msg.get("content") {
+            if let Some(s) = content.as_str() {
+                texts.push(s.to_string());
+            } else if let Some(arr) = content.as_array() {
+                // Handle array of content blocks (e.g., with images)
+                for block in arr {
+                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                        texts.push(text.to_string());
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -24,22 +43,26 @@ impl RequestExtractor for MessagesExtractor {
     fn extract(&self, json: &Value) -> String {
         let mut texts = Vec::new();
         if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
-            for msg in messages {
-                if let Some(content) = msg.get("content") {
-                    if let Some(s) = content.as_str() {
-                        texts.push(s.to_string());
-                    } else if let Some(arr) = content.as_array() {
-                        // Handle array of content blocks (e.g., with images)
-                        for block in arr {
-                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                                texts.push(text.to_string());
-                            }
-                        }
-                    }
-                }
-            }
+            push_message_texts(messages, &mut texts);
         }
         texts.join(" ")
+    }
+}
+
+/// OpenAI Responses style: input as a string or input[].content
+struct InputExtractor;
+
+impl RequestExtractor for InputExtractor {
+    fn extract(&self, json: &Value) -> String {
+        match json.get("input") {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Array(items)) => {
+                let mut texts = Vec::new();
+                push_message_texts(items, &mut texts);
+                texts.join(" ")
+            }
+            _ => String::new(),
+        }
     }
 }
 

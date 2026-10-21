@@ -5,7 +5,7 @@ use once_cell::sync::Lazy;
 use serde_json::Value;
 
 use honeybeepf_llm_core::byte_utils;
-use honeybeepf_llm_core::providers::{ConfigurableProvider, ProviderRegistry};
+use honeybeepf_llm_core::providers::{ConfigurableProvider, ProviderRegistry, path_matches};
 use honeybeepf_llm_core::types::{SseChunkDelta, UsageInfo};
 
 /// Cached providers - built once at initialization
@@ -20,6 +20,17 @@ static CACHED_PROVIDERS: Lazy<Vec<ConfigurableProvider>> = Lazy::new(|| {
 
 /// Global provider registry - for host/path matching only
 static PROVIDER_REGISTRY: Lazy<ProviderRegistry> = Lazy::new(load_provider_registry);
+
+/// Distinct provider hosts: the HTTP/2 pre-check scans the whole buffer once per entry.
+static KNOWN_HOSTS: Lazy<Vec<&'static str>> = Lazy::new(|| {
+    let mut hosts: Vec<&'static str> = Vec::new();
+    for host in PROVIDER_REGISTRY.providers.iter().flat_map(|p| &p.hosts) {
+        if !hosts.contains(&host.as_str()) {
+            hosts.push(host);
+        }
+    }
+    hosts
+});
 
 fn load_provider_registry() -> ProviderRegistry {
     // 1. Try loading from config file
@@ -195,11 +206,9 @@ impl ProtocolParser for Http2Parser {
         // Check if buffer contains a known provider host before JSON detection.
         // HTTP/2 HEADERS frames typically contain the :authority host string.
         // This prevents false positives from non-LLM HTTP/2 traffic.
-        let has_known_host = PROVIDER_REGISTRY.providers.iter().any(|p| {
-            p.hosts
-                .iter()
-                .any(|h| byte_utils::contains_pattern(buffer, h.as_bytes()))
-        });
+        let has_known_host = KNOWN_HOSTS
+            .iter()
+            .any(|h| byte_utils::contains_pattern(buffer, h.as_bytes()));
 
         if !has_known_host {
             return None;
@@ -255,7 +264,13 @@ impl ProtocolParser for Http2Parser {
                 continue;
             }
 
-            if let Some(info) = parse_response_json(&s) {
+            let Ok(mut val) = serde_json::from_str::<Value>(&s) else {
+                continue;
+            };
+            if is_responses_event(&val) {
+                val = val["response"].take();
+            }
+            if let Some(info) = parse_response_json_value(&val) {
                 return Some(info);
             }
         }
@@ -266,12 +281,16 @@ impl ProtocolParser for Http2Parser {
 
 // --- SSE Parsing ---
 
-/// End-of-stream markers: OpenAI `[DONE]`/`finish_reason`, Anthropic `message_stop`, Gemini `finishReason`.
-const SSE_END_MARKERS: [&str; 4] = [
+/// End-of-stream markers: OpenAI `[DONE]`/`finish_reason`, Anthropic `message_stop`, Gemini `finishReason`,
+/// OpenAI Responses terminal event types.
+const SSE_END_MARKERS: [&str; 7] = [
     "data: [DONE]",
     "\"finish_reason\"",
     "\"message_stop\"",
     "\"finishReason\"",
+    "\"response.completed\"",
+    "\"response.failed\"",
+    "\"response.incomplete\"",
 ];
 
 fn parse_sse_body(body: &[u8]) -> Option<UsageInfo> {
@@ -297,8 +316,14 @@ fn parse_sse_body(body: &[u8]) -> Option<UsageInfo> {
             break;
         }
 
-        let is_usage_event =
-            serde_json::from_str::<SseChunkDelta>(data).is_ok_and(|chunk| chunk.has_usage());
+        // A failed Responses stream may end without usage; its status still has to finish the call.
+        let is_usage_event = serde_json::from_str::<SseChunkDelta>(data).is_ok_and(|chunk| {
+            chunk.has_usage()
+                || chunk
+                    .response
+                    .as_ref()
+                    .is_some_and(|r| r.get("status").and_then(Value::as_str) == Some("failed"))
+        });
         if !is_usage_event {
             continue;
         }
@@ -307,6 +332,8 @@ fn parse_sse_body(body: &[u8]) -> Option<UsageInfo> {
         };
         if val.get("message").is_some_and(|m| m.get("usage").is_some()) {
             val = val["message"].take();
+        } else if is_responses_event(&val) {
+            val = val["response"].take();
         }
         match acc.as_mut() {
             Some(prev) => merge_sse_event(prev, val),
@@ -315,6 +342,11 @@ fn parse_sse_body(body: &[u8]) -> Option<UsageInfo> {
     }
 
     acc.as_ref().and_then(parse_response_json_value)
+}
+
+/// OpenAI Responses events nest the response, with its usage and status, under a `response` object.
+fn is_responses_event(val: &Value) -> bool {
+    val.get("usage").is_none() && val.get("response").is_some_and(Value::is_object)
 }
 
 /// Overlay a later SSE event onto the accumulated one, merging nested objects one level deep.
@@ -342,12 +374,15 @@ fn parse_response_json(json_str: &str) -> Option<UsageInfo> {
 }
 
 fn parse_response_json_value(val: &Value) -> Option<UsageInfo> {
-    // Check for error response
-    if val.get("error").is_some() {
+    // Responses API bodies always carry `error` (null on success) and mark failure in `status`.
+    let is_error = val.get("error").is_some_and(|e| !e.is_null())
+        || val.get("status").and_then(Value::as_str) == Some("failed");
+    if is_error {
         return Some(UsageInfo {
             prompt_tokens: 0,
             completion_tokens: 0,
             thoughts_tokens: None,
+            cached_tokens: None,
             model: None,
         });
     }
@@ -374,7 +409,7 @@ fn is_llm_path(path: &str) -> bool {
     PROVIDER_REGISTRY
         .providers
         .iter()
-        .any(|config| config.paths.iter().any(|p| path.contains(p)))
+        .any(|config| config.paths.iter().any(|p| path_matches(path, p)))
 }
 
 /// Extract user text from request JSON by trying all providers.
@@ -562,6 +597,117 @@ mod tests {
         );
         let info = Http11Parser.parse_response(&http11_sse(body));
         assert_eq!(tokens(info), None);
+    }
+
+    const RESPONSES_CREATED: &str = concat!(
+        "event: response.created\n",
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"model\":\"gpt-6\",\"status\":\"in_progress\",\"error\":null,\"usage\":null}}\n\n",
+        "event: response.output_text.delta\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+    );
+
+    #[test]
+    fn responses_sse_reads_usage_from_response_completed() {
+        let body = format!(
+            "{RESPONSES_CREATED}event: response.completed\n\
+             data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"r1\",\"model\":\"gpt-6\",\"status\":\"completed\",\"error\":null,\
+             \"usage\":{{\"input_tokens\":30,\"input_tokens_details\":{{\"cached_tokens\":5}},\"output_tokens\":9,\
+             \"output_tokens_details\":{{\"reasoning_tokens\":2}},\"total_tokens\":39}}}}}}\n\n"
+        );
+        let info = Http11Parser
+            .parse_response(&http11_sse(&body))
+            .expect("usage");
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (30, 9));
+        assert_eq!(
+            (info.thoughts_tokens, info.cached_tokens),
+            (Some(2), Some(5))
+        );
+        assert_eq!(info.model.as_deref(), Some("gpt-6"));
+    }
+
+    #[test]
+    fn responses_sse_incomplete_keeps_usage() {
+        let body = format!(
+            "{RESPONSES_CREATED}event: response.incomplete\n\
+             data: {{\"type\":\"response.incomplete\",\"response\":{{\"model\":\"gpt-6\",\"status\":\"incomplete\",\"error\":null,\
+             \"incomplete_details\":{{\"reason\":\"max_output_tokens\"}},\"usage\":{{\"input_tokens\":30,\"output_tokens\":16}}}}}}\n\n"
+        );
+        let info = Http11Parser.parse_response(&http11_sse(&body));
+        assert_eq!(tokens(info), Some((30, 16)));
+    }
+
+    #[test]
+    fn responses_sse_failed_without_usage_is_error() {
+        let body = format!(
+            "{RESPONSES_CREATED}event: response.failed\n\
+             data: {{\"type\":\"response.failed\",\"response\":{{\"model\":\"gpt-6\",\"status\":\"failed\",\
+             \"error\":{{\"code\":\"server_error\",\"message\":\"boom\"}},\"usage\":null}}}}\n\n"
+        );
+        let info = Http11Parser.parse_response(&http11_sse(&body));
+        assert_eq!(tokens(info), Some((0, 0)));
+    }
+
+    #[test]
+    fn responses_sse_without_terminal_event_is_incomplete() {
+        let info = Http11Parser.parse_response(&http11_sse(RESPONSES_CREATED));
+        assert_eq!(tokens(info), None);
+    }
+
+    #[test]
+    fn responses_json_with_null_error_reads_usage() {
+        let resp = concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n",
+            "{\"id\":\"r1\",\"object\":\"response\",\"model\":\"gpt-6\",\"status\":\"completed\",\"error\":null,",
+            "\"usage\":{\"input_tokens\":30,\"input_tokens_details\":{\"cached_tokens\":0},",
+            "\"output_tokens\":9,\"output_tokens_details\":{\"reasoning_tokens\":2},\"total_tokens\":39}}",
+        );
+        let info = Http11Parser.parse_response(resp.as_bytes()).expect("usage");
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (30, 9));
+        assert_eq!(info.thoughts_tokens, Some(2));
+    }
+
+    #[test]
+    fn sse_string_response_field_keeps_top_level_usage() {
+        let body = concat!(
+            "data: {\"response\":\"\",\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let info = Http11Parser.parse_response(&http11_sse(body));
+        assert_eq!(tokens(info), Some((5, 3)));
+    }
+
+    #[test]
+    fn h2_responses_sse_reads_nested_usage() {
+        let body = format!(
+            "{RESPONSES_CREATED}event: response.completed\n\
+             data: {{\"type\":\"response.completed\",\"response\":{{\"model\":\"gpt-6\",\"status\":\"completed\",\"error\":null,\
+             \"usage\":{{\"input_tokens\":30,\"output_tokens\":9}}}}}}\n\n"
+        );
+        let info = Http2Parser.parse_response(body.as_bytes());
+        assert_eq!(tokens(info), Some((30, 9)));
+    }
+
+    #[test]
+    fn responses_create_is_detected_but_retrieval_is_not() {
+        let post = b"POST /v1/responses HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{\"input\":\"hi\"}";
+        assert_eq!(
+            Http11Parser.detect_request(post).as_deref(),
+            Some("/v1/responses")
+        );
+        let get = b"GET /v1/responses/r1 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
+        assert_eq!(Http11Parser.detect_request(get), None);
+    }
+
+    #[test]
+    fn known_hosts_are_distinct() {
+        let hosts = &*KNOWN_HOSTS;
+        assert!(hosts.contains(&"api.openai.com"));
+        assert!(
+            hosts
+                .iter()
+                .enumerate()
+                .all(|(i, h)| !hosts[..i].contains(h))
+        );
     }
 
     #[test]
