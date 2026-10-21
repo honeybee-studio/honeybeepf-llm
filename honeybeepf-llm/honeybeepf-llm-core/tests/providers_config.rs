@@ -23,6 +23,17 @@ fn test_find_provider() {
 }
 
 #[test]
+fn test_find_provider_gemini_stream_generate_content() {
+    let registry = ProviderRegistry::with_defaults();
+
+    let gemini = registry.find_provider(
+        "generativelanguage.googleapis.com",
+        "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+    );
+    assert_eq!(gemini.map(|p| p.name.as_str()), Some("gemini"));
+}
+
+#[test]
 fn test_custom_provider_json() {
     let json = r#"{
         "providers": [
