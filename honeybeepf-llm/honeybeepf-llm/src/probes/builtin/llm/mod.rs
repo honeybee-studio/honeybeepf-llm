@@ -166,7 +166,9 @@ impl DynamicProbe for LlmProbe {
         for (path, id) in candidates {
             info!(
                 "[Re-discovery] New SSL library found: {} (PID: {}, ino {})",
-                path, process_info.pid, id.ino
+                path,
+                process_info.pid,
+                id.ino()
             );
             let result = attach_probes_to_path(bpf, path);
             self.known_targets
@@ -209,7 +211,8 @@ impl Probe for LlmProbe {
         for (path, id) in candidates {
             info!(
                 "Attaching LLM (SSL) probes to detected library: {} (ino {})",
-                path, id.ino
+                path,
+                id.ino()
             );
             let result = attach_probes_to_path(bpf, path);
             self.known_targets
