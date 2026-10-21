@@ -23,5 +23,5 @@ mod request;
 mod usage;
 
 pub use config::{ProviderConfig, ProviderRegistry, RequestExtractorType, ResponseConfig};
-pub use request::RequestExtractor;
+pub use request::{RequestExtractor, get_extractor};
 pub use usage::ConfigurableProvider;
