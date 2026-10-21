@@ -52,6 +52,7 @@ pub struct HoneyBeeMetrics {
     pub llm_requests_total: Counter<u64>,
     pub llm_tokens_total: Counter<u64>,
     pub llm_latency_seconds: Histogram<f64>,
+    pub llm_responses_unparsed_total: Counter<u64>,
 }
 
 impl HoneyBeeMetrics {
@@ -107,6 +108,11 @@ impl HoneyBeeMetrics {
                 .f64_histogram("llm_latency_seconds")
                 .with_description("Latency of LLM requests")
                 .with_unit("s")
+                .build(),
+            llm_responses_unparsed_total: meter
+                .u64_counter("llm_responses_unparsed_total")
+                .with_description("LLM responses not recorded because bytes were lost in capture")
+                .with_unit("responses")
                 .build(),
         }
     }
@@ -286,6 +292,22 @@ pub fn record_llm_request(
             comp_attrs.push(KeyValue::new("token_type", "completion"));
             m.llm_tokens_total.add(completion_tokens, &comp_attrs);
         }
+    }
+}
+
+/// Count an LLM response that lost bytes in capture and so has no usage to record.
+pub fn record_llm_unparsed(#[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>) {
+    if let Some(m) = metrics() {
+        #[allow(unused_mut)]
+        let mut attrs = Vec::new();
+
+        #[cfg(feature = "k8s")]
+        if let Some(pod) = pod_info {
+            attrs.push(KeyValue::new("target.namespace", pod.namespace.clone()));
+            attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
+        }
+
+        m.llm_responses_unparsed_total.add(1, &attrs);
     }
 }
 

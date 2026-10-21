@@ -5,7 +5,9 @@ use aya_ebpf::{
     },
     programs::RetProbeContext,
 };
-use honeybeepf_llm_common::{LlmEvent, MAX_SSL_BUF_SIZE};
+use honeybeepf_llm_common::{
+    EventMetadata, LlmDirection, LlmEvent, MAX_SSL_BUF_SIZE, capture_limit,
+};
 
 use crate::probes::builtin::llm::maps::{BUFS, LLM_STATS, READBYTES_PTRS, START_NS};
 
@@ -54,40 +56,35 @@ impl Session {
     }
 }
 
-pub trait LlmEventExt {
-    fn capture_data(
-        &mut self,
-        ctx: &RetProbeContext,
-        rw: u8,
-        is_handshake: bool,
-    ) -> Result<(), u32>;
+/// One finished SSL call, read once and stamped on each fragment it is sent in.
+pub struct SslCall {
+    metadata: EventMetadata,
+    latency_ns: u64,
+    comm: [u8; 16],
+    buf_addr: u64,
+    pub len: u32,
 }
 
-impl LlmEventExt for LlmEvent {
+impl SslCall {
     #[inline(always)]
-    fn capture_data(
-        &mut self,
-        ctx: &RetProbeContext,
-        rw: u8,
-        is_handshake: bool,
-    ) -> Result<(), u32> {
+    pub fn capture(ctx: &RetProbeContext, is_handshake: bool) -> Result<Self, u32> {
         let tid = get_current_tid();
         let (start_ts, buf_addr, len_ptr) = Session::get_info(tid);
 
         // Initialize metadata inline. LlmEvent uses a custom capture pattern with RetProbeContext
         // rather than the HoneyBeeEvent trait (which uses TracePointContext/ProbeContext).
         let pid_tgid = bpf_get_current_pid_tgid();
-        self.metadata.pid = (pid_tgid >> 32) as u32;
-        // Store tid in _pad for userspace per-thread stream correlation. EventMetadata is shared
-        // across all event types, so we reuse the padding field rather than adding a new field.
-        self.metadata._pad = pid_tgid as u32;
-        self.metadata.timestamp = unsafe { bpf_ktime_get_ns() };
-        self.metadata.cgroup_id = unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() };
-
-        self.rw = rw;
-        self.is_handshake = if is_handshake { 1 } else { 0 };
-        self.latency_ns = if start_ts > 0 {
-            self.metadata.timestamp - start_ts
+        let timestamp = unsafe { bpf_ktime_get_ns() };
+        let metadata = EventMetadata {
+            pid: (pid_tgid >> 32) as u32,
+            // Store tid in _pad for userspace per-thread stream correlation. EventMetadata is shared
+            // across all event types, so we reuse the padding field rather than adding a new field.
+            _pad: pid_tgid as u32,
+            cgroup_id: unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() },
+            timestamp,
+        };
+        let latency_ns = if start_ts > 0 {
+            timestamp - start_ts
         } else {
             0
         };
@@ -105,7 +102,7 @@ impl LlmEventExt for LlmEvent {
             return Err(1);
         }
 
-        self.len = if let Some(lp) = len_ptr {
+        let len = if let Some(lp) = len_ptr {
             let actual_len: usize =
                 unsafe { bpf_probe_read_user(lp as *const usize) }.map_err(|_| 1u32)?;
             actual_len as u32
@@ -113,24 +110,47 @@ impl LlmEventExt for LlmEvent {
             ret as u32
         };
 
-        if buf_addr > 0 {
-            let to_read = core::cmp::min(self.len as usize, MAX_SSL_BUF_SIZE);
+        // Session cleanup is handled by the caller (emit_llm_event) for consistency
+        Ok(Self {
+            metadata,
+            latency_ns,
+            comm: bpf_get_current_comm().unwrap_or([0; 16]),
+            buf_addr,
+            len,
+        })
+    }
+}
+
+pub trait LlmEventExt {
+    fn fill(&mut self, call: &SslCall, rw: u8, is_handshake: bool, offset: u32) -> Result<(), u32>;
+}
+
+impl LlmEventExt for LlmEvent {
+    #[inline(always)]
+    fn fill(&mut self, call: &SslCall, rw: u8, is_handshake: bool, offset: u32) -> Result<(), u32> {
+        self.metadata = call.metadata;
+        self.rw = rw;
+        self.is_handshake = if is_handshake { 1 } else { 0 };
+        self.truncated = (call.len as usize > capture_limit(LlmDirection::from(rw))) as u8;
+        self._pad = 0;
+        self.len = call.len;
+        self.offset = offset;
+        self.latency_ns = call.latency_ns;
+        self.comm = call.comm;
+
+        if call.buf_addr > 0 {
+            let to_read =
+                core::cmp::min(call.len.saturating_sub(offset) as usize, MAX_SSL_BUF_SIZE);
+            let src = (call.buf_addr + offset as u64) as *const u8;
             // Read directly into self.buf to avoid 4KB stack allocation
-            let result =
-                unsafe { bpf_probe_read_user_buf(buf_addr as *const u8, &mut self.buf[..to_read]) };
-            if result.is_ok() {
-                self.buf_filled = 1;
-            } else {
+            if unsafe { bpf_probe_read_user_buf(src, &mut self.buf[..to_read]) }.is_err() {
                 self.buf_filled = 0;
                 return Err(1);
             }
+            self.buf_filled = 1;
         } else {
             self.buf_filled = 0;
         }
-
-        self.comm = bpf_get_current_comm().unwrap_or([0; 16]);
-
-        // Session cleanup is handled by the caller (emit_llm_event) for consistency
         Ok(())
     }
 }
