@@ -194,11 +194,10 @@ fn test_gemini_cached_content_tokens_are_part_of_prompt() {
 }
 
 #[test]
-fn test_custom_provider_cached_tokens_key_still_reads_cache() {
+fn test_custom_provider_cached_tokens_key_still_reads_cache() -> Result<(), serde_json::Error> {
     let registry = ProviderRegistry::from_json(
         r#"{"providers":[{"name":"proxy","response":{"cached_tokens":"prompt_tokens_details.cached_tokens"}}]}"#,
-    )
-    .unwrap();
+    )?;
     let provider = ConfigurableProvider::new(registry.providers[0].clone());
     let response = json!({
         "usage": {"prompt_tokens": 10, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 8}}
@@ -207,6 +206,7 @@ fn test_custom_provider_cached_tokens_key_still_reads_cache() {
         provider.parse_usage(&response).unwrap().cache_read_tokens,
         Some(8)
     );
+    Ok(())
 }
 
 #[test]
