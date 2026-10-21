@@ -17,14 +17,15 @@ use aya_ebpf::{
     programs::{ProbeContext, RetProbeContext},
 };
 use honeybeepf_llm_common::{
-    LLM_STAT_DISCARD, LLM_STAT_EMPTY, LLM_STAT_ENTER, LLM_STAT_HANDSHAKE, LLM_STAT_RESERVE_FAIL,
-    LLM_STAT_SUBMIT, LLM_STAT_TRUNCATED, LlmDirection, LlmEvent, MAX_SSL_BUF_SIZE,
+    LLM_STAT_DISCARD, LLM_STAT_EMPTY, LLM_STAT_ENTER, LLM_STAT_FRAGMENT, LLM_STAT_HANDSHAKE,
+    LLM_STAT_RESERVE_FAIL, LLM_STAT_SUBMIT, LLM_STAT_TRUNCATED, LlmDirection, LlmEvent,
+    MAX_SSL_BUF_SIZE, MAX_SSL_FRAGMENTS, capture_limit,
 };
 
 mod helpers;
 pub mod maps;
 
-use helpers::{LlmEventExt, Session, count, get_current_tid};
+use helpers::{LlmEventExt, Session, SslCall, count, get_current_tid};
 use maps::*;
 
 /// Entry probe for SSL_read/SSL_write. Captures buffer pointer from arg1.
@@ -90,26 +91,57 @@ pub fn probe_ssl_do_handshake_exit(ctx: RetProbeContext) -> u32 {
 #[inline(always)]
 fn emit_llm_event(ctx: &RetProbeContext, rw: u8, is_handshake: bool) -> u32 {
     let tid = get_current_tid();
-    if let Some(mut slot) = SSL_EVENTS.reserve::<LlmEvent>(0) {
-        let event = unsafe { &mut *slot.as_mut_ptr() };
-        if event.capture_data(ctx, rw, is_handshake).is_ok() {
-            if is_handshake {
-                count(LLM_STAT_HANDSHAKE);
-            } else if event.buf_filled == 0 {
-                count(LLM_STAT_EMPTY);
-            } else if event.len as usize > MAX_SSL_BUF_SIZE {
-                count(LLM_STAT_TRUNCATED);
-            }
-            count(LLM_STAT_SUBMIT);
-            slot.submit(0);
-        } else {
-            count(LLM_STAT_DISCARD);
-            slot.discard(0);
-        }
-    } else {
-        count(LLM_STAT_RESERVE_FAIL);
+    match SslCall::capture(ctx, is_handshake) {
+        Ok(call) => emit_fragments(&call, rw, is_handshake),
+        Err(_) => count(LLM_STAT_DISCARD),
     }
     // Always clear session state - handles success, failure, and reserve failure cases
     Session::clear(tid);
     0
+}
+
+/// Send the call's data as up to MAX_SSL_FRAGMENTS events of MAX_SSL_BUF_SIZE bytes each.
+#[inline(always)]
+fn emit_fragments(call: &SslCall, rw: u8, is_handshake: bool) {
+    let limit = capture_limit(LlmDirection::from(rw));
+    // Calls over the limit were counted as truncated at fragment 0.
+    let tail_lost = |i: usize| {
+        if i > 0 && call.len as usize <= limit {
+            count(LLM_STAT_TRUNCATED);
+        }
+    };
+    for i in 0..MAX_SSL_FRAGMENTS {
+        let offset = i * MAX_SSL_BUF_SIZE;
+        if i > 0 && (offset >= call.len as usize || offset >= limit) {
+            return;
+        }
+        let offset = offset as u32;
+        let Some(mut slot) = SSL_EVENTS.reserve::<LlmEvent>(0) else {
+            if i == 0 {
+                count(LLM_STAT_RESERVE_FAIL);
+            }
+            tail_lost(i);
+            return;
+        };
+        let event = unsafe { &mut *slot.as_mut_ptr() };
+        if event.fill(call, rw, is_handshake, offset).is_err() {
+            if i == 0 {
+                count(LLM_STAT_DISCARD);
+            }
+            tail_lost(i);
+            slot.discard(0);
+            return;
+        }
+        if i > 0 {
+            count(LLM_STAT_FRAGMENT);
+        } else if is_handshake {
+            count(LLM_STAT_HANDSHAKE);
+        } else if event.buf_filled == 0 {
+            count(LLM_STAT_EMPTY);
+        } else if event.truncated != 0 {
+            count(LLM_STAT_TRUNCATED);
+        }
+        count(LLM_STAT_SUBMIT);
+        slot.submit(0);
+    }
 }
