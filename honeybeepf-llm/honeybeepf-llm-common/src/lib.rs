@@ -2,6 +2,25 @@
 
 pub const MAX_SSL_BUF_SIZE: usize = 4096;
 
+// Indices into the LLM_STATS per-CPU counter map (kernel increments, userspace sums).
+pub const LLM_STAT_ENTER: u32 = 0; // entry uprobe hits (SSL_read/write/_ex, SSL_do_handshake)
+pub const LLM_STAT_SUBMIT: u32 = 1; // events submitted to SSL_EVENTS
+pub const LLM_STAT_RESERVE_FAIL: u32 = 2; // SSL_EVENTS full, event lost
+pub const LLM_STAT_DISCARD: u32 = 3; // reserved then discarded (ret <= 0, no session, read failure)
+pub const LLM_STAT_EMPTY: u32 = 4; // submitted without payload (buf_filled = 0)
+pub const LLM_STAT_TRUNCATED: u32 = 5; // submitted with len > MAX_SSL_BUF_SIZE
+pub const LLM_STAT_HANDSHAKE: u32 = 6; // handshake events submitted
+pub const LLM_STAT_COUNT: usize = 7;
+pub const LLM_STAT_NAMES: [&str; LLM_STAT_COUNT] = [
+    "enter",
+    "submit",
+    "reserve_fail",
+    "discard",
+    "empty",
+    "truncated",
+    "handshake",
+];
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct EventMetadata {

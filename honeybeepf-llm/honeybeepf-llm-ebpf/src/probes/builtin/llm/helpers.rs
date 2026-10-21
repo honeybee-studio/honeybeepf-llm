@@ -7,11 +7,20 @@ use aya_ebpf::{
 };
 use honeybeepf_llm_common::{LlmEvent, MAX_SSL_BUF_SIZE};
 
-use crate::probes::builtin::llm::maps::{BUFS, READBYTES_PTRS, START_NS};
+use crate::probes::builtin::llm::maps::{BUFS, LLM_STATS, READBYTES_PTRS, START_NS};
 
 #[inline(always)]
 pub fn get_current_tid() -> u32 {
     bpf_get_current_pid_tgid() as u32
+}
+
+/// Increment one `LLM_STAT_*` counter for the current CPU (approximate: not atomic).
+#[inline(never)]
+pub fn count(stat: u32) {
+    if let Some(p) = LLM_STATS.get_ptr_mut(stat) {
+        // SAFETY: `p` is this CPU's slot of the per-CPU value, valid while the program runs.
+        unsafe { *p += 1 };
+    }
 }
 
 pub struct Session;
@@ -83,11 +92,16 @@ impl LlmEventExt for LlmEvent {
             0
         };
 
-        let ret: i64 = ctx.ret().ok_or(1u32)?;
+        // C `int` return: RAX's upper half isn't sign-extended, so as i64 a -1 reads as 4294967295.
+        let ret: i32 = ctx.ret().ok_or(1u32)?;
         // Filter out errors (ret < 0) and zero-byte results (ret == 0).
         // For SSL_read, ret == 0 indicates clean shutdown - no data to capture.
         // For LLM monitoring, we only care about actual data transfers.
         if ret <= 0 {
+            return Err(1);
+        }
+        // No session: the entry probe missed this call or another return probe consumed it.
+        if buf_addr == 0 && !is_handshake {
             return Err(1);
         }
 

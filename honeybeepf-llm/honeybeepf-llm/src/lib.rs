@@ -177,6 +177,7 @@ impl HoneyBeeEngine {
             }
         }
 
+        crate::probes::builtin::llm::log_event_stats();
         telemetry::shutdown_metrics();
 
         Ok(())
