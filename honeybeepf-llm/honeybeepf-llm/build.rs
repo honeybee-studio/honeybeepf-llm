@@ -4,6 +4,7 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     println!("cargo:rerun-if-changed=../honeybeepf-llm-ebpf/src");
+    println!("cargo:rerun-if-env-changed=HONEYBEEPF_EBPF_TARGET_DIR");
 
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
 
@@ -26,8 +27,10 @@ fn main() {
 
     let ebpf_dir = PathBuf::from("../honeybeepf-llm-ebpf");
 
-    // Use a separate target directory for eBPF to avoid file lock conflicts
-    let ebpf_target_dir = PathBuf::from(env::var("HOME").unwrap()).join("cargo-target-ebpf");
+    // Nested cargo needs its own target dir (the outer build holds the workspace target lock);
+    // keep it per checkout so concurrent checkouts can't swap each other's objects.
+    let ebpf_target_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join(env::var_os("HONEYBEEPF_EBPF_TARGET_DIR").unwrap_or_else(|| "../target/ebpf".into()));
 
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
 
