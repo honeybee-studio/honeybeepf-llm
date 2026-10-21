@@ -19,12 +19,29 @@ pub fn resolve_host_path(pid: i32, container_path: &std::path::Path) -> PathBuf 
     root_path
 }
 
-/// (device, inode) of the file behind `path`; per-process paths to one library share it.
-pub fn file_identity(path: &str) -> Option<(u64, u64)> {
+/// Identity of a library file, equal for every container's overlayfs view of one lower file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FileId {
+    pub ino: u64,
+    size: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+/// Identity of the file behind `path`; per-process and per-container paths to one library share it.
+pub fn file_identity(path: &str) -> Option<FileId> {
     use std::os::unix::fs::MetadataExt;
 
     let meta = std::fs::metadata(path).ok()?;
-    Some((meta.dev(), meta.ino()))
+    // overlayfs reports a per-mount st_dev but the lower file's inode and times, and uprobes
+    // attach to that lower inode; size and times stand in for dev so inodes from different
+    // filesystems don't merge.
+    Some(FileId {
+        ino: meta.ino(),
+        size: meta.size(),
+        mtime: (meta.mtime(), meta.mtime_nsec()),
+        ctime: (meta.ctime(), meta.ctime_nsec()),
+    })
 }
 
 /// Find libraries matching a regex pattern across all running processes.

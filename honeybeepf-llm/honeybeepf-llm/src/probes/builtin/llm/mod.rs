@@ -20,7 +20,8 @@ use processor::StreamProcessor;
 
 use crate::probes::{
     DynamicProbe, IdentityResolver, Probe, ProcessInfo, attach_uprobe, detach_uprobe,
-    discovery::file_identity, spawn_ringbuf_handler,
+    discovery::{FileId, file_identity},
+    spawn_ringbuf_handler,
 };
 // Re-export exec watch types and functions for lib.rs
 pub use crate::probes::{ExecNotify, ExecPidQueue, setup_exec_watch};
@@ -112,9 +113,6 @@ pub fn attach_probes_to_path(bpf: &mut Ebpf, libssl_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// A library file identified by (device, inode); see `file_identity`.
-type FileId = (u64, u64);
-
 /// One path per distinct file not in `known`, preferring host paths over `/proc/<pid>/root`.
 fn unique_new_files<'a>(
     paths: impl IntoIterator<Item = &'a String>,
@@ -167,8 +165,8 @@ impl DynamicProbe for LlmProbe {
         // Attach probes without holding the lock
         for (path, id) in candidates {
             info!(
-                "[Re-discovery] New SSL library found: {} (PID: {}, dev {}, ino {})",
-                path, process_info.pid, id.0, id.1
+                "[Re-discovery] New SSL library found: {} (PID: {}, ino {})",
+                path, process_info.pid, id.ino
             );
             let result = attach_probes_to_path(bpf, path);
             self.known_targets
@@ -210,8 +208,8 @@ impl Probe for LlmProbe {
 
         for (path, id) in candidates {
             info!(
-                "Attaching LLM (SSL) probes to detected library: {} (dev {}, ino {})",
-                path, id.0, id.1
+                "Attaching LLM (SSL) probes to detected library: {} (ino {})",
+                path, id.ino
             );
             let result = attach_probes_to_path(bpf, path);
             self.known_targets
@@ -331,6 +329,25 @@ mod tests {
         // Re-discovery for a new process skips files already attached.
         let known: HashSet<FileId> = new.iter().map(|(_, id)| *id).collect();
         assert!(unique_new_files(&paths, &known).is_empty());
+
+        std::fs::remove_dir_all(&dir)
+    }
+
+    /// A byte-identical copy is a separate inode with its own uprobes, so it must not merge.
+    #[test]
+    fn test_unique_new_files_keeps_identical_copy() -> std::io::Result<()> {
+        let dir = std::env::temp_dir().join(format!("hb-llm-copy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let lib = dir.join("libssl.so.3");
+        let copy = dir.join("libssl.so.3.copy");
+        std::fs::write(&lib, b"lib")?;
+        std::fs::copy(&lib, &copy)?;
+
+        let paths: Vec<String> = [&lib, &copy]
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(unique_new_files(&paths, &HashSet::new()).len(), 2);
 
         std::fs::remove_dir_all(&dir)
     }
