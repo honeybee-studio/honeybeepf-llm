@@ -66,6 +66,32 @@ fn test_prompt_extractor() {
 }
 
 #[test]
+fn test_input_extractor_string() {
+    let extractor = get_extractor(&RequestExtractorType::Input);
+    let json = json!({"model": "gpt-6", "input": "Write a haiku"});
+    assert_eq!(extractor.extract(&json), "Write a haiku");
+}
+
+#[test]
+fn test_input_extractor_message_items() {
+    let extractor = get_extractor(&RequestExtractorType::Input);
+    let json = json!({
+        "input": [
+            {"role": "developer", "content": "Be brief"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "What is this?"},
+                    {"type": "input_image", "image_url": "..."}
+                ]
+            },
+            {"type": "function_call_output", "call_id": "c1", "output": "42"}
+        ]
+    });
+    assert_eq!(extractor.extract(&json), "Be brief What is this?");
+}
+
+#[test]
 fn test_noop_extractor_returns_empty() {
     let extractor = get_extractor(&RequestExtractorType::None);
     let json = json!({

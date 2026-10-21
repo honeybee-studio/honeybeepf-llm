@@ -11,6 +11,8 @@ pub enum RequestExtractorType {
     Contents,
     /// Simple prompt field: prompt
     Prompt,
+    /// OpenAI Responses style: input as a string or input[].content
+    Input,
     /// No extraction (skip request text estimation)
     None,
 }
@@ -32,6 +34,9 @@ pub struct ResponseConfig {
 
     /// Optional: field name for thinking/reasoning tokens
     pub thoughts_tokens: Option<String>,
+
+    /// Optional: field name for cached prompt tokens
+    pub cached_tokens: Option<String>,
 
     /// JSON path to model name (from root, e.g., "model" or "modelVersion")
     #[serde(default = "default_model_path")]
@@ -58,6 +63,7 @@ impl Default for ResponseConfig {
             prompt_tokens: default_prompt_tokens(),
             completion_tokens: default_completion_tokens(),
             thoughts_tokens: None,
+            cached_tokens: None,
             model_path: default_model_path(),
         }
     }
@@ -116,9 +122,27 @@ impl ProviderRegistry {
                         thoughts_tokens: Some(
                             "completion_tokens_details.reasoning_tokens".to_string(),
                         ),
+                        cached_tokens: None,
                         model_path: "model".to_string(),
                     },
                     request_extractor: RequestExtractorType::Messages,
+                },
+                // Responses API. Usage parsing tries providers in order without a host check, so this
+                // goes before anthropic (same input/output_tokens keys) to keep reasoning and cached counts.
+                // `$` keeps GET /v1/responses/{id} out.
+                ProviderConfig {
+                    name: "openai".to_string(),
+                    hosts: vec!["api.openai.com".to_string()],
+                    paths: vec!["/v1/responses$".to_string()],
+                    response: ResponseConfig {
+                        usage_path: "usage".to_string(),
+                        prompt_tokens: "input_tokens".to_string(),
+                        completion_tokens: "output_tokens".to_string(),
+                        thoughts_tokens: Some("output_tokens_details.reasoning_tokens".to_string()),
+                        cached_tokens: Some("input_tokens_details.cached_tokens".to_string()),
+                        model_path: "model".to_string(),
+                    },
+                    request_extractor: RequestExtractorType::Input,
                 },
                 ProviderConfig {
                     name: "anthropic".to_string(),
@@ -129,6 +153,7 @@ impl ProviderRegistry {
                         prompt_tokens: "input_tokens".to_string(),
                         completion_tokens: "output_tokens".to_string(),
                         thoughts_tokens: None,
+                        cached_tokens: None,
                         model_path: "model".to_string(),
                     },
                     request_extractor: RequestExtractorType::Messages,
@@ -146,6 +171,7 @@ impl ProviderRegistry {
                         prompt_tokens: "promptTokenCount".to_string(),
                         completion_tokens: "candidatesTokenCount".to_string(),
                         thoughts_tokens: Some("thoughtsTokenCount".to_string()),
+                        cached_tokens: None,
                         model_path: "modelVersion".to_string(),
                     },
                     request_extractor: RequestExtractorType::Contents,
@@ -158,8 +184,20 @@ impl ProviderRegistry {
     pub fn find_provider(&self, host: &str, path: &str) -> Option<&ProviderConfig> {
         self.providers.iter().find(|p| {
             let host_match = p.hosts.is_empty() || p.hosts.iter().any(|h| host.contains(h));
-            let path_match = p.paths.is_empty() || p.paths.iter().any(|pat| path.contains(pat));
+            let path_match =
+                p.paths.is_empty() || p.paths.iter().any(|pat| path_matches(path, pat));
             host_match && path_match
         })
+    }
+}
+
+/// Substring match, or with a trailing `$` the path without its query must end with the pattern.
+pub fn path_matches(path: &str, pattern: &str) -> bool {
+    match pattern.strip_suffix('$') {
+        Some(suffix) => path
+            .split_once('?')
+            .map_or(path, |(p, _)| p)
+            .ends_with(suffix),
+        None => path.contains(pattern),
     }
 }

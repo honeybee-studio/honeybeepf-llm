@@ -47,13 +47,13 @@ builtinProbes:
     # providers:
     #   - name: "ollama"
     #     hosts: ["localhost", "ollama.internal"]
-    #     paths: ["/api/generate", "/api/chat"]
+    #     paths: ["/api/generate", "/api/chat"]  # substring match; a trailing "$" anchors the end (query ignored)
     #     response:
     #       usage_path: "usage"               # JSON path to usage object
     #       prompt_tokens: "prompt_eval_count" # Field name for input tokens
     #       completion_tokens: "eval_count"    # Field name for output tokens
     #       model_path: "model"
-    #     request_extractor: "messages"       # How to extract prompt text (messages, contents, prompt)
+    #     request_extractor: "messages"       # How to extract prompt text (messages, contents, prompt, input)
 
   interval: 1000
 
