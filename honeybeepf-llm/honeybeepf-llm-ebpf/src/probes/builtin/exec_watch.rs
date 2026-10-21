@@ -6,17 +6,20 @@
 use aya_ebpf::{
     helpers::{
         bpf_get_current_cgroup_id, bpf_get_current_comm, bpf_get_current_pid_tgid,
-        bpf_ktime_get_ns, bpf_probe_read_kernel, bpf_probe_read_user_str_bytes,
+        bpf_ktime_get_ns, bpf_probe_read_kernel, bpf_probe_read_kernel_buf,
+        bpf_probe_read_user_str_bytes,
     },
     macros::{kprobe, map, tracepoint},
-    maps::{HashMap, LruHashMap, RingBuf},
+    maps::{HashMap, LruHashMap, PerCpuArray, RingBuf},
     programs::{ProbeContext, TracePointContext},
 };
 use honeybeepf_llm_common::{ExecEvent, LibOpenEvent, MAX_FILENAME_LEN};
 
 use super::llm::maps::EXEC_RINGBUF_SIZE;
 
-const LIBSSL_PREFIX: &[u8] = b"libssl.so";
+/// "/libssl.so" as the last 10 bytes read: first two in `hi`, last eight in `lo`.
+const LIBSSL_WIN_HI: u64 = u16::from_be_bytes(*b"/l") as u64;
+const LIBSSL_WIN_LO: u64 = u64::from_be_bytes(*b"ibssl.so");
 /// A handled (scope, path) is reported again after this, so a replaced file at the same path is seen.
 const LIB_OPEN_TTL_NS: u64 = 60_000_000_000;
 const O_ACCMODE: u64 = 3;
@@ -31,6 +34,10 @@ pub static LIB_OPEN_EVENTS: RingBuf = RingBuf::with_byte_size(EXEC_RINGBUF_SIZE,
 /// retried on the next open). Scope is the cgroup, or the process on cgroup v1.
 #[map]
 pub static LIB_OPEN_SEEN: LruHashMap<[u64; 2], u64> = LruHashMap::with_max_entries(4096, 0);
+
+/// The opened path, off the stack: a zeroed 256 B stack buffer is a memset loop for the verifier.
+#[map]
+static LIB_OPEN_PATH: PerCpuArray<[u8; MAX_FILENAME_LEN]> = PerCpuArray::with_max_entries(1, 0);
 
 #[map]
 pub static PROCESS_START_TIMES: HashMap<u32, u64> = HashMap::with_max_entries(10240, 0);
@@ -72,37 +79,6 @@ pub fn probe_lib_open(ctx: ProbeContext) -> u32 {
     if ptr.is_null() {
         return 0;
     }
-    let mut buf = [0u8; MAX_FILENAME_LEN];
-    // SAFETY: the helper copies at most buf.len() bytes and fails cleanly on a bad user pointer.
-    let len = match unsafe { bpf_probe_read_user_str_bytes(ptr, &mut buf) } {
-        Ok(path) => path.len(),
-        Err(_) => return 0,
-    };
-    if buf[0] != b'/' {
-        return 0;
-    }
-
-    // Scan back to the last '/' and stop there: tracking it in a forward loop forks a verifier
-    // state per slash. Indexes are masked because the verifier loses LLVM's len-based bounds.
-    const MASK: usize = MAX_FILENAME_LEN - 1;
-    let mut start = 0usize;
-    let mut n = 0usize;
-    while n < MAX_FILENAME_LEN && n < len {
-        let idx = (len - 1 - n) & MASK;
-        if buf[idx] == b'/' {
-            start = idx + 1;
-            break;
-        }
-        n += 1;
-    }
-    let mut j = 0usize;
-    while j < LIBSSL_PREFIX.len() {
-        let k = start + j;
-        if k >= MAX_FILENAME_LEN || buf[k & MASK] != LIBSSL_PREFIX[j] {
-            return 0;
-        }
-        j += 1;
-    }
 
     // Writes (package upgrades: libssl.so.3.dpkg-new) would be attached half-written and never retried.
     let how: *const u64 = match ctx.arg(2) {
@@ -115,12 +91,40 @@ pub fn probe_lib_open(ctx: ProbeContext) -> u32 {
         _ => return 0,
     }
 
+    let path = match LIB_OPEN_PATH.get_ptr_mut(0) {
+        // SAFETY: this CPU's slot, used only by this program while it runs (kprobes don't nest).
+        Some(p) => unsafe { &mut *p },
+        None => return 0,
+    };
+    // SAFETY: the helper copies at most path.len() bytes and fails cleanly on a bad user pointer.
+    let len = match unsafe { bpf_probe_read_user_str_bytes(ptr, path) } {
+        Ok(s) => s.len(),
+        Err(_) => return 0,
+    };
+    if path[0] != b'/' {
+        return 0;
+    }
+
+    // Match "/libssl.so" in a rolling 10-byte window instead of indexing by a slash position or
+    // match count: such an index makes the verifier keep one state per value (1M-insn limit).
+    let mut hi = 0u64;
+    let mut lo = 0u64;
+    let mut libssl = false;
     let mut hash: u64 = 0xcbf29ce484222325;
     let mut i = 0usize;
-    while i < MAX_FILENAME_LEN && i < len {
-        hash ^= buf[i] as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
+    while i < MAX_FILENAME_LEN {
+        if i >= len {
+            break;
+        }
+        let c = path[i];
+        hi = ((hi << 8) | (lo >> 56)) & 0xffff;
+        lo = (lo << 8) | c as u64;
+        libssl = (hi == LIBSSL_WIN_HI && lo == LIBSSL_WIN_LO) || (libssl && c != b'/');
+        hash = (hash ^ c as u64).wrapping_mul(0x100000001b3);
         i += 1;
+    }
+    if !libssl {
+        return 0;
     }
 
     let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
@@ -149,7 +153,12 @@ pub fn probe_lib_open(ctx: ProbeContext) -> u32 {
         event.len = len as u32;
         event.seen_key = key;
         event.ts = now;
-        event.path = buf;
+        // A helper copy: a plain assignment compiles to a byte loop the verifier walks per state.
+        // SAFETY: both buffers are MAX_FILENAME_LEN bytes of kernel memory owned by this program.
+        if unsafe { bpf_probe_read_kernel_buf(path.as_ptr(), &mut event.path) }.is_err() {
+            slot.discard(0);
+            return 0;
+        }
         slot.submit(0);
     }
     0
