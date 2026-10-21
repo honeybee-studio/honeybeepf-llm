@@ -232,7 +232,11 @@ impl Probe for LlmProbe {
             if event.is_handshake == 1 {
                 return;
             }
-            if event.buf_filled == 0 || event.len == 0 {
+            let data_len = std::cmp::min(
+                event.len.saturating_sub(event.offset) as usize,
+                honeybeepf_llm_common::MAX_SSL_BUF_SIZE,
+            );
+            if event.buf_filled == 0 || data_len == 0 {
                 return;
             }
 
@@ -244,19 +248,16 @@ impl Probe for LlmProbe {
             let mut map = handler_state.lock().unwrap_or_else(|e| e.into_inner());
             let processor = map.entry(key).or_default();
 
-            let data_len =
-                std::cmp::min(event.len as usize, honeybeepf_llm_common::MAX_SSL_BUF_SIZE);
-
-            #[cfg(feature = "k8s")]
-            processor.handle_event(
+            processor.handle_fragment(
                 direction,
                 &event.buf[..data_len],
+                event.offset,
+                event.len,
+                event.truncated != 0,
                 event.metadata.pid,
+                #[cfg(feature = "k8s")]
                 pod_info,
             );
-
-            #[cfg(not(feature = "k8s"))]
-            processor.handle_event(direction, &event.buf[..data_len], event.metadata.pid);
         })?;
 
         start_cleanup_task(state);
