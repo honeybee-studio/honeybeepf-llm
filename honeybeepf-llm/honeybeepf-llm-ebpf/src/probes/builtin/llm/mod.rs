@@ -16,18 +16,22 @@ use aya_ebpf::{
     macros::{uprobe, uretprobe},
     programs::{ProbeContext, RetProbeContext},
 };
-use honeybeepf_llm_common::{LlmDirection, LlmEvent};
+use honeybeepf_llm_common::{
+    LLM_STAT_DISCARD, LLM_STAT_EMPTY, LLM_STAT_ENTER, LLM_STAT_HANDSHAKE, LLM_STAT_RESERVE_FAIL,
+    LLM_STAT_SUBMIT, LLM_STAT_TRUNCATED, LlmDirection, LlmEvent, MAX_SSL_BUF_SIZE,
+};
 
 mod helpers;
 pub mod maps;
 
-use helpers::{LlmEventExt, Session, get_current_tid};
+use helpers::{LlmEventExt, Session, count, get_current_tid};
 use maps::*;
 
 /// Entry probe for SSL_read/SSL_write. Captures buffer pointer from arg1.
 /// Session::start overwrites any existing entry, so no clear() needed.
 #[uprobe]
 pub fn probe_ssl_rw_enter(ctx: ProbeContext) -> u32 {
+    count(LLM_STAT_ENTER);
     let tid = get_current_tid();
     Session::start(tid, ctx.arg(1).unwrap_or(0), None);
     0
@@ -49,6 +53,7 @@ pub fn probe_ssl_write_exit(ctx: RetProbeContext) -> u32 {
 /// that points to the actual bytes read/written (instead of return value).
 #[uprobe]
 pub fn probe_ssl_rw_ex_enter(ctx: ProbeContext) -> u32 {
+    count(LLM_STAT_ENTER);
     let tid = get_current_tid();
     Session::start(tid, ctx.arg(1).unwrap_or(0), Some(ctx.arg(3).unwrap_or(0)));
     0
@@ -69,6 +74,7 @@ pub fn probe_ssl_write_ex_exit(ctx: RetProbeContext) -> u32 {
 /// Entry probe for SSL_do_handshake - captures start time for latency.
 #[uprobe]
 pub fn probe_ssl_do_handshake_enter(_ctx: ProbeContext) -> u32 {
+    count(LLM_STAT_ENTER);
     let tid = get_current_tid();
     Session::start(tid, 0, None);
     0
@@ -87,10 +93,21 @@ fn emit_llm_event(ctx: &RetProbeContext, rw: u8, is_handshake: bool) -> u32 {
     if let Some(mut slot) = SSL_EVENTS.reserve::<LlmEvent>(0) {
         let event = unsafe { &mut *slot.as_mut_ptr() };
         if event.capture_data(ctx, rw, is_handshake).is_ok() {
+            if is_handshake {
+                count(LLM_STAT_HANDSHAKE);
+            } else if event.buf_filled == 0 {
+                count(LLM_STAT_EMPTY);
+            } else if event.len as usize > MAX_SSL_BUF_SIZE {
+                count(LLM_STAT_TRUNCATED);
+            }
+            count(LLM_STAT_SUBMIT);
             slot.submit(0);
         } else {
+            count(LLM_STAT_DISCARD);
             slot.discard(0);
         }
+    } else {
+        count(LLM_STAT_RESERVE_FAIL);
     }
     // Always clear session state - handles success, failure, and reserve failure cases
     Session::clear(tid);

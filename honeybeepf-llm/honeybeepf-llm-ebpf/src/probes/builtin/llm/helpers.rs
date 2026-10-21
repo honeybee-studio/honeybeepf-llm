@@ -7,11 +7,20 @@ use aya_ebpf::{
 };
 use honeybeepf_llm_common::{LlmEvent, MAX_SSL_BUF_SIZE};
 
-use crate::probes::builtin::llm::maps::{BUFS, READBYTES_PTRS, START_NS};
+use crate::probes::builtin::llm::maps::{BUFS, LLM_STATS, READBYTES_PTRS, START_NS};
 
 #[inline(always)]
 pub fn get_current_tid() -> u32 {
     bpf_get_current_pid_tgid() as u32
+}
+
+/// Increment one `LLM_STAT_*` counter for the current CPU.
+#[inline(always)]
+pub fn count(stat: u32) {
+    if let Some(p) = LLM_STATS.get_ptr_mut(stat) {
+        // SAFETY: `p` is this CPU's slot of the per-CPU value, valid while the program runs.
+        unsafe { *p += 1 };
+    }
 }
 
 pub struct Session;

@@ -185,6 +185,20 @@ pub fn init_metrics() -> Result<()> {
         })
         .build();
 
+    // Kernel LLM event pipeline counters (cumulative, read from the LLM_STATS map)
+    let _llm_events_counter = meter
+        .u64_observable_counter("llm_events_total")
+        .with_description("SSL events seen by the LLM eBPF probes, by pipeline stage")
+        .with_unit("events")
+        .with_callback(|observer| {
+            if let Some(totals) = crate::probes::builtin::llm::event_stats() {
+                for (name, v) in honeybeepf_llm_common::LLM_STAT_NAMES.iter().zip(totals) {
+                    observer.observe(v, &[KeyValue::new("stage", *name)]);
+                }
+            }
+        })
+        .build();
+
     let _ = METRICS.set(HoneyBeeMetrics::new(&meter));
 
     info!("OpenTelemetry metrics initialized successfully");

@@ -4,13 +4,16 @@ pub mod processor;
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 
-use anyhow::Result;
-use aya::Ebpf;
-use honeybeepf_llm_common::LlmEvent;
+use anyhow::{Context, Result};
+use aya::{
+    Ebpf,
+    maps::{MapData, PerCpuArray},
+};
+use honeybeepf_llm_common::{LLM_STAT_COUNT, LLM_STAT_NAMES, LlmEvent};
 use honeybeepf_llm_core::types::LlmDirection;
 use log::{info, warn};
 use processor::StreamProcessor;
@@ -24,6 +27,34 @@ pub use crate::probes::{ExecNotify, ExecPidQueue, setup_exec_watch};
 // Timing constants
 const CLEANUP_INTERVAL_SECS: u64 = 30; // How often to run cleanup
 const CONNECTION_RETENTION_SECS: u64 = 300; // Keep idle connections for 5 minutes
+const STATS_LOG_INTERVAL_SECS: u64 = 10; // How often to log event counters (only when changed)
+
+/// Kernel-side event pipeline counters (LLM_STATS), set once when the probe attaches.
+static LLM_STATS: OnceLock<PerCpuArray<MapData, u64>> = OnceLock::new();
+
+/// Totals of the kernel event counters, summed over CPUs, in `LLM_STAT_NAMES` order.
+pub fn event_stats() -> Option<[u64; LLM_STAT_COUNT]> {
+    let map = LLM_STATS.get()?;
+    let mut totals = [0u64; LLM_STAT_COUNT];
+    for (i, total) in totals.iter_mut().enumerate() {
+        let values = map.get(&(i as u32), 0).ok()?;
+        *total = values.iter().sum();
+    }
+    Some(totals)
+}
+
+/// Log the kernel event counters as one line.
+pub fn log_event_stats() {
+    if let Some(totals) = event_stats() {
+        let line = LLM_STAT_NAMES
+            .iter()
+            .zip(totals.iter())
+            .map(|(name, v)| format!("{}={}", name, v))
+            .collect::<Vec<_>>()
+            .join(" ");
+        info!("[LLM stats] {}", line);
+    }
+}
 
 pub fn attach_probes_to_path(bpf: &mut Ebpf, libssl_path: &str) -> Result<()> {
     // SSL_read/SSL_write need BOTH entry (to save buf ptr) and exit (to read data + emit event)
@@ -143,6 +174,12 @@ impl Probe for LlmProbe {
             }
         }
 
+        let stats = PerCpuArray::try_from(
+            bpf.take_map("LLM_STATS")
+                .context("Failed to get LLM_STATS map")?,
+        )?;
+        let _ = LLM_STATS.set(stats);
+
         let state: StreamMap = Arc::new(Mutex::new(HashMap::new()));
         let handler_state = state.clone();
 
@@ -179,6 +216,7 @@ impl Probe for LlmProbe {
         })?;
 
         start_cleanup_task(state);
+        start_stats_log_task();
 
         Ok(())
     }
@@ -195,6 +233,22 @@ fn start_cleanup_task(state: StreamMap) {
             map.retain(|_, v| {
                 now.duration_since(v.last_activity()).as_secs() < CONNECTION_RETENTION_SECS
             });
+        }
+    });
+}
+
+/// Log the kernel event counters every STATS_LOG_INTERVAL_SECS when they changed.
+fn start_stats_log_task() {
+    let shutdown = crate::probes::shutdown_flag();
+    std::thread::spawn(move || {
+        let mut last = None;
+        while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_secs(STATS_LOG_INTERVAL_SECS));
+            let current = event_stats();
+            if current != last {
+                log_event_stats();
+                last = current;
+            }
         }
     });
 }
