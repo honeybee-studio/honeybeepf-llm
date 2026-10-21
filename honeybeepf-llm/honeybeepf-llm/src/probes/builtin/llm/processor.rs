@@ -217,8 +217,12 @@ impl StreamProcessor {
                             .thoughts_tokens
                             .map(|t| format!(", Thoughts: {}", t))
                             .unwrap_or_default();
+                        let cached_str = usage
+                            .cached_tokens
+                            .map(|t| format!(", Cached: {}", t))
+                            .unwrap_or_default();
                         info!(
-                            "LLM SUCCESS | PID: {} | Model: {} | Latency: {:.2}s | Tokens: {} (Prompt: {}, Compl: {}{}){}",
+                            "LLM SUCCESS | PID: {} | Model: {} | Latency: {:.2}s | Tokens: {} (Prompt: {}, Compl: {}{}{}){}",
                             pid,
                             model_str,
                             latency.as_secs_f64(),
@@ -226,6 +230,7 @@ impl StreamProcessor {
                             usage.prompt_tokens,
                             usage.completion_tokens,
                             thoughts_str,
+                            cached_str,
                             pod_str
                         );
                     }

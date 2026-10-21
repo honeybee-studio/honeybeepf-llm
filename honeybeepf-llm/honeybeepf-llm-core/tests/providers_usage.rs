@@ -1,5 +1,5 @@
 use honeybeepf_llm_core::providers::{
-    ConfigurableProvider, ProviderConfig, RequestExtractorType, ResponseConfig,
+    ConfigurableProvider, ProviderConfig, ProviderRegistry, RequestExtractorType, ResponseConfig,
 };
 use serde_json::json;
 
@@ -13,6 +13,7 @@ fn openai_config() -> ProviderConfig {
             prompt_tokens: "prompt_tokens".to_string(),
             completion_tokens: "completion_tokens".to_string(),
             thoughts_tokens: None,
+            cached_tokens: None,
             model_path: "model".to_string(),
         },
         request_extractor: RequestExtractorType::Messages,
@@ -29,6 +30,7 @@ fn gemini_config() -> ProviderConfig {
             prompt_tokens: "promptTokenCount".to_string(),
             completion_tokens: "candidatesTokenCount".to_string(),
             thoughts_tokens: Some("thoughtsTokenCount".to_string()),
+            cached_tokens: None,
             model_path: "modelVersion".to_string(),
         },
         request_extractor: RequestExtractorType::Contents,
@@ -79,6 +81,49 @@ fn test_gemini_parse_usage() {
     assert_eq!(usage.completion_tokens, 25);
     assert_eq!(usage.thoughts_tokens, Some(100));
     assert_eq!(usage.model, Some("gemini-1.5-pro".to_string()));
+}
+
+fn openai_responses_provider() -> ConfigurableProvider {
+    let registry = ProviderRegistry::with_defaults();
+    let config = registry
+        .find_provider("api.openai.com", "/v1/responses")
+        .unwrap()
+        .clone();
+    ConfigurableProvider::new(config)
+}
+
+#[test]
+fn test_openai_responses_parse_usage() {
+    let provider = openai_responses_provider();
+    let response = json!({
+        "id": "resp_1",
+        "object": "response",
+        "model": "gpt-6",
+        "status": "completed",
+        "error": null,
+        "output": [{"type": "message", "content": [{"type": "output_text", "text": "hi"}]}],
+        "usage": {
+            "input_tokens": 30,
+            "input_tokens_details": {"cached_tokens": 12},
+            "output_tokens": 9,
+            "output_tokens_details": {"reasoning_tokens": 2},
+            "total_tokens": 39
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!(usage.prompt_tokens, 30);
+    assert_eq!(usage.completion_tokens, 9);
+    assert_eq!(usage.thoughts_tokens, Some(2));
+    assert_eq!(usage.cached_tokens, Some(12));
+    assert_eq!(usage.model, Some("gpt-6".to_string()));
+}
+
+#[test]
+fn test_openai_responses_extract_request_text() {
+    let provider = openai_responses_provider();
+    let request = json!({"model": "gpt-6", "input": "Tell me a joke"});
+    assert_eq!(provider.extract_request_text(&request), "Tell me a joke");
 }
 
 #[test]

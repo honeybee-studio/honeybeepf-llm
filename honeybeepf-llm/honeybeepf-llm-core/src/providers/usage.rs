@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::config::ProviderConfig;
+use super::config::{ProviderConfig, path_matches};
 use super::request::{RequestExtractor, get_extractor};
 use crate::byte_utils::get_nested_value;
 use crate::types::UsageInfo;
@@ -26,7 +26,7 @@ impl ConfigurableProvider {
         let host_match =
             self.config.hosts.is_empty() || self.config.hosts.iter().any(|h| host.contains(h));
         let path_match =
-            self.config.paths.is_empty() || self.config.paths.iter().any(|p| path.contains(p));
+            self.config.paths.is_empty() || self.config.paths.iter().any(|p| path_matches(path, p));
         host_match && path_match
     }
 
@@ -62,6 +62,12 @@ impl ConfigurableProvider {
             .and_then(|path| get_nested_value(usage, path))
             .and_then(|v| v.as_u64());
 
+        let cached = response_config
+            .cached_tokens
+            .as_ref()
+            .and_then(|path| get_nested_value(usage, path))
+            .and_then(|v| v.as_u64());
+
         // Model name from root
         let model = get_nested_value(json, &response_config.model_path)
             .and_then(|v| v.as_str())
@@ -71,6 +77,7 @@ impl ConfigurableProvider {
             prompt_tokens: prompt,
             completion_tokens: completion,
             thoughts_tokens: thoughts,
+            cached_tokens: cached,
             model,
         })
     }
