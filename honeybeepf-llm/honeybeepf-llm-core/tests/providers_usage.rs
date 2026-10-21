@@ -13,8 +13,8 @@ fn openai_config() -> ProviderConfig {
             prompt_tokens: "prompt_tokens".to_string(),
             completion_tokens: "completion_tokens".to_string(),
             thoughts_tokens: None,
-            cached_tokens: None,
             model_path: "model".to_string(),
+            ..ResponseConfig::default()
         },
         request_extractor: RequestExtractorType::Messages,
     }
@@ -30,8 +30,8 @@ fn gemini_config() -> ProviderConfig {
             prompt_tokens: "promptTokenCount".to_string(),
             completion_tokens: "candidatesTokenCount".to_string(),
             thoughts_tokens: Some("thoughtsTokenCount".to_string()),
-            cached_tokens: None,
             model_path: "modelVersion".to_string(),
+            ..ResponseConfig::default()
         },
         request_extractor: RequestExtractorType::Contents,
     }
@@ -115,8 +115,91 @@ fn test_openai_responses_parse_usage() {
     assert_eq!(usage.prompt_tokens, 30);
     assert_eq!(usage.completion_tokens, 9);
     assert_eq!(usage.thoughts_tokens, Some(2));
-    assert_eq!(usage.cached_tokens, Some(12));
+    assert_eq!(usage.cache_read_tokens, Some(12));
     assert_eq!(usage.model, Some("gpt-6".to_string()));
+}
+
+fn default_provider(host: &str, path: &str) -> ConfigurableProvider {
+    let registry = ProviderRegistry::with_defaults();
+    ConfigurableProvider::new(registry.find_provider(host, path).unwrap().clone())
+}
+
+#[test]
+fn test_openai_chat_cached_tokens_are_part_of_prompt() {
+    let provider = default_provider("api.openai.com", "/v1/chat/completions");
+    let response = json!({
+        "model": "gpt-4o",
+        "usage": {
+            "prompt_tokens": 2000,
+            "completion_tokens": 40,
+            "prompt_tokens_details": {"cached_tokens": 1536}
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!(usage.prompt_tokens, 2000);
+    assert_eq!(usage.cache_read_tokens, Some(1536));
+    assert_eq!(usage.cache_write_tokens, None);
+}
+
+#[test]
+fn test_anthropic_prompt_adds_cache_read_and_write() {
+    let provider = default_provider("api.anthropic.com", "/v1/messages");
+    let response = json!({
+        "type": "message",
+        "model": "claude-test",
+        "usage": {
+            "input_tokens": 50,
+            "cache_creation_input_tokens": 2000,
+            "cache_read_input_tokens": 100000,
+            "output_tokens": 300
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!(usage.prompt_tokens, 102_050);
+    assert_eq!(usage.completion_tokens, 300);
+    assert_eq!(usage.cache_read_tokens, Some(100_000));
+    assert_eq!(usage.cache_write_tokens, Some(2000));
+}
+
+#[test]
+fn test_anthropic_without_cache_fields_keeps_input_tokens() {
+    let provider = default_provider("api.anthropic.com", "/v1/messages");
+    let response = json!({"usage": {"input_tokens": 25, "output_tokens": 15}});
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!(usage.prompt_tokens, 25);
+    assert_eq!(
+        (usage.cache_read_tokens, usage.cache_write_tokens),
+        (None, None)
+    );
+}
+
+#[test]
+fn test_gemini_cached_content_tokens_are_part_of_prompt() {
+    let provider = default_provider("generativelanguage.googleapis.com", ":generateContent");
+    let response = json!({
+        "usageMetadata": {
+            "promptTokenCount": 5000,
+            "candidatesTokenCount": 20,
+            "cachedContentTokenCount": 4096
+        },
+        "modelVersion": "gemini-test"
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!(usage.prompt_tokens, 5000);
+    assert_eq!(usage.cache_read_tokens, Some(4096));
+}
+
+#[test]
+fn test_responses_config_skips_anthropic_usage() {
+    let provider = openai_responses_provider();
+    let anthropic = json!({
+        "usage": {"input_tokens": 50, "cache_read_input_tokens": 100000, "output_tokens": 300}
+    });
+    assert!(provider.parse_usage(&anthropic).is_none());
 }
 
 #[test]

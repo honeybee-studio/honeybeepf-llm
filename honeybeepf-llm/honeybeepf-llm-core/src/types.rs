@@ -4,10 +4,12 @@ use serde_json::Value;
 
 /// Parsed usage info from an LLM response
 pub struct UsageInfo {
+    /// All input tokens, cache reads and writes included (OTel `gen_ai.usage.input_tokens`).
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub thoughts_tokens: Option<u64>,
-    pub cached_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
     pub model: Option<String>,
 }
 
