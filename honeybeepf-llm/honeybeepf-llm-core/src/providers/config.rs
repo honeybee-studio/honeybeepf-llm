@@ -136,7 +136,11 @@ impl ProviderRegistry {
                 ProviderConfig {
                     name: "gemini".to_string(),
                     hosts: vec!["generativelanguage.googleapis.com".to_string()],
-                    paths: vec!["generateContent".to_string()],
+                    // Path matching is case-sensitive: the streaming method is `:streamGenerateContent`.
+                    paths: vec![
+                        "generateContent".to_string(),
+                        "streamGenerateContent".to_string(),
+                    ],
                     response: ResponseConfig {
                         usage_path: "usageMetadata".to_string(),
                         prompt_tokens: "promptTokenCount".to_string(),

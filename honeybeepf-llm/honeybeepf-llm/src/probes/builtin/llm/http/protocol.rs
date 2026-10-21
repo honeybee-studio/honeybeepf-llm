@@ -129,16 +129,24 @@ impl ProtocolParser for Http11Parser {
 
         let body = &buffer[body_offset..];
 
-        if is_sse {
-            return parse_sse_body(body);
-        }
-
         // Decode chunked transfer encoding first
         let dechunked = if is_chunked {
             byte_utils::decode_chunked_body(body)
         } else {
             std::borrow::Cow::Borrowed(body)
         };
+
+        // SSE events can straddle chunk boundaries, so they are parsed only after dechunking.
+        if is_sse {
+            // A truncated read desyncs the chunk framing; once the stream has ended, fall back to raw lines.
+            return parse_sse_body(&dechunked).or_else(|| {
+                if is_chunked && body.ends_with(b"0\r\n\r\n") {
+                    parse_sse_body(body)
+                } else {
+                    None
+                }
+            });
+        }
 
         // Then decompress gzip if needed
         let decompressed: std::borrow::Cow<'_, [u8]> = if is_gzip {
@@ -152,7 +160,9 @@ impl ProtocolParser for Http11Parser {
 
         let trimmed = byte_utils::trim_trailing_whitespace(&decompressed);
 
-        if !trimmed.ends_with(b"}") {
+        // Streamed JSON arrays (Gemini streamGenerateContent without alt=sse): the first element is not the final usage.
+        let is_json_array = trimmed.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'[');
+        if is_json_array || !trimmed.ends_with(b"}") {
             return None;
         }
 
@@ -256,14 +266,26 @@ impl ProtocolParser for Http2Parser {
 
 // --- SSE Parsing ---
 
+/// End-of-stream markers: OpenAI `[DONE]`/`finish_reason`, Anthropic `message_stop`, Gemini `finishReason`.
+const SSE_END_MARKERS: [&str; 4] = [
+    "data: [DONE]",
+    "\"finish_reason\"",
+    "\"message_stop\"",
+    "\"finishReason\"",
+];
+
 fn parse_sse_body(body: &[u8]) -> Option<UsageInfo> {
     let text = String::from_utf8_lossy(body);
+    // Only complete lines count: a partial last event can show its end marker before its usage.
+    let text = text.rfind('\n').map_or("", |end| &text[..end]);
 
-    if !text.contains("data: [DONE]") && !text.contains("\"finish_reason\"") {
+    if !SSE_END_MARKERS.iter().any(|m| text.contains(m)) {
         return None;
     }
 
-    let mut usage: Option<UsageInfo> = None;
+    // Usage-bearing events merged in order: Anthropic sends input tokens in
+    // message_start and only output tokens in message_delta.
+    let mut acc: Option<Value> = None;
 
     for line in text.lines() {
         let line = line.trim();
@@ -275,19 +297,40 @@ fn parse_sse_body(body: &[u8]) -> Option<UsageInfo> {
             break;
         }
 
-        if let Ok(chunk) = serde_json::from_str::<SseChunkDelta>(data)
-            && let Some(_u) = chunk.usage
-        {
-            // SSE chunks with usage — parse the raw JSON to use providers
-            if let Ok(val) = serde_json::from_str::<Value>(data)
-                && let Some(info) = parse_response_json_value(&val)
-            {
-                usage = Some(info);
-            }
+        let is_usage_event =
+            serde_json::from_str::<SseChunkDelta>(data).is_ok_and(|chunk| chunk.has_usage());
+        if !is_usage_event {
+            continue;
+        }
+        let Ok(mut val) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        if val.get("message").is_some_and(|m| m.get("usage").is_some()) {
+            val = val["message"].take();
+        }
+        match acc.as_mut() {
+            Some(prev) => merge_sse_event(prev, val),
+            None => acc = Some(val),
         }
     }
 
-    usage
+    acc.as_ref().and_then(parse_response_json_value)
+}
+
+/// Overlay a later SSE event onto the accumulated one, merging nested objects one level deep.
+fn merge_sse_event(acc: &mut Value, update: Value) {
+    let (Some(acc), Value::Object(update)) = (acc.as_object_mut(), update) else {
+        return;
+    };
+    for (key, value) in update {
+        match (acc.get_mut(&key), value) {
+            (Some(Value::Object(prev)), Value::Object(next)) => prev.extend(next),
+            (Some(slot), value) => *slot = value,
+            (None, value) => {
+                acc.insert(key, value);
+            }
+        }
+    }
 }
 
 // --- Core dispatch to configurable providers ---
@@ -413,5 +456,121 @@ fn extract_json_string(s: &str) -> Option<String> {
         Some(result)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn http11_sse(body: &str) -> Vec<u8> {
+        format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{body}").into_bytes()
+    }
+
+    fn tokens(info: Option<UsageInfo>) -> Option<(u64, u64)> {
+        info.map(|u| (u.prompt_tokens, u.completion_tokens))
+    }
+
+    const ANTHROPIC_SSE: &str = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":15}}\n\n",
+    );
+
+    #[test]
+    fn anthropic_sse_merges_message_start_and_delta_usage() {
+        let body =
+            format!("{ANTHROPIC_SSE}event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n");
+        let info = Http11Parser
+            .parse_response(&http11_sse(&body))
+            .expect("usage");
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (25, 15));
+        assert_eq!(info.model.as_deref(), Some("claude-test"));
+    }
+
+    #[test]
+    fn anthropic_sse_delta_with_both_counts() {
+        let body = concat!(
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":25,\"output_tokens\":15}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let info = Http11Parser.parse_response(&http11_sse(body));
+        assert_eq!(tokens(info), Some((25, 15)));
+    }
+
+    #[test]
+    fn anthropic_sse_without_message_stop_is_incomplete() {
+        let info = Http11Parser.parse_response(&http11_sse(ANTHROPIC_SSE));
+        assert_eq!(tokens(info), None);
+    }
+
+    #[test]
+    fn gemini_sse_reads_usage_metadata() {
+        let body = concat!(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"h\"}]}}],\"usageMetadata\":{\"promptTokenCount\":7},\"modelVersion\":\"gemini-test\"}\r\n\r\n",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"i\"}]},\"finishReason\":\"STOP\"}],",
+            "\"usageMetadata\":{\"promptTokenCount\":7,\"candidatesTokenCount\":3},\"modelVersion\":\"gemini-test\"}\r\n\r\n",
+        );
+        let info = Http11Parser
+            .parse_response(&http11_sse(body))
+            .expect("usage");
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (7, 3));
+        assert_eq!(info.model.as_deref(), Some("gemini-test"));
+    }
+
+    #[test]
+    fn chunked_sse_usage_event_split_across_chunks() {
+        let ev1 = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        let ev2a = "data: {\"model\":\"gpt-4o\",\"choices\":[],\"usa";
+        let ev2b = "ge\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n\
+             {:x}\r\n{ev1}\r\n{:x}\r\n{ev2a}\r\n{:x}\r\n{ev2b}\r\n0\r\n\r\n",
+            ev1.len(),
+            ev2a.len(),
+            ev2b.len(),
+        );
+        let info = Http11Parser.parse_response(resp.as_bytes());
+        assert_eq!(tokens(info), Some((11, 4)));
+    }
+
+    #[test]
+    fn chunked_sse_with_lost_bytes_falls_back_to_raw_lines() {
+        let ev1 = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        let ev2 = "data: {\"model\":\"gpt-4o\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n";
+        // The first chunk claims 40 bytes more than arrived, as after a truncated SSL_read.
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n\
+             {:x}\r\n{ev1}\r\n{:x}\r\n{ev2}\r\n0\r\n\r\n",
+            ev1.len() + 40,
+            ev2.len(),
+        );
+        let info = Http11Parser.parse_response(resp.as_bytes());
+        assert_eq!(tokens(info), Some((11, 4)));
+    }
+
+    #[test]
+    fn gemini_sse_partial_last_event_is_incomplete() {
+        let body = concat!(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"h\"}]}}],\"usageMetadata\":{\"promptTokenCount\":7,\"candidatesTokenCount\":2}}\r\n\r\n",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"i\"}]},\"finishReason\":\"STOP\"}],\"usageMet",
+        );
+        let info = Http11Parser.parse_response(&http11_sse(body));
+        assert_eq!(tokens(info), None);
+    }
+
+    #[test]
+    fn json_array_stream_is_not_parsed_from_first_element() {
+        let resp = concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n",
+            "[{\"candidates\":[],\"usageMetadata\":{\"promptTokenCount\":9,\"candidatesTokenCount\":1}}",
+        );
+        let info = Http11Parser.parse_response(resp.as_bytes());
+        assert_eq!(tokens(info), None);
     }
 }
