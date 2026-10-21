@@ -88,19 +88,6 @@ fn fs_type(path: &str) -> Option<String> {
         .map(|m| m.fs_type)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A `/proc/<pid>/root` path resolves against that process's mounts, innermost first.
-    #[test]
-    fn test_fs_type_uses_innermost_mount() {
-        let via_root = format!("/proc/{}/root/proc/cpuinfo", std::process::id());
-        assert_eq!(fs_type(&via_root).as_deref(), Some("proc"));
-        assert_eq!(fs_type("/proc/cpuinfo").as_deref(), Some("proc"));
-    }
-}
-
 /// Find libraries matching a regex pattern across all running processes.
 /// Also includes system libraries found via ldconfig.
 pub fn find_libraries_all(
@@ -220,4 +207,17 @@ pub fn get_process_libraries(pid: u32) -> Result<HashSet<String>> {
     }
 
     Ok(paths)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `/proc/<pid>/root` path resolves against that process's mounts, innermost first.
+    #[test]
+    fn test_fs_type_uses_innermost_mount() {
+        let via_root = format!("/proc/{}/root/proc/cpuinfo", std::process::id());
+        assert_eq!(fs_type(&via_root).as_deref(), Some("proc"));
+        assert_eq!(fs_type("/proc/cpuinfo").as_deref(), Some("proc"));
+    }
 }
