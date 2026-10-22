@@ -252,17 +252,23 @@ impl PodResolver {
                     break;
                 }
 
-                if let (Ok(pod_store), Ok(mut cgroup_cache)) =
-                    (resolver.pod_store.read(), resolver.cgroup_cache.write())
-                {
-                    cgroup_cache.retain(|_, v| {
-                        v.as_ref()
-                            .map(|cid| pod_store.contains_key(cid))
-                            .unwrap_or(true)
-                    });
-                }
+                resolver.evict_stale_cgroups();
             }
         });
+    }
+
+    /// Drop cgroup_cache entries whose container_id is missing from pod_store.
+    fn evict_stale_cgroups(&self) {
+        // Same order as resolve(): cgroup_cache before pod_store, or a queued watcher write deadlocks both.
+        if let (Ok(mut cgroup_cache), Ok(pod_store)) =
+            (self.cgroup_cache.write(), self.pod_store.read())
+        {
+            cgroup_cache.retain(|_, v| {
+                v.as_ref()
+                    .map(|cid| pod_store.contains_key(cid))
+                    .unwrap_or(true)
+            });
+        }
     }
 }
 
@@ -464,6 +470,32 @@ mod tests {
         // u32::MAX is above pid_max, so /proc/<pid>/cgroup never exists.
         assert!(resolver.resolve(u32::MAX, 99999).is_none());
         assert!(!resolver.cgroup_cache.read().unwrap().contains_key(&99999));
+    }
+
+    /// resolve() holds cgroup_cache(R) while it reads pod_store; if cleanup held pod_store(R)
+    /// while waiting for cgroup_cache(W), a queued watcher write would block resolve() for good.
+    #[test]
+    fn test_cache_cleanup_does_not_hold_pod_store_while_waiting() {
+        let resolver = Arc::new(PodResolver {
+            cgroup_v2: true,
+            ..PodResolver::new()
+        });
+        let resolve_guard = resolver.cgroup_cache.read().expect("cgroup_cache lock");
+
+        let cleanup = {
+            let resolver = Arc::clone(&resolver);
+            std::thread::spawn(move || resolver.evict_stale_cgroups())
+        };
+        // Give cleanup time to park on the cgroup_cache write lock.
+        std::thread::sleep(Duration::from_millis(200));
+
+        let watcher_can_write = resolver.pod_store.try_write().is_ok();
+        drop(resolve_guard);
+        cleanup.join().expect("cleanup thread");
+        assert!(
+            watcher_can_write,
+            "cleanup holds pod_store while waiting for cgroup_cache"
+        );
     }
 
     #[test]
