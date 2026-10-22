@@ -8,6 +8,37 @@ fn test_default_providers() {
     assert_eq!(registry.providers.len(), 6);
 }
 
+#[test]
+fn test_default_provider_hosts() {
+    let openai = [
+        "api.openai.com",
+        "openai.azure.com",
+        "services.ai.azure.com",
+        "bedrock-mantle.*.api.aws",
+        "bedrock-runtime.*.amazonaws.com",
+    ];
+    let vertex = [
+        "aiplatform.googleapis.com",
+        "aiplatform.*.rep.googleapis.com",
+    ];
+    let expected: [&[&str]; 6] = [
+        &openai,
+        &openai,
+        &[
+            "api.anthropic.com",
+            "aws-external-anthropic.*.api.aws",
+            "bedrock-mantle.*.api.aws",
+        ],
+        &["generativelanguage.googleapis.com", vertex[0], vertex[1]],
+        &vertex,
+        &["bedrock-runtime.*.amazonaws.com"],
+    ];
+    let registry = ProviderRegistry::with_defaults();
+    for (provider, hosts) in registry.providers.iter().zip(expected) {
+        assert_eq!(provider.hosts, hosts, "{}", provider.name);
+    }
+}
+
 /// Provider name for a `host/path` URL without the scheme.
 fn provider_for(registry: &ProviderRegistry, url: &str) -> Option<String> {
     let (host, path) = url.split_at(url.find('/').unwrap_or(url.len()));

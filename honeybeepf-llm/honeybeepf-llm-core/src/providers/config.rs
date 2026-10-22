@@ -1,5 +1,35 @@
 use serde::Deserialize;
 
+// OpenAI-compatible routes on Azure OpenAI / Foundry and Bedrock return the same JSON as OpenAI.
+const OPENAI_HOSTS: &[&str] = &[
+    "api.openai.com",                  // OpenAI API, regional us./eu. domains included
+    "openai.azure.com",                // Azure OpenAI
+    "services.ai.azure.com",           // Azure AI Foundry /openai/v1
+    "bedrock-mantle.*.api.aws",        // Bedrock Mantle /v1, /openai/v1
+    "bedrock-runtime.*.amazonaws.com", // Bedrock Runtime /openai/v1
+];
+const ANTHROPIC_HOSTS: &[&str] = &[
+    "api.anthropic.com",                // Claude API
+    "aws-external-anthropic.*.api.aws", // Claude Platform on AWS
+    "bedrock-mantle.*.api.aws",         // Bedrock Mantle /anthropic/v1
+];
+const GEMINI_HOSTS: &[&str] = &[
+    "generativelanguage.googleapis.com", // Gemini API
+    "aiplatform.googleapis.com",         // Vertex AI global and {region}-aiplatform
+    "aiplatform.*.rep.googleapis.com",   // Vertex AI multi-region (us, eu)
+];
+const VERTEX_CLAUDE_HOSTS: &[&str] = &[
+    "aiplatform.googleapis.com", // Vertex AI global and {region}-aiplatform
+    "aiplatform.*.rep.googleapis.com", // Vertex AI multi-region (us, eu)
+];
+const BEDROCK_RUNTIME_HOSTS: &[&str] = &[
+    "bedrock-runtime.*.amazonaws.com", // Bedrock Runtime Converse, InvokeModel
+];
+
+fn to_strings(items: &[&str]) -> Vec<String> {
+    items.iter().map(|&s| s.to_string()).collect()
+}
+
 /// Type of request text extractor to use
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -120,14 +150,6 @@ impl ProviderRegistry {
 
     /// Create with default providers (OpenAI, Anthropic, Gemini, Bedrock), including their cloud endpoints
     pub fn with_defaults() -> Self {
-        // OpenAI-compatible routes on Azure OpenAI / Foundry and Bedrock return the same JSON as OpenAI.
-        let openai_hosts = vec![
-            "api.openai.com".to_string(),
-            "openai.azure.com".to_string(),
-            "services.ai.azure.com".to_string(),
-            "bedrock-mantle.*.api.aws".to_string(),
-            "bedrock-runtime.*.amazonaws.com".to_string(),
-        ];
         let anthropic_response = ResponseConfig {
             usage_path: "usage".to_string(),
             prompt_tokens: "input_tokens".to_string(),
@@ -142,7 +164,7 @@ impl ProviderRegistry {
             providers: vec![
                 ProviderConfig {
                     name: "openai".to_string(),
-                    hosts: openai_hosts.clone(),
+                    hosts: to_strings(OPENAI_HOSTS),
                     // `$` keeps the stored-completion endpoints (/chat/completions/{id}) out.
                     paths: vec![
                         "/chat/completions$".to_string(),
@@ -166,7 +188,7 @@ impl ProviderRegistry {
                 // `$` keeps GET /v1/responses/{id} out.
                 ProviderConfig {
                     name: "openai".to_string(),
-                    hosts: openai_hosts,
+                    hosts: to_strings(OPENAI_HOSTS),
                     paths: vec!["/v1/responses$".to_string()],
                     response: ResponseConfig {
                         usage_path: "usage".to_string(),
@@ -182,11 +204,7 @@ impl ProviderRegistry {
                 },
                 ProviderConfig {
                     name: "anthropic".to_string(),
-                    hosts: vec![
-                        "api.anthropic.com".to_string(),
-                        "aws-external-anthropic.*.api.aws".to_string(),
-                        "bedrock-mantle.*.api.aws".to_string(),
-                    ],
+                    hosts: to_strings(ANTHROPIC_HOSTS),
                     // `$` keeps /v1/messages/count_tokens and /v1/messages/batches out.
                     paths: vec!["/v1/messages$".to_string()],
                     response: anthropic_response.clone(),
@@ -194,11 +212,7 @@ impl ProviderRegistry {
                 },
                 ProviderConfig {
                     name: "gemini".to_string(),
-                    hosts: vec![
-                        "generativelanguage.googleapis.com".to_string(),
-                        "aiplatform.googleapis.com".to_string(),
-                        "aiplatform.*.rep.googleapis.com".to_string(),
-                    ],
+                    hosts: to_strings(GEMINI_HOSTS),
                     // Path matching is case-sensitive: the streaming method is `:streamGenerateContent`.
                     paths: vec![
                         "generateContent".to_string(),
@@ -219,10 +233,7 @@ impl ProviderRegistry {
                 // and custom endpoints out.
                 ProviderConfig {
                     name: "anthropic".to_string(),
-                    hosts: vec![
-                        "aiplatform.googleapis.com".to_string(),
-                        "aiplatform.*.rep.googleapis.com".to_string(),
-                    ],
+                    hosts: to_strings(VERTEX_CLAUDE_HOSTS),
                     paths: vec![
                         "/publishers/anthropic/models/claude-*:rawPredict$".to_string(),
                         "/publishers/anthropic/models/claude-*:streamRawPredict$".to_string(),
@@ -235,7 +246,7 @@ impl ProviderRegistry {
                 // variants are binary eventstream and stay out.
                 ProviderConfig {
                     name: "bedrock".to_string(),
-                    hosts: vec!["bedrock-runtime.*.amazonaws.com".to_string()],
+                    hosts: to_strings(BEDROCK_RUNTIME_HOSTS),
                     paths: vec!["/converse$".to_string(), "anthropic.*/invoke$".to_string()],
                     response: ResponseConfig {
                         usage_path: "usage".to_string(),
