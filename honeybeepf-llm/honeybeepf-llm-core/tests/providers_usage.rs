@@ -247,16 +247,6 @@ fn test_new_defaults_parse_existing_bodies_like_before() {
     let registry = ProviderRegistry::with_defaults();
     // The first four entries are the defaults before cloud endpoints were added.
     let (before, _) = registry.providers.split_at(4);
-    let key = |u: UsageInfo| {
-        (
-            u.prompt_tokens,
-            u.completion_tokens,
-            u.thoughts_tokens,
-            u.cache_read_tokens,
-            u.cache_write_tokens,
-            u.model,
-        )
-    };
 
     for response in [
         json!({"model": "gpt-4o", "usage": {"prompt_tokens": 2000, "completion_tokens": 40,
@@ -272,13 +262,9 @@ fn test_new_defaults_parse_existing_bodies_like_before() {
         json!({"model": "deepseek-v3-0324", "status": "completed",
             "usage": {"input_tokens": 28, "output_tokens": 52, "total_tokens": 80}}),
     ] {
-        let now = parse_in_order(&registry.providers, &response).map(key);
+        let now = parse_in_order(&registry.providers, &response);
         assert!(now.is_some(), "{response}");
-        assert_eq!(
-            now,
-            parse_in_order(before, &response).map(key),
-            "{response}"
-        );
+        assert_eq!(now, parse_in_order(before, &response), "{response}");
     }
 }
 

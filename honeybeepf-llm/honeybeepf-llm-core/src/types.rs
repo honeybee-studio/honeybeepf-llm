@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 /// Parsed usage info from an LLM response
+#[derive(Debug, PartialEq)]
 pub struct UsageInfo {
     /// All input tokens, cache reads and writes included (OTel `gen_ai.usage.input_tokens`).
     pub prompt_tokens: u64,

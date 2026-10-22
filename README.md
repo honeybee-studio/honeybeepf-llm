@@ -109,7 +109,7 @@ kubectl delete namespace <your-namespace>
 
 Once installed, the LLM probe and file access probe are already enabled via `demo-template.yaml`.
 
-> **LLM Probe:** OpenAI, Anthropic, and Gemini are supported as built-in providers by default, including their cloud endpoints (Azure OpenAI / Foundry, Amazon Bedrock JSON APIs, Claude Platform on AWS, Vertex AI). No additional configuration is needed for these providers. If you use private or self-hosted LLMs (e.g., Ollama, vLLM), add them to the `providers` field in `demo-template.yaml`. See [`charts/honeybeepf-llm/values.yaml`](charts/honeybeepf-llm/values.yaml) for the full configuration example.
+> **LLM Probe:** OpenAI, Anthropic, and Gemini are supported as built-in providers by default. No additional configuration is needed for these providers. If you use private or self-hosted LLMs (e.g., Ollama, vLLM), add them to the `providers` field in `demo-template.yaml`. See [`charts/honeybeepf-llm/values.yaml`](charts/honeybeepf-llm/values.yaml) for the full configuration example.
 
 ### Step 1: Check agent logs
 

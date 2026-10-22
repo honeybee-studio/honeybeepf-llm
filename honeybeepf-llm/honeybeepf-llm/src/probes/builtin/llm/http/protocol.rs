@@ -244,10 +244,9 @@ pub struct Http2Parser;
 
 impl ProtocolParser for Http2Parser {
     fn detect_request(&self, buffer: &[u8]) -> Option<String> {
-        // Skip HTTP/1.1 requests and responses (servers write responses): only other writes pay the host scan
+        // Skip if this looks like HTTP/1.1 (starts with HTTP method)
         let preview = &buffer[..std::cmp::min(10, buffer.len())];
-        if preview.starts_with(b"HTTP/")
-            || preview.starts_with(b"GET ")
+        if preview.starts_with(b"GET ")
             || preview.starts_with(b"POST ")
             || preview.starts_with(b"PUT ")
             || preview.starts_with(b"DELETE ")
@@ -901,12 +900,6 @@ mod tests {
         for buf in incomplete {
             assert!(!Http11Parser::is_complete_response(buf), "{buf:?}");
         }
-    }
-
-    #[test]
-    fn http11_response_writes_are_not_http2_requests() {
-        let resp = b"HTTP/1.1 200 OK\r\nHost: api.openai.com\r\n\r\n{\"model\":\"gpt-4o\"}";
-        assert_eq!(Http2Parser.detect_request(resp), None);
     }
 
     #[test]
