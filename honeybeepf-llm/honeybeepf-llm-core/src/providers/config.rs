@@ -125,9 +125,10 @@ impl ProviderRegistry {
                 ProviderConfig {
                     name: "openai".to_string(),
                     hosts: vec!["api.openai.com".to_string()],
+                    // `$` keeps the stored-completion endpoints (/chat/completions/{id}) out.
                     paths: vec![
-                        "/chat/completions".to_string(),
-                        "/v1/completions".to_string(),
+                        "/chat/completions$".to_string(),
+                        "/v1/completions$".to_string(),
                     ],
                     response: ResponseConfig {
                         usage_path: "usage".to_string(),
@@ -164,7 +165,8 @@ impl ProviderRegistry {
                 ProviderConfig {
                     name: "anthropic".to_string(),
                     hosts: vec!["api.anthropic.com".to_string()],
-                    paths: vec!["/v1/messages".to_string()],
+                    // `$` keeps /v1/messages/count_tokens and /v1/messages/batches out.
+                    paths: vec!["/v1/messages$".to_string()],
                     response: ResponseConfig {
                         usage_path: "usage".to_string(),
                         prompt_tokens: "input_tokens".to_string(),
@@ -211,13 +213,13 @@ impl ProviderRegistry {
     }
 }
 
-/// Substring match, or with a trailing `$` the path without its query must end with the pattern.
+/// Substring match; a trailing `$` anchors the pattern to the path end, ignoring the query and one trailing `/`.
 pub fn path_matches(path: &str, pattern: &str) -> bool {
     match pattern.strip_suffix('$') {
-        Some(suffix) => path
-            .split_once('?')
-            .map_or(path, |(p, _)| p)
-            .ends_with(suffix),
+        Some(suffix) => {
+            let path = path.split_once('?').map_or(path, |(p, _)| p);
+            path.ends_with(suffix) || path.strip_suffix('/').is_some_and(|p| p.ends_with(suffix))
+        }
         None => path.contains(pattern),
     }
 }

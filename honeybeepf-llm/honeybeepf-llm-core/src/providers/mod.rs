@@ -9,7 +9,7 @@
 //! providers:
 //!   - name: openai
 //!     hosts: ["api.openai.com"]
-//!     paths: ["/chat/completions", "/v1/completions"]
+//!     paths: ["/chat/completions$", "/v1/completions$"]
 //!     response:
 //!       usage_path: "usage"
 //!       prompt_tokens: "prompt_tokens"

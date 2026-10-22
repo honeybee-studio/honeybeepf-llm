@@ -44,7 +44,60 @@ fn test_find_provider_skips_responses_retrieval() {
 fn test_path_matches_anchor() {
     assert!(path_matches("/v1/chat/completions", "/chat/completions"));
     assert!(path_matches("/v1/responses?x=1", "/v1/responses$"));
+    assert!(path_matches("/v1/messages/", "/v1/messages$"));
+    assert!(path_matches("/v1/chat/completions/", "/chat/completions$"));
+    assert!(path_matches("/api/chat/", "/api/chat/$"));
     assert!(!path_matches("/v1/responses/r1", "/v1/responses$"));
+    assert!(!path_matches("/v1/messages//", "/v1/messages$"));
+}
+
+#[test]
+fn test_find_provider_generation_endpoints() {
+    let registry = ProviderRegistry::with_defaults();
+
+    for (host, path, name) in [
+        ("api.anthropic.com", "/v1/messages", "anthropic"),
+        ("api.anthropic.com", "/v1/messages?beta=true", "anthropic"),
+        ("api.anthropic.com", "/v1/messages/", "anthropic"),
+        ("api.anthropic.com", "/anthropic/v1/messages", "anthropic"),
+        ("api.openai.com", "/v1/chat/completions", "openai"),
+        ("api.openai.com", "/v1/completions", "openai"),
+        (
+            "api.openai.com",
+            "/openai/deployments/d1/chat/completions?api-version=2026-10-01",
+            "openai",
+        ),
+    ] {
+        let p = registry.find_provider(host, path);
+        assert_eq!(p.map(|p| p.name.as_str()), Some(name), "{path}");
+    }
+}
+
+#[test]
+fn test_find_provider_skips_non_generation_endpoints() {
+    let registry = ProviderRegistry::with_defaults();
+
+    for (host, path) in [
+        ("api.anthropic.com", "/v1/messages/count_tokens"),
+        ("api.anthropic.com", "/v1/messages/count_tokens?beta=true"),
+        ("api.anthropic.com", "/v1/messages/batches"),
+        ("api.anthropic.com", "/v1/messages/batches/msgbatch_01"),
+        (
+            "api.anthropic.com",
+            "/v1/messages/batches/msgbatch_01/results",
+        ),
+        (
+            "api.anthropic.com",
+            "/v1/messages/batches/msgbatch_01/cancel",
+        ),
+        ("api.openai.com", "/v1/chat/completions/chatcmpl-abc123"),
+        (
+            "api.openai.com",
+            "/v1/chat/completions/chatcmpl-abc123/messages",
+        ),
+    ] {
+        assert!(registry.find_provider(host, path).is_none(), "{path}");
+    }
 }
 
 #[test]
