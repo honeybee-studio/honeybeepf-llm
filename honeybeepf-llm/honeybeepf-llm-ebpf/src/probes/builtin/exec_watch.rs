@@ -47,8 +47,7 @@ pub static LIB_OPEN_SEEN: LruHashMap<[u64; 2], u64> = LruHashMap::with_max_entri
 #[repr(C)]
 struct LibOpenScratch {
     path: [u8; MAX_FILENAME_LEN],
-    /// Copied from the end of `path` by a helper: the verifier rejects the variable offset as an index.
-    /// Little-endian blocks, so the first pass reads 4 bytes per load.
+    /// End of `path` as u32 blocks; a helper copies it since the verifier rejects that index.
     tail: [u32; TAIL_LEN / 4],
 }
 
@@ -56,7 +55,7 @@ struct LibOpenScratch {
 #[map]
 static LIB_OPEN_PATH: PerCpuArray<LibOpenScratch> = PerCpuArray::with_max_entries(1, 0);
 
-/// Never written: clears LIB_OPEN_PATH with one helper copy.
+/// Never written: clears `LibOpenScratch::path` with one helper copy.
 #[map]
 static LIB_OPEN_ZERO: Array<[u8; MAX_FILENAME_LEN]> = Array::with_max_entries(1, 0);
 
@@ -107,6 +106,24 @@ pub fn probe_lib_open_fentry(ctx: FEntryContext) -> u32 {
     lib_open(ptr, how)
 }
 
+/// Copies the last TAIL_LEN bytes before `path[len]` into `tail`.
+#[inline(always)]
+fn copy_tail(path: &[u8; MAX_FILENAME_LEN], len: usize, tail: &mut [u32; TAIL_LEN / 4]) -> bool {
+    let start = len.saturating_sub(TAIL_LEN);
+    if start > MAX_FILENAME_LEN - TAIL_LEN {
+        return false;
+    }
+    // SAFETY: start + TAIL_LEN <= MAX_FILENAME_LEN keeps the source in `path`; dst is TAIL_LEN B.
+    let ret = unsafe {
+        r#gen::bpf_probe_read_kernel(
+            tail.as_mut_ptr().cast(),
+            TAIL_LEN as u32,
+            path.as_ptr().add(start).cast(),
+        )
+    };
+    ret == 0
+}
+
 /// Reports absolute read-only `.../libssl.so*` opens.
 #[inline(always)]
 fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
@@ -124,7 +141,7 @@ fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
     // Loops below run a fixed count over constant indexes. Loops that stop at `len` or index by a
     // found position made the verifier explore one state per value and hit its 1M-insn limit.
     let LibOpenScratch { path, tail } = match LIB_OPEN_PATH.get_ptr_mut(0) {
-        // SAFETY: this CPU's slot, used only by this program while it runs (it doesn't nest).
+        // SAFETY: this CPU's slot; one program is attached and it doesn't re-enter on a CPU.
         Some(p) => unsafe { &mut *p },
         None => return 0,
     };
@@ -137,20 +154,7 @@ fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
         return 0;
     }
 
-    let start = len.saturating_sub(TAIL_LEN);
-    if start > MAX_FILENAME_LEN - TAIL_LEN {
-        return 0;
-    }
-    // SAFETY: start + TAIL_LEN <= MAX_FILENAME_LEN, so the source stays inside `path`, and `tail`
-    // is TAIL_LEN bytes.
-    let copied = unsafe {
-        r#gen::bpf_probe_read_kernel(
-            tail.as_mut_ptr().cast(),
-            TAIL_LEN as u32,
-            path.as_ptr().add(start).cast(),
-        )
-    };
-    if copied != 0 {
+    if !copy_tail(path, len, tail) {
         return 0;
     }
     // Cheap first pass: most paths have no such block and stop here.
@@ -190,6 +194,7 @@ fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
 
     // Stale bytes after the NUL must not reach the hash either. Clearing costs a full-buffer copy,
     // so it is done only here, for the rare libssl open, and the path is read again.
+    let checked = *tail;
     let zero = match LIB_OPEN_ZERO.get(0) {
         Some(z) => z,
         None => return 0,
@@ -198,11 +203,24 @@ fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
     if unsafe { bpf_probe_read_kernel_buf(zero.as_ptr(), path) }.is_err() {
         return 0;
     }
-    // SAFETY: as the first read.
-    let len = match unsafe { bpf_probe_read_user_str_bytes(ptr, path) } {
-        Ok(s) => s.len(),
-        Err(_) => return 0,
-    };
+    // SAFETY: the helper copies at most path.len() bytes and fails cleanly on a bad user pointer.
+    match unsafe { bpf_probe_read_user_str_bytes(ptr, path) } {
+        Ok(s) if s.len() == len => {}
+        _ => return 0,
+    }
+    // Another thread may have rewritten the string in between: report only the shape checked above.
+    if path[0] != b'/' || !copy_tail(path, len, tail) {
+        return 0;
+    }
+    let mut same = true;
+    let mut b = 0usize;
+    while b < tail.len() {
+        same &= tail[b] == checked[b];
+        b += 1;
+    }
+    if !same {
+        return 0;
+    }
 
     let mut hash: u64 = 0xcbf29ce484222325;
     let mut i = 0usize;
@@ -213,7 +231,7 @@ fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
 
     let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
     // cgroup v1 reports one id for every task, so key by process there.
-    // SAFETY: argument-free helper, valid in kprobe context.
+    // SAFETY: argument-free helper, valid in kprobe and fentry context.
     let cgroup = unsafe { bpf_get_current_cgroup_id() };
     let scope = if cgroup > 1 {
         cgroup
@@ -221,7 +239,7 @@ fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
         (1 << 63) | pid as u64
     };
     let key = [scope, hash];
-    // SAFETY: argument-free helper, valid in kprobe context.
+    // SAFETY: argument-free helper, valid in kprobe and fentry context.
     let now = unsafe { bpf_ktime_get_ns() };
     // SAFETY: the value is a plain u64 that is only read here; a concurrent update is harmless.
     if let Some(last) = unsafe { LIB_OPEN_SEEN.get(&key) } {

@@ -276,7 +276,7 @@ pub struct LibOpen {
 pub type LibOpenQueue = Arc<Mutex<VecDeque<LibOpen>>>;
 pub type LibOpenSeen = AyaHashMap<MapData, [u64; 2], u64>;
 
-/// Set up the do_sys_openat2 kprobe that reports `libssl.so*` opens before their first SSL call.
+/// Set up the do_sys_openat2 hook (fentry, else kprobe) that reports `libssl.so*` opens before their first SSL call.
 /// If it fails to attach, only this hook is lost and exec re-discovery still runs.
 pub fn setup_lib_open_watch(bpf: &mut Ebpf) -> Result<(LibOpenQueue, ExecNotify, LibOpenSeen)> {
     // fentry runs on every open without the kprobe trap; the kprobe covers kernels without BTF.
