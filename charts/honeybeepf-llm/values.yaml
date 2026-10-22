@@ -40,8 +40,7 @@ builtinProbes:
 
   llm:
     enabled: false
-    # Custom providers config (optional). Built-in: OpenAI, Anthropic, Gemini, also via Azure OpenAI/Foundry,
-    # Amazon Bedrock, Claude Platform on AWS and Vertex AI.
+    # Custom providers config (optional). Built-in: OpenAI, Anthropic, Gemini (also via Azure, Bedrock, Vertex AI)
     # Add your own providers here (e.g. Ollama, vLLM, private models).
     providers: []
     # Example:

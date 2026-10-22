@@ -244,9 +244,10 @@ pub struct Http2Parser;
 
 impl ProtocolParser for Http2Parser {
     fn detect_request(&self, buffer: &[u8]) -> Option<String> {
-        // Skip if this looks like HTTP/1.1 (starts with HTTP method)
+        // Skip HTTP/1.1 requests and responses (servers write responses): only other writes pay the host scan
         let preview = &buffer[..std::cmp::min(10, buffer.len())];
-        if preview.starts_with(b"GET ")
+        if preview.starts_with(b"HTTP/")
+            || preview.starts_with(b"GET ")
             || preview.starts_with(b"POST ")
             || preview.starts_with(b"PUT ")
             || preview.starts_with(b"DELETE ")
@@ -903,6 +904,12 @@ mod tests {
     }
 
     #[test]
+    fn http11_response_writes_are_not_http2_requests() {
+        let resp = b"HTTP/1.1 200 OK\r\nHost: api.openai.com\r\n\r\n{\"model\":\"gpt-4o\"}";
+        assert_eq!(Http2Parser.detect_request(resp), None);
+    }
+
+    #[test]
     fn only_http2_writes_during_response() {
         assert!(Http2Parser.writes_during_response());
         assert!(!Http11Parser.writes_during_response());
@@ -925,26 +932,21 @@ mod tests {
 
     #[test]
     fn cloud_hosts_are_detected_on_http11() {
-        let detect = |host: &str, path: &str| {
+        let detect = |url: &str| {
+            let (host, path) = url.split_at(url.find('/').unwrap_or(url.len()));
             let req = format!("POST {path} HTTP/1.1\r\nHost: {host}\r\n\r\n{{}}");
-            Http11Parser.detect_request(req.as_bytes())
+            Http11Parser.detect_request(req.as_bytes()).is_some()
         };
-        assert!(detect("aws-external-anthropic.us-west-2.api.aws", "/v1/messages").is_some());
-        assert!(
-            detect(
-                "bedrock-mantle.us-east-2.api.aws:443",
-                "/openai/v1/responses"
-            )
-            .is_some()
-        );
-        assert!(
-            detect(
-                "bedrock-runtime.us-east-1.amazonaws.com",
-                "/model/m/converse"
-            )
-            .is_some()
-        );
-        assert!(detect("ec2.us-west-2.api.aws", "/v1/messages").is_none());
+        assert!(detect(
+            "aws-external-anthropic.us-west-2.api.aws/v1/messages"
+        ));
+        assert!(detect(
+            "bedrock-mantle.us-east-2.api.aws:443/openai/v1/responses"
+        ));
+        assert!(detect(
+            "bedrock-runtime.us-east-1.amazonaws.com/model/m/converse"
+        ));
+        assert!(!detect("ec2.us-west-2.api.aws/v1/messages"));
     }
 
     #[test]
