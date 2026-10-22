@@ -29,22 +29,23 @@ pub struct Session;
 
 impl Session {
     #[inline(always)]
-    pub fn start(tid: u32, buf_addr: u64, len_ptr: Option<u64>) {
+    pub fn start(tid: u32, ssl: u64, buf_addr: u64, len_ptr: Option<u64>) {
         let ts = unsafe { bpf_ktime_get_ns() };
         let _ = START_NS.insert(&tid, &ts, 0);
-        let _ = BUFS.insert(&tid, &buf_addr, 0);
+        let _ = BUFS.insert(&tid, &[buf_addr, ssl], 0);
         if let Some(lp) = len_ptr {
             let _ = READBYTES_PTRS.insert(&tid, &lp, 0);
         }
     }
 
+    /// (start ns, buf, SSL*, readbytes ptr) saved by the entry probe.
     #[inline(always)]
-    pub fn get_info(tid: u32) -> (u64, u64, Option<u64>) {
+    pub fn get_info(tid: u32) -> (u64, u64, u64, Option<u64>) {
         unsafe {
             let ts = START_NS.get(&tid).copied().unwrap_or(0);
-            let buf = BUFS.get(&tid).copied().unwrap_or(0);
+            let [buf, ssl] = BUFS.get(&tid).copied().unwrap_or([0, 0]);
             let len_ptr = READBYTES_PTRS.get(&tid).copied();
-            (ts, buf, len_ptr)
+            (ts, buf, ssl, len_ptr)
         }
     }
 
@@ -56,33 +57,52 @@ impl Session {
     }
 }
 
+/// Metadata for an event of the current task (LlmEvent doesn't use the HoneyBeeEvent trait).
+#[inline(always)]
+pub fn current_metadata() -> EventMetadata {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    EventMetadata {
+        pid: (pid_tgid >> 32) as u32,
+        // EventMetadata is shared across all event types, so the tid goes in the padding field.
+        _pad: pid_tgid as u32,
+        cgroup_id: unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() },
+        timestamp: unsafe { bpf_ktime_get_ns() },
+    }
+}
+
 /// One finished SSL call, read once and stamped on each fragment it is sent in.
 pub struct SslCall {
     metadata: EventMetadata,
     latency_ns: u64,
     comm: [u8; 16],
     buf_addr: u64,
+    ssl: u64,
     pub len: u32,
+    closed: u8,
 }
 
 impl SslCall {
+    /// SSL_free of `ssl`: no data, it only ends the connection's stream in userspace.
+    #[inline(always)]
+    pub fn free(ssl: u64) -> Self {
+        Self {
+            metadata: current_metadata(),
+            latency_ns: 0,
+            comm: [0; 16],
+            buf_addr: 0,
+            ssl,
+            len: 0,
+            closed: 1,
+        }
+    }
+
     #[inline(always)]
     pub fn capture(ctx: &RetProbeContext, is_handshake: bool) -> Result<Self, u32> {
         let tid = get_current_tid();
-        let (start_ts, buf_addr, len_ptr) = Session::get_info(tid);
+        let (start_ts, buf_addr, ssl, len_ptr) = Session::get_info(tid);
 
-        // Initialize metadata inline. LlmEvent uses a custom capture pattern with RetProbeContext
-        // rather than the HoneyBeeEvent trait (which uses TracePointContext/ProbeContext).
-        let pid_tgid = bpf_get_current_pid_tgid();
-        let timestamp = unsafe { bpf_ktime_get_ns() };
-        let metadata = EventMetadata {
-            pid: (pid_tgid >> 32) as u32,
-            // Store tid in _pad for userspace per-thread stream correlation. EventMetadata is shared
-            // across all event types, so we reuse the padding field rather than adding a new field.
-            _pad: pid_tgid as u32,
-            cgroup_id: unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() },
-            timestamp,
-        };
+        let metadata = current_metadata();
+        let timestamp = metadata.timestamp;
         let latency_ns = if start_ts > 0 {
             timestamp - start_ts
         } else {
@@ -116,7 +136,9 @@ impl SslCall {
             latency_ns,
             comm: bpf_get_current_comm().unwrap_or([0; 16]),
             buf_addr,
+            ssl,
             len,
+            closed: 0,
         })
     }
 }
@@ -132,9 +154,10 @@ impl LlmEventExt for LlmEvent {
         self.rw = rw;
         self.is_handshake = if is_handshake { 1 } else { 0 };
         self.truncated = (call.len as usize > capture_limit(LlmDirection::from(rw))) as u8;
-        self._pad = 0;
+        self.closed = call.closed;
         self.len = call.len;
         self.offset = offset;
+        self.ssl_ptr = call.ssl;
         self.latency_ns = call.latency_ns;
         self.comm = call.comm;
 
