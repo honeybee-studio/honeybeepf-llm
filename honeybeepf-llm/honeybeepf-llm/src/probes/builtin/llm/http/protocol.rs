@@ -75,18 +75,34 @@ pub trait ProtocolParser: Send + Sync {
 
     /// Parse response buffer. Returns UsageInfo if complete.
     fn parse_response(&self, buffer: &[u8]) -> Option<UsageInfo>;
+
+    /// Whether the client writes while a response is still arriving (HTTP/2 flow control, pings).
+    fn writes_during_response(&self) -> bool {
+        false
+    }
 }
 
 // --- HTTP/1.1 ---
 #[derive(Clone)]
 pub struct Http11Parser;
 
+impl Http11Parser {
+    /// Whether the buffer starts with a complete HTTP/1.1 request head.
+    pub fn is_request_head(buffer: &[u8]) -> bool {
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut req = httparse::Request::new(&mut headers);
+        matches!(req.parse(buffer), Ok(httparse::Status::Complete(_)))
+    }
+}
+
 impl ProtocolParser for Http11Parser {
     fn detect_request(&self, buffer: &[u8]) -> Option<String> {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
 
+        // Generation calls are POST; GET/DELETE on the same paths read or delete stored objects.
         if req.parse(buffer).is_ok()
+            && req.method == Some("POST")
             && let Some(path) = req.path
         {
             let host_header = req
@@ -229,6 +245,10 @@ impl ProtocolParser for Http2Parser {
         }
 
         None
+    }
+
+    fn writes_during_response(&self) -> bool {
+        true
     }
 
     fn extract_request_text(&self, buffer: &[u8]) -> String {
@@ -696,6 +716,36 @@ mod tests {
         );
         let get = b"GET /v1/responses/r1 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
         assert_eq!(Http11Parser.detect_request(get), None);
+    }
+
+    #[test]
+    fn only_post_to_a_generation_path_is_detected() {
+        let post = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{}";
+        assert!(Http11Parser.detect_request(post).is_some());
+        for req in [
+            &b"GET /v1/chat/completions?limit=20 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n"[..],
+            b"GET /v1/chat/completions/chatcmpl-1 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n",
+            b"DELETE /v1/chat/completions/chatcmpl-1 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n",
+            b"POST /v1/chat/completions/chatcmpl-1 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{\"metadata\":{}}",
+            b"POST /v1/messages/count_tokens HTTP/1.1\r\nHost: api.anthropic.com\r\n\r\n{}",
+            b"GET /v1/messages/batches/msgbatch_01 HTTP/1.1\r\nHost: api.anthropic.com\r\n\r\n",
+        ] {
+            let line = String::from_utf8_lossy(req);
+            assert_eq!(Http11Parser.detect_request(req), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn request_head_needs_a_complete_http11_head() {
+        assert!(Http11Parser::is_request_head(
+            b"POST /v1/embeddings HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{}"
+        ));
+        assert!(!Http11Parser::is_request_head(
+            b"POST /v1/embeddings HTTP/1.1\r\nHost: api.op"
+        ));
+        assert!(!Http11Parser::is_request_head(
+            b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+        ));
     }
 
     #[test]

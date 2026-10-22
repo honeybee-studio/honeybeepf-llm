@@ -109,14 +109,22 @@ impl StreamProcessor {
         self.frag_next = if complete { 0 } else { end };
         self.frag_dir = direction;
 
-        let dropped = if !gap {
-            Outcome::Pending
+        let reason = if gap {
+            Some("response bytes lost in capture")
+        } else if direction == LlmDirection::Write && self.awaits_http11_response() {
+            Some("next request started before usage was found")
         } else {
-            #[cfg(feature = "k8s")]
-            let dropped = self.drop_response(pid, pod_info.as_ref());
-            #[cfg(not(feature = "k8s"))]
-            let dropped = self.drop_response(pid);
-            dropped
+            None
+        };
+        let dropped = match reason {
+            None => Outcome::Pending,
+            Some(reason) => {
+                #[cfg(feature = "k8s")]
+                let dropped = self.drop_response(pid, reason, pod_info.as_ref());
+                #[cfg(not(feature = "k8s"))]
+                let dropped = self.drop_response(pid, reason);
+                dropped
+            }
         };
         if out_of_order && offset != 0 {
             return dropped;
@@ -133,10 +141,22 @@ impl StreamProcessor {
         }
     }
 
+    /// HTTP/1.1 clients do not write while a response is arriving, so a Write here starts the next request.
+    fn awaits_http11_response(&self) -> bool {
+        match &self.state {
+            // A 1xx interim response (100 Continue) is followed by the request body.
+            ProcessorState::ProcessingResponse { parser, .. } => {
+                !parser.writes_during_response() && !self.read_buf.starts_with(b"HTTP/1.1 1")
+            }
+            _ => false,
+        }
+    }
+
     /// Count the response in progress as unparsed rather than record it as a 0-token failure.
     fn drop_response(
         &mut self,
         pid: u32,
+        reason: &str,
         #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
     ) -> Outcome {
         if !self.is_llm() {
@@ -153,8 +173,8 @@ impl StreamProcessor {
         let pod_str = "";
 
         info!(
-            "LLM UNPARSED | PID: {} | response bytes lost in capture, not recorded{}",
-            pid, pod_str
+            "LLM UNPARSED | PID: {} | {}, not recorded{}",
+            pid, reason, pod_str
         );
         self.state = ProcessorState::Finished;
         Outcome::Unparsed
@@ -196,6 +216,12 @@ impl StreamProcessor {
             LlmDirection::Read => {
                 // Optimization: Don't buffer responses if we haven't detected a valid LLM request yet
                 if matches!(self.state, ProcessorState::Detecting) {
+                    // The server is answering a non-LLM request; the next request must not sit behind it.
+                    if !self.write_buf.is_empty()
+                        && http::Http11Parser::is_request_head(&self.write_buf)
+                    {
+                        self.write_buf.clear();
+                    }
                     return Outcome::Pending;
                 }
 
@@ -471,6 +497,117 @@ mod tests {
         for r in &h1_response(3000) {
             out.extend(send(&mut p, LlmDirection::Read, r, None));
         }
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+    }
+
+    const MESSAGES_REQUEST: &[u8] = b"POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"claude-opus-5-5\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"Hello, Claude\"}]}";
+    const MESSAGES_RESPONSE: &str = r#"{"id":"msg_1","type":"message","model":"claude-opus-5-5","content":[],"usage":{"input_tokens":14,"output_tokens":36}}"#;
+
+    fn h1(content_type: &str, body: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    /// One request and its response on the same stream; the response head and body are read separately.
+    fn exchange(p: &mut StreamProcessor, request: &[u8], response: &[u8]) -> Vec<Outcome> {
+        let mut out = send(p, LlmDirection::Write, request, None);
+        let split = response
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map_or(response.len(), |i| i + 4);
+        let (head, body) = response.split_at(split);
+        out.extend(send(p, LlmDirection::Read, head, None));
+        if !body.is_empty() {
+            out.extend(send(p, LlmDirection::Read, body, None));
+        }
+        out
+    }
+
+    fn count(out: &[Outcome], want: Outcome) -> usize {
+        out.iter().filter(|o| **o == want).count()
+    }
+
+    #[test]
+    fn test_messages_after_count_tokens_is_recorded() {
+        let mut p = StreamProcessor::new();
+        let count_tokens = b"POST /v1/messages/count_tokens HTTP/1.1\r\nHost: api.anthropic.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"claude-opus-5-5\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello, Claude\"}]}";
+        let mut out = exchange(
+            &mut p,
+            count_tokens,
+            &h1("application/json", r#"{"input_tokens":14}"#),
+        );
+        out.extend(exchange(
+            &mut p,
+            MESSAGES_REQUEST,
+            &h1("application/json", MESSAGES_RESPONSE),
+        ));
+        assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+        assert_eq!(count(&out, Outcome::Unparsed), 0, "{out:?}");
+    }
+
+    #[test]
+    fn test_chat_after_non_llm_request_is_recorded() {
+        let mut p = StreamProcessor::new();
+        let embeddings = b"POST /v1/embeddings HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"text-embedding-3-small\",\"input\":\"hi\"}";
+        let mut out = exchange(
+            &mut p,
+            embeddings,
+            &h1(
+                "application/json",
+                r#"{"object":"list","data":[],"usage":{"prompt_tokens":1,"total_tokens":1}}"#,
+            ),
+        );
+        let reads = h1_response(3000);
+        out.extend(outcomes(&mut p, &reads, None));
+        assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+    }
+
+    #[test]
+    fn test_stored_completion_retrieval_is_not_recorded() {
+        let mut p = StreamProcessor::new();
+        let mut out = outcomes(&mut p, &h1_response(3000), None);
+        let retrieve =
+            b"GET /v1/chat/completions/chatcmpl-abc123 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
+        let stored = r#"{"object":"chat.completion","id":"chatcmpl-abc123","model":"gpt-6-astra","choices":[],"usage":{"total_tokens":31,"completion_tokens":18,"prompt_tokens":13}}"#;
+        out.extend(exchange(&mut p, retrieve, &h1("application/json", stored)));
+        assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+    }
+
+    #[test]
+    fn test_response_without_usage_is_unparsed_when_next_request_starts() {
+        let mut p = StreamProcessor::new();
+        let bad_gateway = b"HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/html\r\nContent-Length: 34\r\n\r\n<html><body>502 Bad Gateway</body>";
+        let mut out = exchange(&mut p, MESSAGES_REQUEST, bad_gateway);
+        out.extend(exchange(
+            &mut p,
+            MESSAGES_REQUEST,
+            &h1("application/json", MESSAGES_RESPONSE),
+        ));
+        assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
+        assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+    }
+
+    #[test]
+    fn test_body_after_100_continue_is_recorded() {
+        let mut p = StreamProcessor::new();
+        let (head, body) = REQUEST.split_at(REQUEST.len() - 27);
+        let mut out = send(&mut p, LlmDirection::Write, head, None);
+        out.extend(send(
+            &mut p,
+            LlmDirection::Read,
+            b"HTTP/1.1 100 Continue\r\n\r\n",
+            None,
+        ));
+        out.extend(send(&mut p, LlmDirection::Write, body, None));
+        for r in &h1_response(3000) {
+            out.extend(send(&mut p, LlmDirection::Read, r, None));
+        }
+        assert_eq!(count(&out, Outcome::Unparsed), 0, "{out:?}");
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
     }
 }
