@@ -35,8 +35,19 @@ pub struct ResponseConfig {
     /// Optional: field name for thinking/reasoning tokens
     pub thoughts_tokens: Option<String>,
 
-    /// Optional: field name for cached prompt tokens
-    pub cached_tokens: Option<String>,
+    /// Optional: field name for prompt tokens read from the provider cache
+    #[serde(alias = "cached_tokens")]
+    pub cache_read_tokens: Option<String>,
+
+    /// Optional: field name for prompt tokens written to the provider cache
+    pub cache_write_tokens: Option<String>,
+
+    /// Whether `prompt_tokens` leaves out cache tokens (Anthropic), so the input total adds them back
+    #[serde(default)]
+    pub prompt_excludes_cache: bool,
+
+    /// Optional: usage field that must be present, to tell apart providers sharing token keys
+    pub required_field: Option<String>,
 
     /// JSON path to model name (from root, e.g., "model" or "modelVersion")
     #[serde(default = "default_model_path")]
@@ -63,7 +74,10 @@ impl Default for ResponseConfig {
             prompt_tokens: default_prompt_tokens(),
             completion_tokens: default_completion_tokens(),
             thoughts_tokens: None,
-            cached_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            prompt_excludes_cache: false,
+            required_field: None,
             model_path: default_model_path(),
         }
     }
@@ -123,13 +137,14 @@ impl ProviderRegistry {
                         thoughts_tokens: Some(
                             "completion_tokens_details.reasoning_tokens".to_string(),
                         ),
-                        cached_tokens: None,
+                        cache_read_tokens: Some("prompt_tokens_details.cached_tokens".to_string()),
                         model_path: "model".to_string(),
+                        ..ResponseConfig::default()
                     },
                     request_extractor: RequestExtractorType::Messages,
                 },
-                // Responses API. Usage parsing tries providers in order without a host check, so this
-                // goes before anthropic (same input/output_tokens keys) to keep reasoning and cached counts.
+                // Responses API. Usage parsing tries providers in order without a host check and anthropic
+                // has the same input/output_tokens keys; only Responses usage carries input_tokens_details.
                 // `$` keeps GET /v1/responses/{id} out.
                 ProviderConfig {
                     name: "openai".to_string(),
@@ -140,8 +155,10 @@ impl ProviderRegistry {
                         prompt_tokens: "input_tokens".to_string(),
                         completion_tokens: "output_tokens".to_string(),
                         thoughts_tokens: Some("output_tokens_details.reasoning_tokens".to_string()),
-                        cached_tokens: Some("input_tokens_details.cached_tokens".to_string()),
+                        cache_read_tokens: Some("input_tokens_details.cached_tokens".to_string()),
+                        required_field: Some("input_tokens_details".to_string()),
                         model_path: "model".to_string(),
+                        ..ResponseConfig::default()
                     },
                     request_extractor: RequestExtractorType::Input,
                 },
@@ -154,9 +171,11 @@ impl ProviderRegistry {
                         usage_path: "usage".to_string(),
                         prompt_tokens: "input_tokens".to_string(),
                         completion_tokens: "output_tokens".to_string(),
-                        thoughts_tokens: None,
-                        cached_tokens: None,
+                        cache_read_tokens: Some("cache_read_input_tokens".to_string()),
+                        cache_write_tokens: Some("cache_creation_input_tokens".to_string()),
+                        prompt_excludes_cache: true,
                         model_path: "model".to_string(),
+                        ..ResponseConfig::default()
                     },
                     request_extractor: RequestExtractorType::Messages,
                 },
@@ -173,8 +192,9 @@ impl ProviderRegistry {
                         prompt_tokens: "promptTokenCount".to_string(),
                         completion_tokens: "candidatesTokenCount".to_string(),
                         thoughts_tokens: Some("thoughtsTokenCount".to_string()),
-                        cached_tokens: None,
+                        cache_read_tokens: Some("cachedContentTokenCount".to_string()),
                         model_path: "modelVersion".to_string(),
+                        ..ResponseConfig::default()
                     },
                     request_extractor: RequestExtractorType::Contents,
                 },

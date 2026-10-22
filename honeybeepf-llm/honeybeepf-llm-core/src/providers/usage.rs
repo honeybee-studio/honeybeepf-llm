@@ -48,6 +48,11 @@ impl ConfigurableProvider {
 
         // Get usage object using configured path
         let usage = get_nested_value(json, &response_config.usage_path)?;
+        if let Some(field) = &response_config.required_field
+            && get_nested_value(usage, field).is_none()
+        {
+            return None;
+        }
 
         // Extract token counts
         let prompt =
@@ -55,18 +60,23 @@ impl ConfigurableProvider {
         let completion =
             get_nested_value(usage, &response_config.completion_tokens).and_then(|v| v.as_u64())?;
 
-        // Optional: thoughts/reasoning tokens
-        let thoughts = response_config
-            .thoughts_tokens
-            .as_ref()
-            .and_then(|path| get_nested_value(usage, path))
-            .and_then(|v| v.as_u64());
+        // Optional: thoughts/reasoning and cache tokens
+        let optional = |path: &Option<String>| {
+            path.as_ref()
+                .and_then(|path| get_nested_value(usage, path))
+                .and_then(|v| v.as_u64())
+        };
+        let thoughts = optional(&response_config.thoughts_tokens);
+        let cache_read = optional(&response_config.cache_read_tokens);
+        let cache_write = optional(&response_config.cache_write_tokens);
 
-        let cached = response_config
-            .cached_tokens
-            .as_ref()
-            .and_then(|path| get_nested_value(usage, path))
-            .and_then(|v| v.as_u64());
+        let prompt = if response_config.prompt_excludes_cache {
+            prompt
+                .saturating_add(cache_read.unwrap_or(0))
+                .saturating_add(cache_write.unwrap_or(0))
+        } else {
+            prompt
+        };
 
         // Model name from root
         let model = get_nested_value(json, &response_config.model_path)
@@ -77,7 +87,8 @@ impl ConfigurableProvider {
             prompt_tokens: prompt,
             completion_tokens: completion,
             thoughts_tokens: thoughts,
-            cached_tokens: cached,
+            cache_read_tokens: cache_read,
+            cache_write_tokens: cache_write,
             model,
         })
     }

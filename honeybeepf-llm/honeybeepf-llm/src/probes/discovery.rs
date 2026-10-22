@@ -1,4 +1,9 @@
-use std::{collections::HashSet, path::PathBuf, process::Command};
+use std::{
+    collections::{HashSet, VecDeque},
+    ffi::OsString,
+    path::{Component, Path, PathBuf},
+    process::Command,
+};
 
 use anyhow::Result;
 use log::{debug, warn};
@@ -17,6 +22,48 @@ pub fn resolve_host_path(pid: i32, container_path: &std::path::Path) -> PathBuf 
     root_path.push(relative_path);
 
     root_path
+}
+
+/// Resolve `path` under `root` as a process chrooted there would, symlinks included.
+/// Absolute symlinks and `..` would otherwise escape `/proc/<pid>/root` to the agent's own root.
+pub fn resolve_in_root(root: &Path, path: &Path) -> Option<PathBuf> {
+    const MAX_SYMLINKS: usize = 40;
+
+    let mut rest: VecDeque<OsString> = path.components().filter_map(component_name).collect();
+    let mut resolved = PathBuf::new();
+    let mut symlinks = 0;
+    while let Some(name) = rest.pop_front() {
+        if name == ".." {
+            resolved.pop();
+            continue;
+        }
+        let next = resolved.join(&name);
+        let meta = std::fs::symlink_metadata(root.join(&next)).ok()?;
+        if !meta.file_type().is_symlink() {
+            resolved = next;
+            continue;
+        }
+        symlinks += 1;
+        if symlinks > MAX_SYMLINKS {
+            return None;
+        }
+        let target = std::fs::read_link(root.join(&next)).ok()?;
+        if target.is_absolute() {
+            resolved.clear();
+        }
+        for part in target.components().rev().filter_map(component_name) {
+            rest.push_front(part);
+        }
+    }
+    Some(root.join(resolved))
+}
+
+fn component_name(c: Component<'_>) -> Option<OsString> {
+    match c {
+        Component::Normal(s) => Some(s.to_os_string()),
+        Component::ParentDir => Some(OsString::from("..")),
+        _ => None,
+    }
 }
 
 /// Identity of a library file; per-process and per-container paths to one library share it.
@@ -219,5 +266,35 @@ mod tests {
         let via_root = format!("/proc/{}/root/proc/cpuinfo", std::process::id());
         assert_eq!(fs_type(&via_root).as_deref(), Some("proc"));
         assert_eq!(fs_type("/proc/cpuinfo").as_deref(), Some("proc"));
+    }
+
+    /// Absolute symlinks and `..` stay inside the root, like the container's loader saw them.
+    #[test]
+    fn test_resolve_in_root_keeps_symlinks_inside_root() -> std::io::Result<()> {
+        let root = std::env::temp_dir().join(format!("hb-resolve-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("opt/ssl/lib"))?;
+        std::fs::create_dir_all(root.join("usr/lib"))?;
+        std::fs::write(root.join("opt/ssl/lib/libssl.so.3"), b"lib")?;
+        std::os::unix::fs::symlink("/opt/ssl/lib/libssl.so.3", root.join("usr/lib/libssl.so.3"))?;
+        std::os::unix::fs::symlink("usr/lib", root.join("lib"))?;
+
+        let want = root.join("opt/ssl/lib/libssl.so.3");
+        let cases = [
+            "/usr/lib/libssl.so.3",
+            "/lib/libssl.so.3",
+            "/usr/local/../lib/../lib/libssl.so.3",
+            "/../../../usr/lib/libssl.so.3",
+        ];
+        for case in cases {
+            let got = resolve_in_root(&root, Path::new(case));
+            if case.contains("local") {
+                assert_eq!(got, None, "{case}: missing directory must not resolve");
+            } else {
+                assert_eq!(got.as_deref(), Some(want.as_path()), "{case}");
+            }
+        }
+
+        std::fs::remove_dir_all(&root)
     }
 }

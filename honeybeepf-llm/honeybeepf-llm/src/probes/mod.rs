@@ -11,10 +11,10 @@ use std::{
 use anyhow::{Context, Result};
 use aya::{
     Ebpf,
-    maps::RingBuf,
-    programs::{TracePoint, UProbe, uprobe::UProbeLinkId},
+    maps::{HashMap as AyaHashMap, MapData, RingBuf},
+    programs::{KProbe, TracePoint, UProbe, uprobe::UProbeLinkId},
 };
-use honeybeepf_llm_common::ExecEvent;
+use honeybeepf_llm_common::{ExecEvent, LibOpenEvent};
 use log::{info, warn};
 use tokio::sync::Notify;
 
@@ -191,6 +191,21 @@ pub fn attach_uprobe(
         .with_context(|| format!("Failed to attach {} to {}", prog_name, func_name))
 }
 
+/// Load (if needed) and attach a kprobe program to a kernel function.
+pub fn attach_kprobe(bpf: &mut Ebpf, prog_name: &str, func_name: &str) -> Result<()> {
+    let program: &mut KProbe = bpf
+        .program_mut(prog_name)
+        .with_context(|| format!("Failed to find program {}", prog_name))?
+        .try_into()?;
+    if program.fd().is_err() {
+        program.load()?;
+    }
+    program
+        .attach(func_name, 0)
+        .with_context(|| format!("Failed to attach {} to {}", prog_name, func_name))?;
+    Ok(())
+}
+
 /// Detach a uprobe link returned by [`attach_uprobe`].
 pub fn detach_uprobe(bpf: &mut Ebpf, prog_name: &str, link_id: UProbeLinkId) -> Result<()> {
     let program: &mut UProbe = bpf
@@ -232,4 +247,61 @@ pub fn setup_exec_watch(bpf: &mut Ebpf) -> Result<(ExecPidQueue, ExecNotify)> {
 
     info!("Exec watch active: will trigger targeted re-discovery on new processes");
     Ok((queue, notify))
+}
+
+/// A `libssl.so*` open reported by the kernel.
+pub struct LibOpen {
+    pub pid: u32,
+    /// As the process passed it to open(), relative to its own root.
+    pub path: String,
+    /// Written back to `LIB_OPEN_SEEN` once handled, so the kernel stops reporting it.
+    pub seen_key: [u64; 2],
+    pub ts: u64,
+}
+
+pub type LibOpenQueue = Arc<Mutex<VecDeque<LibOpen>>>;
+pub type LibOpenSeen = AyaHashMap<MapData, [u64; 2], u64>;
+
+/// Set up the do_sys_openat2 kprobe that reports `libssl.so*` opens before their first SSL call.
+/// If it fails to attach, only this hook is lost and exec re-discovery still runs.
+pub fn setup_lib_open_watch(bpf: &mut Ebpf) -> Result<(LibOpenQueue, ExecNotify, LibOpenSeen)> {
+    if let Err(e) = attach_kprobe(bpf, "probe_lib_open", "do_sys_openat2") {
+        warn!("libssl open watch not attached: {:#}", e);
+    }
+    let seen = AyaHashMap::try_from(
+        bpf.take_map("LIB_OPEN_SEEN")
+            .context("Failed to get LIB_OPEN_SEEN map")?,
+    )?;
+
+    let queue: LibOpenQueue = Arc::new(Mutex::new(VecDeque::new()));
+    let notify: ExecNotify = Arc::new(Notify::new());
+    let handler_queue = queue.clone();
+    let handler_notify = notify.clone();
+    let own_pid = std::process::id();
+
+    spawn_ringbuf_handler(bpf, "LIB_OPEN_EVENTS", move |event: LibOpenEvent| {
+        // aya opens the library file itself while attaching.
+        if event.pid == own_pid {
+            return;
+        }
+        let len = (event.len as usize).min(event.path.len());
+        let open = LibOpen {
+            pid: event.pid,
+            path: String::from_utf8_lossy(&event.path[..len]).into_owned(),
+            seen_key: event.seen_key,
+            ts: event.ts,
+        };
+        let mut q = handler_queue.lock().unwrap_or_else(|e| e.into_inner());
+        if q.len() < MAX_EXEC_QUEUE_SIZE {
+            q.push_back(open);
+        } else {
+            warn!(
+                "libssl open queue full, dropping {} (PID: {})",
+                open.path, open.pid
+            );
+        }
+        handler_notify.notify_one();
+    })?;
+
+    Ok((queue, notify, seen))
 }

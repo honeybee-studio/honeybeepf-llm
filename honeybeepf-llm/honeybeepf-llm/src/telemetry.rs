@@ -51,6 +51,8 @@ pub struct HoneyBeeMetrics {
     pub file_access_events: Counter<u64>,
     pub llm_requests_total: Counter<u64>,
     pub llm_tokens_total: Counter<u64>,
+    pub llm_cache_read_tokens_total: Counter<u64>,
+    pub llm_cache_write_tokens_total: Counter<u64>,
     pub llm_latency_seconds: Histogram<f64>,
     pub llm_responses_unparsed_total: Counter<u64>,
 }
@@ -102,6 +104,22 @@ impl HoneyBeeMetrics {
             llm_tokens_total: meter
                 .u64_counter("llm_tokens_total")
                 .with_description("Total number of LLM tokens processed")
+                .with_unit("tokens")
+                .build(),
+            // Separate counters, not token_type values: these are subsets of the prompt count,
+            // so summing llm_tokens_total stays the true total (OTel cache_read/cache_write counters).
+            llm_cache_read_tokens_total: meter
+                .u64_counter("llm_cache_read_tokens_total")
+                .with_description(
+                    "Prompt tokens served from the provider cache, already in llm_tokens_total",
+                )
+                .with_unit("tokens")
+                .build(),
+            llm_cache_write_tokens_total: meter
+                .u64_counter("llm_cache_write_tokens_total")
+                .with_description(
+                    "Prompt tokens written to the provider cache, already in llm_tokens_total",
+                )
                 .with_unit("tokens")
                 .build(),
             llm_latency_seconds: meter
@@ -259,6 +277,7 @@ pub fn record_llm_request(
     latency_secs: f64,
     prompt_tokens: u64,
     completion_tokens: u64,
+    (cache_read_tokens, cache_write_tokens): (Option<u64>, Option<u64>),
     is_error: bool,
     #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
 ) {
@@ -286,6 +305,13 @@ pub fn record_llm_request(
 
         // 3. tokens
         if !is_error {
+            if let Some(n) = cache_read_tokens {
+                m.llm_cache_read_tokens_total.add(n, &attrs);
+            }
+            if let Some(n) = cache_write_tokens {
+                m.llm_cache_write_tokens_total.add(n, &attrs);
+            }
+
             let mut prompt_attrs = attrs.clone();
             prompt_attrs.push(KeyValue::new("token_type", "prompt"));
             m.llm_tokens_total.add(prompt_tokens, &prompt_attrs);

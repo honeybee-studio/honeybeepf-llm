@@ -408,7 +408,10 @@ fn merge_sse_event(acc: &mut Value, update: Value) {
     };
     for (key, value) in update {
         match (acc.get_mut(&key), value) {
-            (Some(Value::Object(prev)), Value::Object(next)) => prev.extend(next),
+            // A null count in a later event (e.g. Anthropic message_delta) must not erase an earlier one.
+            (Some(Value::Object(prev)), Value::Object(next)) => {
+                prev.extend(next.into_iter().filter(|(_, v)| !v.is_null()))
+            }
             (Some(slot), value) => *slot = value,
             (None, value) => {
                 acc.insert(key, value);
@@ -434,7 +437,8 @@ fn parse_response_json_value(val: &Value) -> Option<UsageInfo> {
             prompt_tokens: 0,
             completion_tokens: 0,
             thoughts_tokens: None,
-            cached_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
             model: None,
         });
     }
@@ -596,6 +600,98 @@ mod tests {
         assert_eq!(tokens(info), None);
     }
 
+    fn cache(info: &UsageInfo) -> (Option<u64>, Option<u64>) {
+        (info.cache_read_tokens, info.cache_write_tokens)
+    }
+
+    #[test]
+    fn anthropic_json_input_total_includes_cache() {
+        let resp = concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n",
+            "{\"id\":\"m1\",\"type\":\"message\",\"model\":\"claude-test\",\"content\":[],",
+            "\"usage\":{\"input_tokens\":50,\"cache_creation_input_tokens\":2000,",
+            "\"cache_read_input_tokens\":100000,\"output_tokens\":300}}",
+        );
+        let info = Http11Parser.parse_response(resp.as_bytes());
+        assert_eq!(tokens(info), Some((102_050, 300)));
+    }
+
+    const ANTHROPIC_SSE_CACHE_START: &str = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"type\":\"message\",\"model\":\"claude-test\",",
+        "\"usage\":{\"input_tokens\":50,\"cache_creation_input_tokens\":2000,\"cache_read_input_tokens\":100000,\"output_tokens\":1}}}\n\n",
+    );
+
+    #[test]
+    fn anthropic_sse_input_total_includes_cache() {
+        let body = format!(
+            "{ANTHROPIC_SSE_CACHE_START}event: message_delta\n\
+             data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":300}}}}\n\n\
+             event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+        );
+        let info = Http11Parser.parse_response(&http11_sse(&body));
+        assert_eq!(tokens(info), Some((102_050, 300)));
+    }
+
+    #[test]
+    fn anthropic_sse_cumulative_delta_overrides_message_start_cache() {
+        let body = format!(
+            "{ANTHROPIC_SSE_CACHE_START}event: message_delta\n\
+             data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"input_tokens\":60,\
+             \"cache_creation_input_tokens\":2000,\"cache_read_input_tokens\":100500,\"output_tokens\":300}}}}\n\n\
+             event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+        );
+        let info = Http11Parser
+            .parse_response(&http11_sse(&body))
+            .expect("usage");
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (102_560, 300));
+        assert_eq!(cache(&info), (Some(100_500), Some(2000)));
+    }
+
+    #[test]
+    fn anthropic_sse_null_delta_counts_keep_message_start_cache() {
+        let body = format!(
+            "{ANTHROPIC_SSE_CACHE_START}event: message_delta\n\
+             data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"input_tokens\":null,\
+             \"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":null,\"output_tokens\":300}}}}\n\n\
+             event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+        );
+        let info = Http11Parser
+            .parse_response(&http11_sse(&body))
+            .expect("usage");
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (102_050, 300));
+        assert_eq!(cache(&info), (Some(100_000), Some(2000)));
+    }
+
+    #[test]
+    fn openai_chat_sse_cached_tokens_stay_inside_prompt() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"model\":\"gpt-4o\",\"choices\":[],\"usage\":{\"prompt_tokens\":2000,\"completion_tokens\":40,",
+            "\"prompt_tokens_details\":{\"cached_tokens\":1536}}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let info = Http11Parser
+            .parse_response(&http11_sse(body))
+            .expect("usage");
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (2000, 40));
+        assert_eq!(cache(&info), (Some(1536), None));
+    }
+
+    #[test]
+    fn gemini_sse_reads_cached_content_tokens() {
+        let body = concat!(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"i\"}]},\"finishReason\":\"STOP\"}],",
+            "\"usageMetadata\":{\"promptTokenCount\":5000,\"candidatesTokenCount\":20,\"cachedContentTokenCount\":4096},",
+            "\"modelVersion\":\"gemini-test\"}\r\n\r\n",
+        );
+        let info = Http11Parser
+            .parse_response(&http11_sse(body))
+            .expect("usage");
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (5000, 20));
+        assert_eq!(cache(&info), (Some(4096), None));
+    }
+
     #[test]
     fn gemini_sse_reads_usage_metadata() {
         let body = concat!(
@@ -671,7 +767,7 @@ mod tests {
             .expect("usage");
         assert_eq!((info.prompt_tokens, info.completion_tokens), (30, 9));
         assert_eq!(
-            (info.thoughts_tokens, info.cached_tokens),
+            (info.thoughts_tokens, info.cache_read_tokens),
             (Some(2), Some(5))
         );
         assert_eq!(info.model.as_deref(), Some("gpt-6"));
