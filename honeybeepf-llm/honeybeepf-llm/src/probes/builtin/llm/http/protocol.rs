@@ -1,12 +1,11 @@
-use std::io::Read;
-
-use flate2::read::GzDecoder;
 use once_cell::sync::Lazy;
 use serde_json::Value;
 
 use honeybeepf_llm_core::byte_utils;
 use honeybeepf_llm_core::providers::{ConfigurableProvider, ProviderRegistry, path_matches};
 use honeybeepf_llm_core::types::{SseChunkDelta, UsageInfo};
+
+use super::encoding;
 
 /// Cached providers - built once at initialization
 static CACHED_PROVIDERS: Lazy<Vec<ConfigurableProvider>> = Lazy::new(|| {
@@ -108,20 +107,14 @@ impl Http11Parser {
                 rest = body;
                 continue;
             }
-            let header = |name: &str| {
-                resp.headers
-                    .iter()
-                    .find(|h| h.name.eq_ignore_ascii_case(name))
-                    .map(|h| h.value)
-            };
-            if let Some(len) = header("Content-Length")
-                .and_then(|v| std::str::from_utf8(v).ok())
-                .and_then(|v| v.trim().parse::<usize>().ok())
-            {
+            if let Some(len) = content_length(resp.headers) {
                 return body.len() >= len;
             }
-            return header("Transfer-Encoding")
-                .is_some_and(|v| byte_utils::contains_pattern(v, b"chunked"))
+            return resp
+                .headers
+                .iter()
+                .find(|h| h.name.eq_ignore_ascii_case("Transfer-Encoding"))
+                .is_some_and(|h| byte_utils::contains_pattern(h.value, b"chunked"))
                 && body.ends_with(b"0\r\n\r\n");
         }
     }
@@ -181,12 +174,18 @@ impl ProtocolParser for Http11Parser {
             h.name.eq_ignore_ascii_case("Transfer-Encoding")
                 && String::from_utf8_lossy(h.value).contains("chunked")
         });
-        let is_gzip = resp.headers.iter().any(|h| {
-            h.name.eq_ignore_ascii_case("Content-Encoding")
-                && String::from_utf8_lossy(h.value).contains("gzip")
-        });
+        let is_encoded = encoding::is_encoded(resp.headers);
 
         let body = &buffer[body_offset..];
+        let ended = if is_chunked {
+            body.ends_with(b"0\r\n\r\n")
+        } else {
+            content_length(resp.headers).is_none_or(|len| body.len() >= len)
+        };
+        // Parsing re-runs on every read and decoding is not incremental, so wait for the framed end.
+        if is_encoded && !ended {
+            return None;
+        }
 
         // Decode chunked transfer encoding first
         let dechunked = if is_chunked {
@@ -194,28 +193,19 @@ impl ProtocolParser for Http11Parser {
         } else {
             std::borrow::Cow::Borrowed(body)
         };
+        let decompressed = encoding::decode(dechunked, resp.headers)?;
 
         // SSE events can straddle chunk boundaries, so they are parsed only after dechunking.
         if is_sse {
             // A truncated read desyncs the chunk framing; once the stream has ended, fall back to raw lines.
-            return parse_sse_body(&dechunked).or_else(|| {
-                if is_chunked && body.ends_with(b"0\r\n\r\n") {
+            return parse_sse_body(&decompressed).or_else(|| {
+                if is_chunked && !is_encoded && ended {
                     parse_sse_body(body)
                 } else {
                     None
                 }
             });
         }
-
-        // Then decompress gzip if needed
-        let decompressed: std::borrow::Cow<'_, [u8]> = if is_gzip {
-            match decompress_gzip(&dechunked) {
-                Ok(data) => std::borrow::Cow::Owned(data),
-                Err(_) => return None,
-            }
-        } else {
-            dechunked
-        };
 
         let trimmed = byte_utils::trim_trailing_whitespace(&decompressed);
 
@@ -453,12 +443,12 @@ fn parse_response_json_value(val: &Value) -> Option<UsageInfo> {
 
 // --- Helpers ---
 
-/// Decompress gzip data
-fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-    let mut decoder = GzDecoder::new(data);
-    let mut decompressed = Vec::new();
-    decoder.read_to_end(&mut decompressed)?;
-    Ok(decompressed)
+fn content_length(headers: &[httparse::Header]) -> Option<usize> {
+    headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case("Content-Length"))
+        .and_then(|h| std::str::from_utf8(h.value).ok())
+        .and_then(|v| v.trim().parse::<usize>().ok())
 }
 
 fn is_llm_path(path: &str) -> bool {

@@ -9,7 +9,7 @@ use crate::probes::builtin::llm::http::{self, ProtocolParser};
 // Buffer size constants
 const INITIAL_BUFFER_CAPACITY: usize = 8 * 1024; // 8KB initial allocation
 const MAX_REQUEST_BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB max for request (images, large context)
-const MAX_RESPONSE_BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB max for response (streaming)
+pub(crate) const MAX_RESPONSE_BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB max for response (streaming)
 const DETECTION_BUFFER_THRESHOLD: usize = 4096; // Give up detection after 4KB
 
 /// State definition: lifecycle of an LLM connection
