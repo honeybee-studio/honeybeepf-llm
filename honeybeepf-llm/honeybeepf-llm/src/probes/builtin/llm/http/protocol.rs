@@ -316,14 +316,6 @@ impl ProtocolParser for Http2Parser {
                 continue;
             }
 
-            // A Gemini stream chunk before the last has no candidatesTokenCount yet; it is not a 0-token answer.
-            if s.contains("\"usageMetadata\"")
-                && !s.contains("\"candidatesTokenCount\"")
-                && !s.contains("\"finishReason\"")
-            {
-                continue;
-            }
-
             let Ok(mut val) = serde_json::from_str::<Value>(&s) else {
                 continue;
             };
@@ -331,7 +323,15 @@ impl ProtocolParser for Http2Parser {
                 val = val["response"].take();
             }
             if let Some(info) = parse_response_json_value(&val) {
-                return Some(info);
+                // A Gemini stream chunk before the last has no candidatesTokenCount yet; it is not a 0-token answer.
+                let gemini_partial = info.completion_tokens == 0
+                    && s.contains("\"usageMetadata\"")
+                    && !s.contains("\"candidatesTokenCount\"")
+                    && !s.contains("\"finishReason\"")
+                    && !s.contains("\"blockReason\"");
+                if !gemini_partial {
+                    return Some(info);
+                }
             }
         }
 
@@ -341,13 +341,14 @@ impl ProtocolParser for Http2Parser {
 
 // --- SSE Parsing ---
 
-/// End-of-stream markers: OpenAI `[DONE]`/`finish_reason`, Anthropic `message_stop`, Gemini `finishReason`,
-/// OpenAI Responses terminal event types.
-const SSE_END_MARKERS: [&str; 7] = [
+/// End-of-stream markers: OpenAI `[DONE]`/`finish_reason`, Anthropic `message_stop`, Gemini `finishReason`
+/// or prompt `blockReason`, OpenAI Responses terminal event types.
+const SSE_END_MARKERS: [&str; 8] = [
     "data: [DONE]",
     "\"finish_reason\"",
     "\"message_stop\"",
     "\"finishReason\"",
+    "\"blockReason\"",
     "\"response.completed\"",
     "\"response.failed\"",
     "\"response.incomplete\"",
@@ -756,6 +757,25 @@ mod tests {
         let info = Http11Parser.parse_response(resp.as_bytes()).expect("usage");
         assert_eq!((info.prompt_tokens, info.completion_tokens), (5, 0));
         assert_eq!(info.thoughts_tokens, Some(4));
+    }
+
+    #[test]
+    fn gemini_prompt_block_is_recorded_on_every_path() {
+        let blocked = "{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\
+            \"usageMetadata\":{\"promptTokenCount\":8,\"totalTokenCount\":8},\"modelVersion\":\"gemini-test\"}";
+        let json = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{blocked}");
+        let sse = http11_sse(&format!("data: {blocked}\r\n\r\n"));
+        let h2 = format!("data: {blocked}\r\n\r\n");
+
+        assert_eq!(
+            tokens(Http11Parser.parse_response(json.as_bytes())),
+            Some((8, 0))
+        );
+        assert_eq!(tokens(Http11Parser.parse_response(&sse)), Some((8, 0)));
+        assert_eq!(
+            tokens(Http2Parser.parse_response(h2.as_bytes())),
+            Some((8, 0))
+        );
     }
 
     #[test]
