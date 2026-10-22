@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use honeybeepf_llm_common::capture_limit;
-use honeybeepf_llm_core::types::LlmDirection;
+use honeybeepf_llm_core::types::{LlmDirection, UsageInfo};
 use log::{info, warn};
 
 use crate::probes::builtin::llm::http::{self, ProtocolParser};
@@ -191,191 +191,200 @@ impl StreamProcessor {
     ) -> Outcome {
         self.last_activity = Instant::now();
 
-        // Early return if finished (except for new Write which triggers reset)
-        if matches!(self.state, ProcessorState::Finished) {
-            if direction == LlmDirection::Write {
-                self.reset();
-            } else {
-                return Outcome::Pending; // Ignore Read events after completion
-            }
+        let buffered = match direction {
+            LlmDirection::Write => self.buffer_write(data, pid),
+            LlmDirection::Read => self.buffer_read(data, pid),
+            _ => false,
+        };
+        if !buffered {
+            return Outcome::Pending;
         }
 
-        // 1. Buffer Management
-        match direction {
-            LlmDirection::Write => {
-                if self.write_buf.len() + data.len() > MAX_REQUEST_BUFFER_SIZE {
-                    warn!(
-                        "LLM request buffer exceeded {}MB limit (PID: {}), discarding stream",
-                        MAX_REQUEST_BUFFER_SIZE / (1024 * 1024),
-                        pid
-                    );
-                    self.reset();
-                    return Outcome::Pending;
-                }
-                self.write_buf.extend_from_slice(data);
-            }
-            LlmDirection::Read => {
-                // Optimization: Don't buffer responses if we haven't detected a valid LLM request yet
-                if matches!(self.state, ProcessorState::Detecting) {
-                    // The server is answering a non-LLM request; the next request must not sit behind it.
-                    if !self.write_buf.is_empty()
-                        && http::Http11Parser::is_request_head(&self.write_buf)
-                    {
-                        self.write_buf.clear();
-                    }
-                    return Outcome::Pending;
-                }
-
-                if self.read_buf.len() + data.len() > MAX_RESPONSE_BUFFER_SIZE {
-                    warn!(
-                        "LLM response buffer exceeded {}MB limit (PID: {}), discarding stream",
-                        MAX_RESPONSE_BUFFER_SIZE / (1024 * 1024),
-                        pid
-                    );
-                    self.reset();
-                    return Outcome::Pending;
-                }
-                self.read_buf.extend_from_slice(data);
-            }
-            _ => return Outcome::Pending,
-        }
-
-        // 2. State Machine Transition
         // Take ownership of current state to enable transitions
-        let current_state = std::mem::replace(&mut self.state, ProcessorState::Finished);
-        let mut outcome = Outcome::Pending;
-
-        self.state = match current_state {
-            // [State 1] Detecting
+        match std::mem::replace(&mut self.state, ProcessorState::Finished) {
             ProcessorState::Detecting => {
-                // Try H1
-                if let Some(path) = http::Http11Parser.detect_request(&self.write_buf) {
+                self.state = self.detect(
+                    pid,
                     #[cfg(feature = "k8s")]
-                    let pod_str = fmt_pod(&pod_info);
-                    #[cfg(not(feature = "k8s"))]
-                    let pod_str = "";
-
-                    info!(
-                        "[LLM] Detected HTTP/1.1: {} (PID: {}){}",
-                        path, pid, pod_str
-                    );
-                    ProcessorState::ProcessingRequest {
-                        start_time: Instant::now(),
-                        parser: Box::new(http::Http11Parser),
-                    }
-                }
-                // Try H2
-                else if let Some(path) = http::Http2Parser.detect_request(&self.write_buf) {
-                    #[cfg(feature = "k8s")]
-                    let pod_str = fmt_pod(&pod_info);
-                    #[cfg(not(feature = "k8s"))]
-                    let pod_str = "";
-
-                    info!("[LLM] Detected HTTP/2: {} (PID: {}){}", path, pid, pod_str);
-                    ProcessorState::ProcessingRequest {
-                        start_time: Instant::now(),
-                        parser: Box::new(http::Http2Parser),
-                    }
-                } else {
-                    // Not detected yet
-                    if self.write_buf.len() > DETECTION_BUFFER_THRESHOLD {
-                        // Buffer too large and still not detected -> likely not LLM
-                        ProcessorState::Finished
-                    } else {
-                        ProcessorState::Detecting // Keep detecting
-                    }
-                }
+                    pod_info.as_ref(),
+                );
             }
-
-            // [State 2] Processing Request
             ProcessorState::ProcessingRequest { start_time, parser } => {
-                if direction == LlmDirection::Read {
-                    // Write finished (implied by Read starting), transition to Response phase
+                // Write finished (implied by Read starting), transition to Response phase
+                self.state = if direction == LlmDirection::Read {
                     ProcessorState::ProcessingResponse { start_time, parser }
                 } else {
-                    // Still writing -> keep state
                     ProcessorState::ProcessingRequest { start_time, parser }
-                }
+                };
             }
-
-            // [State 3] Processing Response
             ProcessorState::ProcessingResponse { start_time, parser } => {
                 // Parse once the SSL call's last fragment is in, not on a partial record
                 if complete && let Some(usage) = parser.parse_response(&self.read_buf) {
-                    let latency = start_time.elapsed();
-                    let latency_secs = latency.as_secs_f64();
-                    let model_str = usage.model.as_deref().unwrap_or("unknown");
-                    let is_error = usage.prompt_tokens == 0 && usage.completion_tokens == 0;
-
-                    crate::telemetry::record_llm_request(
-                        model_str,
-                        latency_secs,
-                        usage.prompt_tokens,
-                        usage.completion_tokens,
-                        (usage.cache_read_tokens, usage.cache_write_tokens),
-                        is_error,
+                    record_usage(
+                        &usage,
+                        start_time,
+                        pid,
                         #[cfg(feature = "k8s")]
-                        pod_info.as_ref(),
+                        pod_info,
                     );
-
-                    #[cfg(feature = "k8s")]
-                    let pod_str = fmt_pod(&pod_info);
-                    #[cfg(not(feature = "k8s"))]
-                    let pod_str = "";
-
-                    if is_error {
-                        info!(
-                            "LLM FAILED/ERROR | PID: {} | Model: {} | Latency: {:.2}s{}",
-                            pid,
-                            model_str,
-                            latency.as_secs_f64(),
-                            pod_str
-                        );
-                    } else {
-                        let thoughts_str = usage
-                            .thoughts_tokens
-                            .map(|t| format!(", Thoughts: {}", t))
-                            .unwrap_or_default();
-                        let cache_str = match (usage.cache_read_tokens, usage.cache_write_tokens) {
-                            (None, None) => String::new(),
-                            (read, write) => format!(
-                                ", Cache read: {}, Cache write: {}",
-                                read.unwrap_or(0),
-                                write.unwrap_or(0)
-                            ),
-                        };
-                        info!(
-                            "LLM SUCCESS | PID: {} | Model: {} | Latency: {:.2}s | Tokens: {} (Prompt: {}, Compl: {}{}{}){}",
-                            pid,
-                            model_str,
-                            latency.as_secs_f64(),
-                            usage.prompt_tokens.saturating_add(usage.completion_tokens),
-                            usage.prompt_tokens,
-                            usage.completion_tokens,
-                            thoughts_str,
-                            cache_str,
-                            pod_str
-                        );
-                    }
-
-                    outcome = Outcome::Recorded;
-                    ProcessorState::Finished
-                } else {
-                    // Incomplete -> keep state
-                    ProcessorState::ProcessingResponse { start_time, parser }
+                    return Outcome::Recorded;
                 }
+                self.state = ProcessorState::ProcessingResponse { start_time, parser };
             }
+            ProcessorState::Finished => {}
+        }
+        Outcome::Pending
+    }
 
-            // [State 4] Finished
-            ProcessorState::Finished => ProcessorState::Finished,
-        };
-        outcome
+    /// Append a request fragment; false when the stream was discarded instead.
+    fn buffer_write(&mut self, data: &[u8], pid: u32) -> bool {
+        if matches!(self.state, ProcessorState::Finished) {
+            self.reset();
+        }
+        if self.write_buf.len() + data.len() > MAX_REQUEST_BUFFER_SIZE {
+            warn!(
+                "LLM request buffer exceeded {}MB limit (PID: {}), discarding stream",
+                MAX_REQUEST_BUFFER_SIZE / (1024 * 1024),
+                pid
+            );
+            self.reset();
+            return false;
+        }
+        self.write_buf.extend_from_slice(data);
+        true
+    }
+
+    /// Append a response fragment; false when no LLM request is waiting for it.
+    fn buffer_read(&mut self, data: &[u8], pid: u32) -> bool {
+        match self.state {
+            // Ignore Read events after completion
+            ProcessorState::Finished => return false,
+            // Don't buffer responses if we haven't detected a valid LLM request yet
+            ProcessorState::Detecting => {
+                // The server is answering a non-LLM request; the next request must not sit behind it.
+                if !self.write_buf.is_empty()
+                    && http::Http11Parser::is_request_head(&self.write_buf)
+                {
+                    self.write_buf.clear();
+                }
+                return false;
+            }
+            _ => {}
+        }
+        if self.read_buf.len() + data.len() > MAX_RESPONSE_BUFFER_SIZE {
+            warn!(
+                "LLM response buffer exceeded {}MB limit (PID: {}), discarding stream",
+                MAX_RESPONSE_BUFFER_SIZE / (1024 * 1024),
+                pid
+            );
+            self.reset();
+            return false;
+        }
+        self.read_buf.extend_from_slice(data);
+        true
+    }
+
+    /// Next state for the request bytes buffered so far.
+    fn detect(
+        &self,
+        pid: u32,
+        #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
+    ) -> ProcessorState {
+        let (version, path, parser): (&str, String, Box<dyn ProtocolParser>) =
+            if let Some(path) = http::Http11Parser.detect_request(&self.write_buf) {
+                ("HTTP/1.1", path, Box::new(http::Http11Parser))
+            } else if let Some(path) = http::Http2Parser.detect_request(&self.write_buf) {
+                ("HTTP/2", path, Box::new(http::Http2Parser))
+            } else if self.write_buf.len() > DETECTION_BUFFER_THRESHOLD {
+                // Buffer too large and still not detected -> likely not LLM
+                return ProcessorState::Finished;
+            } else {
+                return ProcessorState::Detecting;
+            };
+
+        #[cfg(feature = "k8s")]
+        let pod_str = fmt_pod(&pod_info.cloned());
+        #[cfg(not(feature = "k8s"))]
+        let pod_str = "";
+
+        info!(
+            "[LLM] Detected {}: {} (PID: {}){}",
+            version, path, pid, pod_str
+        );
+        ProcessorState::ProcessingRequest {
+            start_time: Instant::now(),
+            parser,
+        }
     }
 
     fn reset(&mut self) {
         self.state = ProcessorState::Detecting;
         self.write_buf.clear();
         self.read_buf.clear();
+    }
+}
+
+/// Export one finished call's usage and log it.
+fn record_usage(
+    usage: &UsageInfo,
+    start_time: Instant,
+    pid: u32,
+    #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
+) {
+    let latency = start_time.elapsed();
+    let latency_secs = latency.as_secs_f64();
+    let model_str = usage.model.as_deref().unwrap_or("unknown");
+    let is_error = usage.prompt_tokens == 0 && usage.completion_tokens == 0;
+
+    crate::telemetry::record_llm_request(
+        model_str,
+        latency_secs,
+        usage.prompt_tokens,
+        usage.completion_tokens,
+        (usage.cache_read_tokens, usage.cache_write_tokens),
+        is_error,
+        #[cfg(feature = "k8s")]
+        pod_info.as_ref(),
+    );
+
+    #[cfg(feature = "k8s")]
+    let pod_str = fmt_pod(&pod_info);
+    #[cfg(not(feature = "k8s"))]
+    let pod_str = "";
+
+    if is_error {
+        info!(
+            "LLM FAILED/ERROR | PID: {} | Model: {} | Latency: {:.2}s{}",
+            pid,
+            model_str,
+            latency.as_secs_f64(),
+            pod_str
+        );
+    } else {
+        let thoughts_str = usage
+            .thoughts_tokens
+            .map(|t| format!(", Thoughts: {}", t))
+            .unwrap_or_default();
+        let cache_str = match (usage.cache_read_tokens, usage.cache_write_tokens) {
+            (None, None) => String::new(),
+            (read, write) => format!(
+                ", Cache read: {}, Cache write: {}",
+                read.unwrap_or(0),
+                write.unwrap_or(0)
+            ),
+        };
+        info!(
+            "LLM SUCCESS | PID: {} | Model: {} | Latency: {:.2}s | Tokens: {} (Prompt: {}, Compl: {}{}{}){}",
+            pid,
+            model_str,
+            latency.as_secs_f64(),
+            usage.prompt_tokens.saturating_add(usage.completion_tokens),
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            thoughts_str,
+            cache_str,
+            pod_str
+        );
     }
 }
 
