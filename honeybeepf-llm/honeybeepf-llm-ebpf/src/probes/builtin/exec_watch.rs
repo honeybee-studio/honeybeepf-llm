@@ -7,7 +7,7 @@ use aya_ebpf::{
     helpers::{
         bpf_get_current_cgroup_id, bpf_get_current_comm, bpf_get_current_pid_tgid,
         bpf_ktime_get_ns, bpf_probe_read_kernel, bpf_probe_read_kernel_buf,
-        bpf_probe_read_user_str_bytes,
+        bpf_probe_read_user_str_bytes, r#gen,
     },
     macros::{fentry, kprobe, map, tracepoint},
     maps::{Array, HashMap, LruHashMap, PerCpuArray, RingBuf},
@@ -22,6 +22,13 @@ const TAIL_LEN: usize = 32;
 /// "/libssl.so" as the last 10 bytes read: first two in `hi`, last eight in `lo`.
 const LIBSSL_WIN_HI: u64 = u16::from_be_bytes(*b"/l") as u64;
 const LIBSSL_WIN_LO: u64 = u64::from_be_bytes(*b"ibssl.so");
+/// Any "ibssl.so" in the tail fully covers an aligned 4-byte block, and that block is one of these.
+const LIBSSL_BLOCKS: [u32; 4] = [
+    u32::from_le_bytes(*b"ibss"),
+    u32::from_le_bytes(*b"bssl"),
+    u32::from_le_bytes(*b"ssl."),
+    u32::from_le_bytes(*b"sl.s"),
+];
 /// A handled (scope, path) is reported again after this, so a replaced file at the same path is seen.
 const LIB_OPEN_TTL_NS: u64 = 60_000_000_000;
 const O_ACCMODE: u64 = 3;
@@ -41,7 +48,8 @@ pub static LIB_OPEN_SEEN: LruHashMap<[u64; 2], u64> = LruHashMap::with_max_entri
 struct LibOpenScratch {
     path: [u8; MAX_FILENAME_LEN],
     /// Copied from the end of `path` by a helper: the verifier rejects the variable offset as an index.
-    tail: [u8; TAIL_LEN],
+    /// Little-endian blocks, so the first pass reads 4 bytes per load.
+    tail: [u32; TAIL_LEN / 4],
 }
 
 /// Off the stack: a zeroed stack buffer is a memset loop for the verifier.
@@ -133,8 +141,30 @@ fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
     if start > MAX_FILENAME_LEN - TAIL_LEN {
         return 0;
     }
-    // SAFETY: start + TAIL_LEN <= MAX_FILENAME_LEN, so the source stays inside `path`.
-    if unsafe { bpf_probe_read_kernel_buf(path.as_ptr().add(start), tail) }.is_err() {
+    // SAFETY: start + TAIL_LEN <= MAX_FILENAME_LEN, so the source stays inside `path`, and `tail`
+    // is TAIL_LEN bytes.
+    let copied = unsafe {
+        r#gen::bpf_probe_read_kernel(
+            tail.as_mut_ptr().cast(),
+            TAIL_LEN as u32,
+            path.as_ptr().add(start).cast(),
+        )
+    };
+    if copied != 0 {
+        return 0;
+    }
+    // Cheap first pass: most paths have no such block and stop here.
+    let mut candidate = false;
+    let mut b = 0usize;
+    while b < tail.len() {
+        let w = tail[b];
+        candidate |= w == LIBSSL_BLOCKS[0]
+            || w == LIBSSL_BLOCKS[1]
+            || w == LIBSSL_BLOCKS[2]
+            || w == LIBSSL_BLOCKS[3];
+        b += 1;
+    }
+    if !candidate {
         return 0;
     }
     // "/libssl.so" in a rolling 10-byte window; a later '/' means it was a directory name. Bytes
@@ -145,7 +175,7 @@ fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
     let mut ended = false;
     let mut i = 0usize;
     while i < TAIL_LEN {
-        let c = tail[i];
+        let c = (tail[i / 4] >> ((i % 4) * 8)) as u8;
         ended = ended || c == 0;
         hi = ((hi << 8) | (lo >> 56)) & 0xffff;
         lo = (lo << 8) | c as u64;
