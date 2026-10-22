@@ -19,6 +19,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check binary file provenance
+        run: |
+          bash ci/test-check-binary-provenance.sh
+          bash ci/check-binary-provenance.sh
+
       - name: Install Rust toolchain (nightly)
         uses: dtolnay/rust-toolchain@nightly
         with:
