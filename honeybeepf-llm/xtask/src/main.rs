@@ -402,7 +402,7 @@ echo "   Start with: sudo systemctl start honeybeepf-llm"
 
     let status = Command::new("tar")
         .current_dir(&output_path)
-        .args(&["-czf", &tarball.to_string_lossy(), &package_name])
+        .args(["-czf", &tarball.to_string_lossy(), &package_name])
         .status()
         .context("Failed to create tarball")?;
 

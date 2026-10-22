@@ -55,7 +55,7 @@ jobs:
 
       - name: Clippy core crate
         working-directory: honeybeepf-llm
-        run: cargo clippy -p honeybeepf-llm-core --all-targets -- -D warnings
+        run: cargo clippy -p honeybeepf-llm-core --all-targets -- -D warnings -W clippy::too_many_lines
 
       - name: Test core crate
         working-directory: honeybeepf-llm
@@ -75,7 +75,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: nightly
-          components: rust-src
+          components: rust-src, clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -95,6 +95,10 @@ jobs:
       - name: Build eBPF
         working-directory: ./honeybeepf-llm/honeybeepf-llm-ebpf
         run: cargo build --release --target=bpfel-unknown-none -Z build-std=core
+
+      - name: Clippy agent and xtask
+        working-directory: ./honeybeepf-llm
+        run: cargo +nightly clippy -p honeybeepf-llm -p xtask --features honeybeepf-llm/k8s --all-targets -- -D warnings -W clippy::too_many_lines
 
       - name: Build userspace
         working-directory: ./honeybeepf-llm/honeybeepf-llm

@@ -1,4 +1,3 @@
-mod discovery;
 pub mod http;
 pub mod processor;
 
@@ -17,10 +16,11 @@ use honeybeepf_llm_common::{LLM_STAT_COUNT, LLM_STAT_NAMES, LlmEvent};
 use honeybeepf_llm_core::types::LlmDirection;
 use log::{info, warn};
 use processor::{Outcome, StreamProcessor};
+use regex::Regex;
 
 use crate::probes::{
     DynamicProbe, IdentityResolver, Probe, ProcessInfo, attach_uprobe, detach_uprobe,
-    discovery::{FileId, file_identity},
+    discovery::{FileId, file_identity, find_libraries_all},
     spawn_ringbuf_handler,
 };
 // Re-export exec watch types and functions for lib.rs
@@ -233,7 +233,7 @@ fn route_event(
 
 impl Probe for LlmProbe {
     fn attach(&self, bpf: &mut Ebpf, _resolver: IdentityResolver) -> Result<()> {
-        let targets = discovery::find_all_targets()?;
+        let targets = find_all_targets()?;
 
         // Keep going: libssl opened later is attached by re-discovery and needs the reader below.
         if targets.is_empty() {
@@ -329,9 +329,10 @@ fn start_stats_log_task(state: StreamMap) {
     });
 }
 
-/// Find all SSL targets. Convenience wrapper around `discovery::find_all_targets`.
+/// Find all SSL libraries across running processes and system defaults.
 pub fn find_all_targets() -> Result<HashSet<String>> {
-    discovery::find_all_targets()
+    let ssl_pattern = Regex::new(r"libssl\.so\..*|libcrypto\.so\..*")?;
+    find_libraries_all(&ssl_pattern, Some("libssl.so"))
 }
 
 #[cfg(test)]
