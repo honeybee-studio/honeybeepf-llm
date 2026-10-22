@@ -1,12 +1,11 @@
-use std::io::Read;
-
-use flate2::read::GzDecoder;
 use once_cell::sync::Lazy;
 use serde_json::Value;
 
 use honeybeepf_llm_core::byte_utils;
 use honeybeepf_llm_core::providers::{ConfigurableProvider, ProviderRegistry, path_matches};
 use honeybeepf_llm_core::types::{SseChunkDelta, UsageInfo};
+
+use super::encoding;
 
 /// Cached providers - built once at initialization
 static CACHED_PROVIDERS: Lazy<Vec<ConfigurableProvider>> = Lazy::new(|| {
@@ -24,8 +23,13 @@ static PROVIDER_REGISTRY: Lazy<ProviderRegistry> = Lazy::new(load_provider_regis
 /// Distinct provider hosts: the HTTP/2 pre-check scans the whole buffer once per entry.
 static KNOWN_HOSTS: Lazy<Vec<&'static str>> = Lazy::new(|| {
     let mut hosts: Vec<&'static str> = Vec::new();
-    for host in PROVIDER_REGISTRY.providers.iter().flat_map(|p| &p.hosts) {
-        if !hosts.contains(&host.as_str()) {
+    for pattern in PROVIDER_REGISTRY.providers.iter().flat_map(|p| &p.hosts) {
+        // A `*` pattern is pre-checked by its first literal part (`aiplatform.`, not `.rep.googleapis.com`).
+        let host = pattern
+            .split('*')
+            .find(|s| !s.is_empty())
+            .unwrap_or(pattern.as_str());
+        if !host.is_empty() && !hosts.contains(&host) {
             hosts.push(host);
         }
     }
@@ -108,20 +112,14 @@ impl Http11Parser {
                 rest = body;
                 continue;
             }
-            let header = |name: &str| {
-                resp.headers
-                    .iter()
-                    .find(|h| h.name.eq_ignore_ascii_case(name))
-                    .map(|h| h.value)
-            };
-            if let Some(len) = header("Content-Length")
-                .and_then(|v| std::str::from_utf8(v).ok())
-                .and_then(|v| v.trim().parse::<usize>().ok())
-            {
+            if let Some(len) = content_length(resp.headers) {
                 return body.len() >= len;
             }
-            return header("Transfer-Encoding")
-                .is_some_and(|v| byte_utils::contains_pattern(v, b"chunked"))
+            return resp
+                .headers
+                .iter()
+                .find(|h| h.name.eq_ignore_ascii_case("Transfer-Encoding"))
+                .is_some_and(|h| byte_utils::contains_pattern(h.value, b"chunked"))
                 && body.ends_with(b"0\r\n\r\n");
         }
     }
@@ -181,12 +179,18 @@ impl ProtocolParser for Http11Parser {
             h.name.eq_ignore_ascii_case("Transfer-Encoding")
                 && String::from_utf8_lossy(h.value).contains("chunked")
         });
-        let is_gzip = resp.headers.iter().any(|h| {
-            h.name.eq_ignore_ascii_case("Content-Encoding")
-                && String::from_utf8_lossy(h.value).contains("gzip")
-        });
+        let is_encoded = encoding::is_encoded(resp.headers);
 
         let body = &buffer[body_offset..];
+        let ended = if is_chunked {
+            body.ends_with(b"0\r\n\r\n")
+        } else {
+            content_length(resp.headers).is_none_or(|len| body.len() >= len)
+        };
+        // Parsing re-runs on every read and decoding is not incremental, so wait for the framed end.
+        if is_encoded && !ended {
+            return None;
+        }
 
         // Decode chunked transfer encoding first
         let dechunked = if is_chunked {
@@ -194,28 +198,19 @@ impl ProtocolParser for Http11Parser {
         } else {
             std::borrow::Cow::Borrowed(body)
         };
+        let decompressed = encoding::decode(dechunked, resp.headers)?;
 
         // SSE events can straddle chunk boundaries, so they are parsed only after dechunking.
         if is_sse {
             // A truncated read desyncs the chunk framing; once the stream has ended, fall back to raw lines.
-            return parse_sse_body(&dechunked).or_else(|| {
-                if is_chunked && body.ends_with(b"0\r\n\r\n") {
+            return parse_sse_body(&decompressed).or_else(|| {
+                if is_chunked && !is_encoded && ended {
                     parse_sse_body(body)
                 } else {
                     None
                 }
             });
         }
-
-        // Then decompress gzip if needed
-        let decompressed: std::borrow::Cow<'_, [u8]> = if is_gzip {
-            match decompress_gzip(&dechunked) {
-                Ok(data) => std::borrow::Cow::Owned(data),
-                Err(_) => return None,
-            }
-        } else {
-            dechunked
-        };
 
         let trimmed = byte_utils::trim_trailing_whitespace(&decompressed);
 
@@ -462,12 +457,12 @@ fn parse_response_json_value(val: &Value) -> Option<UsageInfo> {
 
 // --- Helpers ---
 
-/// Decompress gzip data
-fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-    let mut decoder = GzDecoder::new(data);
-    let mut decompressed = Vec::new();
-    decoder.read_to_end(&mut decompressed)?;
-    Ok(decompressed)
+fn content_length(headers: &[httparse::Header]) -> Option<usize> {
+    headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case("Content-Length"))
+        .and_then(|h| std::str::from_utf8(h.value).ok())
+        .and_then(|v| v.trim().parse::<usize>().ok())
 }
 
 fn is_llm_path(path: &str) -> bool {
@@ -1008,6 +1003,39 @@ mod tests {
                 .enumerate()
                 .all(|(i, h)| !hosts[..i].contains(h))
         );
+        // Wildcard hosts are pre-checked by their literal part.
+        assert!(hosts.contains(&"bedrock-mantle.") && !hosts.contains(&".rep.googleapis.com"));
+        assert!(hosts.iter().all(|h| !h.contains('*') && !h.is_empty()));
+    }
+
+    #[test]
+    fn cloud_hosts_are_detected_on_http11() {
+        let detect = |url: &str| {
+            let (host, path) = url.split_at(url.find('/').unwrap_or(url.len()));
+            let req = format!("POST {path} HTTP/1.1\r\nHost: {host}\r\n\r\n{{}}");
+            Http11Parser.detect_request(req.as_bytes()).is_some()
+        };
+        assert!(detect(
+            "aws-external-anthropic.us-west-2.api.aws/v1/messages"
+        ));
+        assert!(detect(
+            "bedrock-mantle.us-east-2.api.aws:443/openai/v1/responses"
+        ));
+        assert!(detect(
+            "bedrock-runtime.us-east-1.amazonaws.com/model/m/converse"
+        ));
+        assert!(!detect("ec2.us-west-2.api.aws/v1/messages"));
+    }
+
+    #[test]
+    fn bedrock_converse_json_reads_camel_case_usage() {
+        let resp = concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n",
+            "{\"output\":{\"message\":{\"role\":\"assistant\",\"content\":[{\"text\":\"hi\"}]}},\"stopReason\":\"end_turn\",",
+            "\"usage\":{\"inputTokens\":30,\"outputTokens\":628,\"totalTokens\":658},\"metrics\":{\"latencyMs\":1275}}",
+        );
+        let info = Http11Parser.parse_response(resp.as_bytes());
+        assert_eq!(tokens(info), Some((30, 628)));
     }
 
     #[test]
