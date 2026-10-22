@@ -284,7 +284,10 @@ pub fn setup_lib_open_watch(bpf: &mut Ebpf) -> Result<(LibOpenQueue, ExecNotify,
         Ok(()) => info!("libssl open watch: fentry on do_sys_openat2"),
         Err(fentry_err) => match attach_kprobe(bpf, "probe_lib_open", "do_sys_openat2") {
             Ok(()) => info!("libssl open watch: kprobe (fentry: {:#})", fentry_err),
-            Err(e) => warn!("libssl open watch not attached: {:#}", e),
+            Err(e) => warn!(
+                "libssl open watch not attached: {:#} (fentry: {:#})",
+                e, fentry_err
+            ),
         },
     }
     let seen = AyaHashMap::try_from(

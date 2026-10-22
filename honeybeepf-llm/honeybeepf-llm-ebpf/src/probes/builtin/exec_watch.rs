@@ -106,42 +106,45 @@ pub fn probe_lib_open_fentry(ctx: FEntryContext) -> u32 {
     lib_open(ptr, how)
 }
 
-/// Copies the last TAIL_LEN bytes before `path[len]` into `tail`.
+/// Copies up to TAIL_LEN bytes before `path[len]` into `tail`, zero-padded so a short path's
+/// tail holds no bytes past its NUL.
 #[inline(always)]
 fn copy_tail(path: &[u8; MAX_FILENAME_LEN], len: usize, tail: &mut [u32; TAIL_LEN / 4]) -> bool {
-    let start = len.saturating_sub(TAIL_LEN);
+    let n = len.min(TAIL_LEN);
+    let start = len - n;
     if start > MAX_FILENAME_LEN - TAIL_LEN {
         return false;
     }
-    // SAFETY: start + TAIL_LEN <= MAX_FILENAME_LEN keeps the source in `path`; dst is TAIL_LEN B.
-    let ret = unsafe {
-        r#gen::bpf_probe_read_kernel(
-            tail.as_mut_ptr().cast(),
-            TAIL_LEN as u32,
-            path.as_ptr().add(start).cast(),
-        )
+    // A helper copy: this toolchain turns any zeroing assignment into a memset byte loop.
+    let zero = if n < TAIL_LEN {
+        match LIB_OPEN_ZERO.get(0) {
+            Some(z) => z.as_ptr(),
+            None => return false,
+        }
+    } else {
+        core::ptr::null()
     };
-    ret == 0
+    let dst = tail.as_mut_ptr().cast();
+    // SAFETY: `zero` has >= TAIL_LEN bytes, start + n <= MAX_FILENAME_LEN, and n <= TAIL_LEN.
+    unsafe {
+        (zero.is_null() || r#gen::bpf_probe_read_kernel(dst, TAIL_LEN as u32, zero.cast()) == 0)
+            && r#gen::bpf_probe_read_kernel(dst, n as u32, path.as_ptr().add(start).cast()) == 0
+    }
 }
 
 /// Whether the path ending in `tail` has a basename starting with "libssl.so".
 #[inline(always)]
 fn libssl_tail(tail: &[u32; TAIL_LEN / 4]) -> bool {
-    // "/libssl.so" in a rolling 10-byte window; a later '/' means it was a directory name. Bytes
-    // after the NUL are left from an earlier, longer path and must not count.
+    // "/libssl.so" in a rolling 10-byte window; a later '/' means it was a directory name.
     let mut hi = 0u64;
     let mut lo = 0u64;
     let mut libssl = false;
-    let mut ended = false;
     let mut i = 0usize;
     while i < TAIL_LEN {
         let c = (tail[i / 4] >> ((i % 4) * 8)) as u8;
-        ended = ended || c == 0;
         hi = ((hi << 8) | (lo >> 56)) & 0xffff;
         lo = (lo << 8) | c as u64;
-        if !ended {
-            libssl = (hi == LIBSSL_WIN_HI && lo == LIBSSL_WIN_LO) || (libssl && c != b'/');
-        }
+        libssl = (hi == LIBSSL_WIN_HI && lo == LIBSSL_WIN_LO) || (libssl && c != b'/');
         i += 1;
     }
     libssl
