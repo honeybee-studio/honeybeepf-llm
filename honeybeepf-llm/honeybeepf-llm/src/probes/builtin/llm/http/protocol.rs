@@ -24,8 +24,13 @@ static PROVIDER_REGISTRY: Lazy<ProviderRegistry> = Lazy::new(load_provider_regis
 /// Distinct provider hosts: the HTTP/2 pre-check scans the whole buffer once per entry.
 static KNOWN_HOSTS: Lazy<Vec<&'static str>> = Lazy::new(|| {
     let mut hosts: Vec<&'static str> = Vec::new();
-    for host in PROVIDER_REGISTRY.providers.iter().flat_map(|p| &p.hosts) {
-        if !hosts.contains(&host.as_str()) {
+    for pattern in PROVIDER_REGISTRY.providers.iter().flat_map(|p| &p.hosts) {
+        // A `*` pattern is pre-checked by its longest literal part.
+        let host = pattern
+            .split('*')
+            .max_by_key(|s| s.len())
+            .unwrap_or(pattern.as_str());
+        if !host.is_empty() && !hosts.contains(&host) {
             hosts.push(host);
         }
     }
@@ -913,6 +918,44 @@ mod tests {
                 .enumerate()
                 .all(|(i, h)| !hosts[..i].contains(h))
         );
+        // Wildcard hosts are pre-checked by their literal part.
+        assert!(hosts.contains(&"bedrock-mantle."));
+        assert!(hosts.iter().all(|h| !h.contains('*') && !h.is_empty()));
+    }
+
+    #[test]
+    fn cloud_hosts_are_detected_on_http11() {
+        let detect = |host: &str, path: &str| {
+            let req = format!("POST {path} HTTP/1.1\r\nHost: {host}\r\n\r\n{{}}");
+            Http11Parser.detect_request(req.as_bytes())
+        };
+        assert!(detect("aws-external-anthropic.us-west-2.api.aws", "/v1/messages").is_some());
+        assert!(
+            detect(
+                "bedrock-mantle.us-east-2.api.aws:443",
+                "/openai/v1/responses"
+            )
+            .is_some()
+        );
+        assert!(
+            detect(
+                "bedrock-runtime.us-east-1.amazonaws.com",
+                "/model/m/converse"
+            )
+            .is_some()
+        );
+        assert!(detect("ec2.us-west-2.api.aws", "/v1/messages").is_none());
+    }
+
+    #[test]
+    fn bedrock_converse_json_reads_camel_case_usage() {
+        let resp = concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n",
+            "{\"output\":{\"message\":{\"role\":\"assistant\",\"content\":[{\"text\":\"hi\"}]}},\"stopReason\":\"end_turn\",",
+            "\"usage\":{\"inputTokens\":30,\"outputTokens\":628,\"totalTokens\":658},\"metrics\":{\"latencyMs\":1275}}",
+        );
+        let info = Http11Parser.parse_response(resp.as_bytes());
+        assert_eq!(tokens(info), Some((30, 628)));
     }
 
     #[test]

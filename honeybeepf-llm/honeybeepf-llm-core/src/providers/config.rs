@@ -118,13 +118,31 @@ impl ProviderRegistry {
         serde_json::from_str(json)
     }
 
-    /// Create with default providers (OpenAI, Anthropic, Gemini)
+    /// Create with default providers (OpenAI, Anthropic, Gemini, Bedrock), including their cloud endpoints
     pub fn with_defaults() -> Self {
+        // OpenAI-compatible routes on Azure OpenAI / Foundry and Bedrock return the same JSON as OpenAI.
+        let openai_hosts = vec![
+            "api.openai.com".to_string(),
+            "openai.azure.com".to_string(),
+            "services.ai.azure.com".to_string(),
+            "bedrock-mantle.*.api.aws".to_string(),
+            "bedrock-runtime.*.amazonaws.com".to_string(),
+        ];
+        let anthropic_response = ResponseConfig {
+            usage_path: "usage".to_string(),
+            prompt_tokens: "input_tokens".to_string(),
+            completion_tokens: "output_tokens".to_string(),
+            cache_read_tokens: Some("cache_read_input_tokens".to_string()),
+            cache_write_tokens: Some("cache_creation_input_tokens".to_string()),
+            prompt_excludes_cache: true,
+            model_path: "model".to_string(),
+            ..ResponseConfig::default()
+        };
         Self {
             providers: vec![
                 ProviderConfig {
                     name: "openai".to_string(),
-                    hosts: vec!["api.openai.com".to_string()],
+                    hosts: openai_hosts.clone(),
                     // `$` keeps the stored-completion endpoints (/chat/completions/{id}) out.
                     paths: vec![
                         "/chat/completions$".to_string(),
@@ -148,7 +166,7 @@ impl ProviderRegistry {
                 // `$` keeps GET /v1/responses/{id} out.
                 ProviderConfig {
                     name: "openai".to_string(),
-                    hosts: vec!["api.openai.com".to_string()],
+                    hosts: openai_hosts,
                     paths: vec!["/v1/responses$".to_string()],
                     response: ResponseConfig {
                         usage_path: "usage".to_string(),
@@ -164,24 +182,23 @@ impl ProviderRegistry {
                 },
                 ProviderConfig {
                     name: "anthropic".to_string(),
-                    hosts: vec!["api.anthropic.com".to_string()],
+                    hosts: vec![
+                        "api.anthropic.com".to_string(),
+                        "aws-external-anthropic.*.api.aws".to_string(),
+                        "bedrock-mantle.*.api.aws".to_string(),
+                    ],
                     // `$` keeps /v1/messages/count_tokens and /v1/messages/batches out.
                     paths: vec!["/v1/messages$".to_string()],
-                    response: ResponseConfig {
-                        usage_path: "usage".to_string(),
-                        prompt_tokens: "input_tokens".to_string(),
-                        completion_tokens: "output_tokens".to_string(),
-                        cache_read_tokens: Some("cache_read_input_tokens".to_string()),
-                        cache_write_tokens: Some("cache_creation_input_tokens".to_string()),
-                        prompt_excludes_cache: true,
-                        model_path: "model".to_string(),
-                        ..ResponseConfig::default()
-                    },
+                    response: anthropic_response.clone(),
                     request_extractor: RequestExtractorType::Messages,
                 },
                 ProviderConfig {
                     name: "gemini".to_string(),
-                    hosts: vec!["generativelanguage.googleapis.com".to_string()],
+                    hosts: vec![
+                        "generativelanguage.googleapis.com".to_string(),
+                        "aiplatform.googleapis.com".to_string(),
+                        "aiplatform.*.rep.googleapis.com".to_string(),
+                    ],
                     // Path matching is case-sensitive: the streaming method is `:streamGenerateContent`.
                     paths: vec![
                         "generateContent".to_string(),
@@ -198,6 +215,40 @@ impl ProviderRegistry {
                     },
                     request_extractor: RequestExtractorType::Contents,
                 },
+                // Claude on Vertex AI: Anthropic body, model in the path. `claude-` keeps count-tokens:rawPredict
+                // and custom endpoints out.
+                ProviderConfig {
+                    name: "anthropic".to_string(),
+                    hosts: vec![
+                        "aiplatform.googleapis.com".to_string(),
+                        "aiplatform.*.rep.googleapis.com".to_string(),
+                    ],
+                    paths: vec![
+                        "/publishers/anthropic/models/claude-*:rawPredict$".to_string(),
+                        "/publishers/anthropic/models/claude-*:streamRawPredict$".to_string(),
+                    ],
+                    response: anthropic_response,
+                    request_extractor: RequestExtractorType::Messages,
+                },
+                // Bedrock Runtime native API. Converse `inputTokens` leaves out cache tokens. InvokeModel returns the
+                // model's own body, so only Anthropic models (read by the anthropic entry) are matched. The `-stream`
+                // variants are binary eventstream and stay out.
+                ProviderConfig {
+                    name: "bedrock".to_string(),
+                    hosts: vec!["bedrock-runtime.*.amazonaws.com".to_string()],
+                    paths: vec!["/converse$".to_string(), "anthropic.*/invoke$".to_string()],
+                    response: ResponseConfig {
+                        usage_path: "usage".to_string(),
+                        prompt_tokens: "inputTokens".to_string(),
+                        completion_tokens: "outputTokens".to_string(),
+                        cache_read_tokens: Some("cacheReadInputTokens".to_string()),
+                        cache_write_tokens: Some("cacheWriteInputTokens".to_string()),
+                        prompt_excludes_cache: true,
+                        model_path: "model".to_string(),
+                        ..ResponseConfig::default()
+                    },
+                    request_extractor: RequestExtractorType::Messages,
+                },
             ],
         }
     }
@@ -205,11 +256,23 @@ impl ProviderRegistry {
     /// Find matching provider for given host and path
     pub fn find_provider(&self, host: &str, path: &str) -> Option<&ProviderConfig> {
         self.providers.iter().find(|p| {
-            let host_match = p.hosts.is_empty() || p.hosts.iter().any(|h| host.contains(h));
+            let host_match = p.hosts.is_empty() || p.hosts.iter().any(|h| host_matches(host, h));
             let path_match =
                 p.paths.is_empty() || p.paths.iter().any(|pat| path_matches(path, pat));
             host_match && path_match
         })
+    }
+}
+
+/// Substring match; a pattern with one `*` must cover the whole host (port ignored), so regional hosts like
+/// `bedrock-mantle.*.api.aws` don't widen to every `api.aws` service.
+pub fn host_matches(host: &str, pattern: &str) -> bool {
+    match pattern.split_once('*') {
+        Some((head, tail)) => {
+            let host = host.split_once(':').map_or(host, |(h, _)| h);
+            host.len() >= head.len() + tail.len() && host.starts_with(head) && host.ends_with(tail)
+        }
+        None => host.contains(pattern),
     }
 }
 
@@ -218,8 +281,21 @@ pub fn path_matches(path: &str, pattern: &str) -> bool {
     match pattern.strip_suffix('$') {
         Some(suffix) => {
             let path = path.split_once('?').map_or(path, |(p, _)| p);
-            path.ends_with(suffix) || path.strip_suffix('/').is_some_and(|p| p.ends_with(suffix))
+            ends_with_pattern(path, suffix)
+                || path
+                    .strip_suffix('/')
+                    .is_some_and(|p| ends_with_pattern(p, suffix))
         }
         None => path.contains(pattern),
+    }
+}
+
+/// Whether `text` ends with `pattern`, where one `*` stands for any run of characters.
+fn ends_with_pattern(text: &str, pattern: &str) -> bool {
+    match pattern.split_once('*') {
+        Some((head, tail)) => text
+            .strip_suffix(tail)
+            .is_some_and(|rest| rest.contains(head)),
+        None => text.ends_with(pattern),
     }
 }

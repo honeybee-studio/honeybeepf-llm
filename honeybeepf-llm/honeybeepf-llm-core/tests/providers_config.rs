@@ -1,9 +1,162 @@
-use honeybeepf_llm_core::providers::{ProviderRegistry, RequestExtractorType, path_matches};
+use honeybeepf_llm_core::providers::{
+    ProviderRegistry, RequestExtractorType, host_matches, path_matches,
+};
 
 #[test]
 fn test_default_providers() {
     let registry = ProviderRegistry::with_defaults();
-    assert_eq!(registry.providers.len(), 4);
+    assert_eq!(registry.providers.len(), 6);
+}
+
+/// Provider name for a `host/path` URL without the scheme.
+fn provider_for(registry: &ProviderRegistry, url: &str) -> Option<String> {
+    let (host, path) = url.split_at(url.find('/').unwrap_or(url.len()));
+    registry.find_provider(host, path).map(|p| p.name.clone())
+}
+
+#[test]
+fn test_host_matches_wildcard_spans_whole_host() {
+    let pattern = "bedrock-mantle.*.api.aws";
+    for host in [
+        "bedrock-mantle.us-east-1.api.aws",
+        "bedrock-mantle.us-east-1.api.aws:443",
+    ] {
+        assert!(host_matches(host, pattern), "{host}");
+    }
+    for host in [
+        "bedrock-mantle.api.aws",
+        "bedrock-mantle.us-east-1.api.aws.example.com",
+        "x.bedrock-mantle.us-east-1.api.aws",
+        "ec2.us-east-1.api.aws",
+    ] {
+        assert!(!host_matches(host, pattern), "{host}");
+    }
+    assert!(host_matches("us.api.openai.com", "api.openai.com"));
+}
+
+#[test]
+fn test_path_matches_wildcard_before_anchor() {
+    let vertex = "/v1/projects/p/locations/global/publishers/anthropic/models";
+    let pattern = "/publishers/anthropic/models/claude-*:rawPredict$";
+    assert!(path_matches(
+        &format!("{vertex}/claude-opus-5-5:rawPredict"),
+        pattern
+    ));
+    assert!(!path_matches(
+        &format!("{vertex}/count-tokens:rawPredict"),
+        pattern
+    ));
+    assert!(!path_matches(
+        &format!("{vertex}/claude-opus-5-5:streamRawPredict"),
+        pattern
+    ));
+    assert!(path_matches(
+        "/model/us.anthropic.claude-opus-5-5/invoke",
+        "anthropic.*/invoke$"
+    ));
+    assert!(!path_matches(
+        "/model/amazon.titan-text-express-v1/invoke",
+        "anthropic.*/invoke$"
+    ));
+}
+
+#[test]
+fn test_find_provider_openai_regional_domains() {
+    let registry = ProviderRegistry::with_defaults();
+
+    for url in [
+        "us.api.openai.com/v1/chat/completions",
+        "eu.api.openai.com/v1/responses",
+        "ae.api.openai.com/v1/chat/completions",
+    ] {
+        assert_eq!(
+            provider_for(&registry, url).as_deref(),
+            Some("openai"),
+            "{url}"
+        );
+    }
+}
+
+#[test]
+fn test_find_provider_cloud_endpoints() {
+    let registry = ProviderRegistry::with_defaults();
+
+    let cases: [(&str, &[&str]); 4] = [
+        (
+            "anthropic",
+            &[
+                "aws-external-anthropic.us-west-2.api.aws/v1/messages",
+                "bedrock-mantle.us-east-1.api.aws/anthropic/v1/messages",
+                "aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/anthropic/models/claude-opus-5-5:rawPredict",
+                "us-east5-aiplatform.googleapis.com/v1/projects/p/locations/us-east5/publishers/anthropic/models/claude-sonnet-4-6:streamRawPredict",
+                "aiplatform.eu.rep.googleapis.com/v1/projects/p/locations/eu/publishers/anthropic/models/claude-opus-5-5:rawPredict",
+            ],
+        ),
+        (
+            "openai",
+            &[
+                "bedrock-mantle.us-east-2.api.aws/openai/v1/responses",
+                "bedrock-mantle.us-east-1.api.aws/v1/chat/completions",
+                "bedrock-mantle.us-east-1.api.aws/openai/v1/chat/completions",
+                "bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions",
+                "bedrock-runtime.us-east-1.amazonaws.com/openai/v1/responses",
+                "myres.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21",
+                "myres.openai.azure.com/openai/v1/chat/completions",
+                "myres.openai.azure.com/openai/v1/responses",
+                "myres.services.ai.azure.com/openai/v1/responses",
+            ],
+        ),
+        (
+            "bedrock",
+            &[
+                "bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-sonnet-20240229-v1:0/converse",
+                "bedrock-runtime.us-east-1.amazonaws.com/model/us.anthropic.claude-3-5-sonnet-20240620-v1%3A0/invoke",
+            ],
+        ),
+        (
+            "gemini",
+            &[
+                "us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/gemini-3.5-flash:generateContent",
+                "aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/google/models/gemini-3.5-flash:streamGenerateContent?alt=sse",
+                "aiplatform.us.rep.googleapis.com/v1/projects/p/locations/us/publishers/google/models/gemini-3.5-flash:generateContent",
+            ],
+        ),
+    ];
+    for (name, urls) in cases {
+        for url in urls {
+            assert_eq!(provider_for(&registry, url).as_deref(), Some(name), "{url}");
+        }
+    }
+}
+
+#[test]
+fn test_find_provider_skips_similar_cloud_calls() {
+    let registry = ProviderRegistry::with_defaults();
+
+    for url in [
+        // Other services under the same parent domains
+        "ec2.us-east-1.api.aws/v1/messages",
+        "bedrock-mantle.us-east-1.api.aws.example.com/v1/messages",
+        "bedrock.us-east-1.amazonaws.com/model/anthropic.claude-x/invoke",
+        "bedrock-agent-runtime.us-east-1.amazonaws.com/model/anthropic.claude-x/converse",
+        "storage.googleapis.com/v1/b/models:generateContent",
+        // Non-generation routes on LLM hosts
+        "bedrock-mantle.us-east-1.api.aws/anthropic/v1/messages/count_tokens",
+        "bedrock-mantle.us-east-1.api.aws/v1/models",
+        "aws-external-anthropic.us-west-2.api.aws/v1/messages/batches",
+        "bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-x/invoke-with-response-stream",
+        "bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-x/converse-stream",
+        "bedrock-runtime.us-east-1.amazonaws.com/model/amazon.titan-text-express-v1/invoke",
+        "bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-x/count-tokens",
+        "us-east5-aiplatform.googleapis.com/v1/projects/p/locations/us-east5/publishers/anthropic/models/count-tokens:rawPredict",
+        "us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/endpoints/123:rawPredict",
+        "us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/gemini-3.5-flash:countTokens",
+        "myres.openai.azure.com/openai/deployments/d1/embeddings?api-version=2024-10-21",
+        "myres.openai.azure.com/openai/deployments/d1/audio/transcriptions?api-version=2024-10-21",
+        "myres.openai.azure.com/openai/v1/responses/resp_1",
+    ] {
+        assert_eq!(provider_for(&registry, url), None, "{url}");
+    }
 }
 
 #[test]

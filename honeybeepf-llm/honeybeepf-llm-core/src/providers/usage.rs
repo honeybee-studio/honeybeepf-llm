@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::config::{ProviderConfig, path_matches};
+use super::config::{ProviderConfig, host_matches, path_matches};
 use super::request::{RequestExtractor, get_extractor};
 use crate::byte_utils::get_nested_value;
 use crate::types::UsageInfo;
@@ -24,7 +24,7 @@ impl ConfigurableProvider {
     /// Check if this provider matches the given host and path
     pub fn matches(&self, host: &str, path: &str) -> bool {
         let host_match =
-            self.config.hosts.is_empty() || self.config.hosts.iter().any(|h| host.contains(h));
+            self.config.hosts.is_empty() || self.config.hosts.iter().any(|h| host_matches(host, h));
         let path_match =
             self.config.paths.is_empty() || self.config.paths.iter().any(|p| path_matches(path, p));
         host_match && path_match
