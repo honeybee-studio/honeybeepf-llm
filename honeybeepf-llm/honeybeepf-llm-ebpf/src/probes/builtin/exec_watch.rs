@@ -9,9 +9,9 @@ use aya_ebpf::{
         bpf_ktime_get_ns, bpf_probe_read_kernel, bpf_probe_read_kernel_buf,
         bpf_probe_read_user_str_bytes,
     },
-    macros::{kprobe, map, tracepoint},
+    macros::{fentry, kprobe, map, tracepoint},
     maps::{Array, HashMap, LruHashMap, PerCpuArray, RingBuf},
-    programs::{ProbeContext, TracePointContext},
+    programs::{FEntryContext, ProbeContext, TracePointContext},
 };
 use honeybeepf_llm_common::{ExecEvent, LibOpenEvent, MAX_FILENAME_LEN};
 
@@ -75,44 +75,44 @@ pub fn probe_exec(_ctx: TracePointContext) -> u32 {
     0
 }
 
-/// kprobe on do_sys_openat2(dfd, filename, how): reports absolute read-only `.../libssl.so*` opens.
+/// kprobe on do_sys_openat2(dfd, filename, how), used where the fentry below can't attach.
 #[kprobe]
 pub fn probe_lib_open(ctx: ProbeContext) -> u32 {
-    let ptr: *const u8 = match ctx.arg(1) {
-        Some(p) => p,
-        None => return 0,
-    };
+    match (ctx.arg(1), ctx.arg(2)) {
+        (Some(ptr), Some(how)) => lib_open(ptr, how),
+        _ => 0,
+    }
+}
+
+/// fentry on do_sys_openat2: no kprobe trap, and the args come straight from the context.
+#[fentry(function = "do_sys_openat2")]
+pub fn probe_lib_open_fentry(ctx: FEntryContext) -> u32 {
+    // SAFETY: do_sys_openat2(int dfd, const char __user *filename, struct open_how *how).
+    let (ptr, how) = unsafe { (ctx.arg(1), ctx.arg(2)) };
+    lib_open(ptr, how)
+}
+
+/// Reports absolute read-only `.../libssl.so*` opens.
+#[inline(always)]
+fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
     if ptr.is_null() {
         return 0;
     }
 
     // Writes (package upgrades: libssl.so.3.dpkg-new) would be attached half-written and never retried.
-    let how: *const u64 = match ctx.arg(2) {
-        Some(p) => p,
-        None => return 0,
-    };
     // SAFETY: `how` is the kernel's struct open_how; flags is its first u64 (UAPI layout).
     match unsafe { bpf_probe_read_kernel(how) } {
         Ok(flags) if flags & O_ACCMODE == 0 => {}
         _ => return 0,
     }
 
-    // Loops below run a fixed count over constant indexes. Loops that stop at `len` or index by a
-    // found position made the verifier explore one state per value and hit its 1M-insn limit.
+    // Loops below run a fixed count from an offset set before they start. Loops that stop at `len`
+    // or index by a position found inside them made the verifier hit its 1M-insn limit.
     let path = match LIB_OPEN_PATH.get_ptr_mut(0) {
-        // SAFETY: this CPU's slot, used only by this program while it runs (kprobes don't nest).
+        // SAFETY: this CPU's slot, used only by this program while it runs (it doesn't nest).
         Some(p) => unsafe { &mut *p },
         None => return 0,
     };
-    let zero = match LIB_OPEN_ZERO.get(0) {
-        Some(z) => z,
-        None => return 0,
-    };
-    // Bytes after the NUL are left from the previous path; they must not reach the hash.
-    // SAFETY: both are MAX_FILENAME_LEN-byte map values.
-    if unsafe { bpf_probe_read_kernel_buf(zero.as_ptr(), path) }.is_err() {
-        return 0;
-    }
     // SAFETY: the helper copies at most path.len() bytes and fails cleanly on a bad user pointer.
     let len = match unsafe { bpf_probe_read_user_str_bytes(ptr, path) } {
         Ok(s) => s.len(),
@@ -126,26 +126,42 @@ pub fn probe_lib_open(ctx: ProbeContext) -> u32 {
     if start > MAX_FILENAME_LEN - TAIL_LEN {
         return 0;
     }
-    let mut tail = [0u8; TAIL_LEN];
-    // SAFETY: start + TAIL_LEN <= MAX_FILENAME_LEN, so the source stays inside `path`.
-    if unsafe { bpf_probe_read_kernel_buf(path.as_ptr().add(start), &mut tail) }.is_err() {
-        return 0;
-    }
-    // "/libssl.so" in a rolling 10-byte window; a later '/' means it was a directory name.
+    // "/libssl.so" in a rolling 10-byte window; a later '/' means it was a directory name. Bytes
+    // after the NUL are left from an earlier, longer path and must not count.
     let mut hi = 0u64;
     let mut lo = 0u64;
     let mut libssl = false;
+    let mut ended = false;
     let mut i = 0usize;
     while i < TAIL_LEN {
-        let c = tail[i];
+        let c = path[start + i];
+        ended = ended || c == 0;
         hi = ((hi << 8) | (lo >> 56)) & 0xffff;
         lo = (lo << 8) | c as u64;
-        libssl = (hi == LIBSSL_WIN_HI && lo == LIBSSL_WIN_LO) || (libssl && c != b'/');
+        if !ended {
+            libssl = (hi == LIBSSL_WIN_HI && lo == LIBSSL_WIN_LO) || (libssl && c != b'/');
+        }
         i += 1;
     }
     if !libssl {
         return 0;
     }
+
+    // Stale bytes after the NUL must not reach the hash either. Clearing costs a full-buffer copy,
+    // so it is done only here, for the rare libssl open, and the path is read again.
+    let zero = match LIB_OPEN_ZERO.get(0) {
+        Some(z) => z,
+        None => return 0,
+    };
+    // SAFETY: both are MAX_FILENAME_LEN-byte map values.
+    if unsafe { bpf_probe_read_kernel_buf(zero.as_ptr(), path) }.is_err() {
+        return 0;
+    }
+    // SAFETY: as the first read.
+    let len = match unsafe { bpf_probe_read_user_str_bytes(ptr, path) } {
+        Ok(s) => s.len(),
+        Err(_) => return 0,
+    };
 
     let mut hash: u64 = 0xcbf29ce484222325;
     let mut i = 0usize;
