@@ -195,8 +195,6 @@ impl StreamProcessor {
         Outcome::Unparsed
     }
 
-    // Follow-up (P0-2, option C): split into write, read and end-of-response handling.
-    #[allow(clippy::too_many_lines)]
     fn handle_event(
         &mut self,
         direction: LlmDirection,
