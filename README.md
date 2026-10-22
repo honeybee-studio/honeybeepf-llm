@@ -170,12 +170,16 @@ options.
 
 ## 8. Building
 
+Requires the nightly toolchain with `rust-src` and `bpf-linker`; see the [prerequisites](honeybeepf-llm/docs/BINARY_DEPLOYMENT.md#-prerequisites).
+
 ```bash
+cd honeybeepf-llm
+
 # Standard build (without Kubernetes support)
-cargo build --release --package honeybeepf-llm
+cargo +nightly build --release --package honeybeepf-llm
 
 # With Kubernetes pod metadata support (namespace, pod name in metrics)
-cargo build --release --features k8s --package honeybeepf-llm
+cargo +nightly build --release --features k8s --package honeybeepf-llm
 ```
 
 > **Note:** The `k8s` feature is **not** enabled by default. When deploying to Kubernetes, always build with `--features k8s` to include pod metadata resolution. The Docker build (`Dockerfile`) already includes this flag.

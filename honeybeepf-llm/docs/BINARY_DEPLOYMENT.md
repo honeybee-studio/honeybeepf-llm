@@ -2,13 +2,27 @@
 
 honeybeepf-llm is an eBPF-based LLM observability agent. It intercepts TLS traffic to capture LLM API usage (model, tokens, latency) without code changes or proxies.
 
+## 📋 Prerequisites
+
+- Rust **nightly** toolchain with the `rust-src` component (the eBPF programs are built with `-Z build-std=core`)
+- `bpf-linker` 0.9.15, the version pinned by the `Dockerfile` and the `docker-publish.yml` workflow
+- A C toolchain (`build-essential` on Debian/Ubuntu) for native dependencies
+
+```bash
+rustup install nightly
+rustup component add rust-src --toolchain nightly
+cargo install bpf-linker --version 0.9.15 --locked
+```
+
+Run every `cargo` command in this guide from the `honeybeepf-llm/` workspace directory, where the `xtask` alias is defined, and keep the `+nightly`: `build.rs` builds the eBPF programs with the same `cargo` binary, so with a stable default toolchain the build fails with ``the `-Z` flag is only accepted on the nightly channel of Cargo``.
+
 ## 📦 Build
 
 ### Build on Linux (Recommended)
 
 ```bash
 # Release build
-cargo xtask build --release
+cargo +nightly xtask build --release
 
 # Binary location
 ls -la target/release/honeybeepf-llm
@@ -26,10 +40,10 @@ cargo install cross
 docker info
 
 # Build for Linux
-cargo xtask build --release --target x86_64-unknown-linux-gnu
+cargo +nightly xtask build --release --target x86_64-unknown-linux-gnu
 
 # Build for ARM64 Linux (AWS Graviton, Apple Silicon Linux VM, etc.)
-cargo xtask build --release --target aarch64-unknown-linux-gnu
+cargo +nightly xtask build --release --target aarch64-unknown-linux-gnu
 ```
 
 ## 🚀 Deployment
@@ -38,20 +52,20 @@ cargo xtask build --release --target aarch64-unknown-linux-gnu
 
 ```bash
 # Deploy to remote server (build + scp + install)
-cargo xtask deploy --host <user>@<your-server> --release
+cargo +nightly xtask deploy --host <user>@<your-server> --release
 
 # Install as systemd service and restart
-cargo xtask deploy --host <user>@<your-server> --release --restart
+cargo +nightly xtask deploy --host <user>@<your-server> --release --restart
 
 # Deploy to a specific path
-cargo xtask deploy --host root@<your-server> --path /opt/honeybeepf-llm/bin/honeybeepf-llm --release
+cargo +nightly xtask deploy --host root@<your-server> --path /opt/honeybeepf-llm/bin/honeybeepf-llm --release
 ```
 
 ### Method 2: Manual Deployment
 
 ```bash
 # 1. Build
-cargo xtask build --release
+cargo +nightly xtask build --release
 
 # 2. Copy binary
 scp target/release/honeybeepf-llm <user>@<your-server>:/tmp/
@@ -66,7 +80,7 @@ sudo chmod +x /usr/local/bin/honeybeepf-llm
 
 ```bash
 # Create distribution package
-cargo xtask package --output dist
+cargo +nightly xtask package --output dist
 
 # Check generated tarball
 ls dist/*.tar.gz
@@ -115,7 +129,7 @@ uname -r
 ### Automated Installation
 
 ```bash
-cargo xtask install-service --host <user>@<your-server>
+cargo +nightly xtask install-service --host <user>@<your-server>
 ```
 
 ### Manual Installation
