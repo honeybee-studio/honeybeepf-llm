@@ -3,6 +3,7 @@
 //! This module handles HTTP/1.1 and HTTP/2 parsing to extract
 //! LLM request/response data.
 
+mod encoding;
 pub mod protocol;
 
 // Re-export main types
