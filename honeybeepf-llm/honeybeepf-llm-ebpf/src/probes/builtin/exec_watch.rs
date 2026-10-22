@@ -37,9 +37,16 @@ pub static LIB_OPEN_EVENTS: RingBuf = RingBuf::with_byte_size(EXEC_RINGBUF_SIZE,
 #[map]
 pub static LIB_OPEN_SEEN: LruHashMap<[u64; 2], u64> = LruHashMap::with_max_entries(4096, 0);
 
-/// The opened path, off the stack: a zeroed 256 B stack buffer is a memset loop for the verifier.
+#[repr(C)]
+struct LibOpenScratch {
+    path: [u8; MAX_FILENAME_LEN],
+    /// Copied from the end of `path` by a helper: the verifier rejects the variable offset as an index.
+    tail: [u8; TAIL_LEN],
+}
+
+/// Off the stack: a zeroed stack buffer is a memset loop for the verifier.
 #[map]
-static LIB_OPEN_PATH: PerCpuArray<[u8; MAX_FILENAME_LEN]> = PerCpuArray::with_max_entries(1, 0);
+static LIB_OPEN_PATH: PerCpuArray<LibOpenScratch> = PerCpuArray::with_max_entries(1, 0);
 
 /// Never written: clears LIB_OPEN_PATH with one helper copy.
 #[map]
@@ -106,9 +113,9 @@ fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
         _ => return 0,
     }
 
-    // Loops below run a fixed count from an offset set before they start. Loops that stop at `len`
-    // or index by a position found inside them made the verifier hit its 1M-insn limit.
-    let path = match LIB_OPEN_PATH.get_ptr_mut(0) {
+    // Loops below run a fixed count over constant indexes. Loops that stop at `len` or index by a
+    // found position made the verifier explore one state per value and hit its 1M-insn limit.
+    let LibOpenScratch { path, tail } = match LIB_OPEN_PATH.get_ptr_mut(0) {
         // SAFETY: this CPU's slot, used only by this program while it runs (it doesn't nest).
         Some(p) => unsafe { &mut *p },
         None => return 0,
@@ -126,6 +133,10 @@ fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
     if start > MAX_FILENAME_LEN - TAIL_LEN {
         return 0;
     }
+    // SAFETY: start + TAIL_LEN <= MAX_FILENAME_LEN, so the source stays inside `path`.
+    if unsafe { bpf_probe_read_kernel_buf(path.as_ptr().add(start), tail) }.is_err() {
+        return 0;
+    }
     // "/libssl.so" in a rolling 10-byte window; a later '/' means it was a directory name. Bytes
     // after the NUL are left from an earlier, longer path and must not count.
     let mut hi = 0u64;
@@ -134,7 +145,7 @@ fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
     let mut ended = false;
     let mut i = 0usize;
     while i < TAIL_LEN {
-        let c = path[start + i];
+        let c = tail[i];
         ended = ended || c == 0;
         hi = ((hi << 8) | (lo >> 56)) & 0xffff;
         lo = (lo << 8) | c as u64;
