@@ -316,6 +316,14 @@ impl ProtocolParser for Http2Parser {
                 continue;
             }
 
+            // A Gemini stream chunk before the last has no candidatesTokenCount yet; it is not a 0-token answer.
+            if s.contains("\"usageMetadata\"")
+                && !s.contains("\"candidatesTokenCount\"")
+                && !s.contains("\"finishReason\"")
+            {
+                continue;
+            }
+
             let Ok(mut val) = serde_json::from_str::<Value>(&s) else {
                 continue;
             };
@@ -704,6 +712,73 @@ mod tests {
             .expect("usage");
         assert_eq!((info.prompt_tokens, info.completion_tokens), (7, 3));
         assert_eq!(info.model.as_deref(), Some("gemini-test"));
+    }
+
+    /// Usage Gemini sends when nothing was generated: no `candidatesTokenCount`.
+    const GEMINI_ZERO_USAGE: &str = "\"usageMetadata\":{\"promptTokenCount\":1,\"totalTokenCount\":1,\
+        \"promptTokensDetails\":[{\"modality\":\"TEXT\",\"tokenCount\":1}],\"serviceTier\":\"standard\"}";
+
+    #[test]
+    fn gemini_json_zero_output_is_recorded() {
+        for finish in ["MAX_TOKENS", "STOP"] {
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n\
+                 {{\"candidates\":[{{\"content\":{{\"role\":\"model\"}},\"finishReason\":\"{finish}\",\"index\":0}}],\
+                 {GEMINI_ZERO_USAGE},\"modelVersion\":\"gemini-test\"}}"
+            );
+            let info = Http11Parser.parse_response(resp.as_bytes());
+            assert_eq!(tokens(info), Some((1, 0)), "{finish}");
+        }
+    }
+
+    #[test]
+    fn gemini_sse_zero_output_is_recorded() {
+        for finish in ["MAX_TOKENS", "STOP"] {
+            let body = format!(
+                "data: {{\"candidates\":[{{\"content\":{{\"role\":\"model\"}},\"finishReason\":\"{finish}\",\"index\":0}}],\
+                 {GEMINI_ZERO_USAGE},\"modelVersion\":\"gemini-test\"}}\r\n\r\n"
+            );
+            let info = Http11Parser.parse_response(&http11_sse(&body));
+            assert_eq!(tokens(info), Some((1, 0)), "{finish}");
+        }
+    }
+
+    #[test]
+    fn vertex_json_thoughts_without_candidates_is_recorded() {
+        // Recorded Vertex AI body (enum-encoding=int): thinking used the whole output budget.
+        let resp = concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n",
+            "{\"candidates\":[{\"content\":{\"role\":\"model\"},\"finishReason\":2}],",
+            "\"usageMetadata\":{\"promptTokenCount\":5,\"totalTokenCount\":9,\"trafficType\":1,",
+            "\"promptTokensDetails\":[{\"modality\":1,\"tokenCount\":5}],\"thoughtsTokenCount\":4},",
+            "\"modelVersion\":\"gemini-2.5-pro\"}",
+        );
+        let info = Http11Parser.parse_response(resp.as_bytes()).expect("usage");
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (5, 0));
+        assert_eq!(info.thoughts_tokens, Some(4));
+    }
+
+    #[test]
+    fn gemini_json_without_usage_metadata_is_not_recorded() {
+        let resp = concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n",
+            "{\"candidates\":[{\"content\":{\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"modelVersion\":\"gemini-test\"}",
+        );
+        assert_eq!(tokens(Http11Parser.parse_response(resp.as_bytes())), None);
+    }
+
+    #[test]
+    fn h2_gemini_stream_waits_for_the_last_chunk() {
+        let first = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"h\"}]}}],\"usageMetadata\":{\"promptTokenCount\":7}}\r\n\r\n";
+        assert_eq!(tokens(Http2Parser.parse_response(first.as_bytes())), None);
+
+        let last = format!(
+            "{first}data: {{\"candidates\":[{{\"content\":{{\"role\":\"model\"}},\"finishReason\":\"MAX_TOKENS\"}}],{GEMINI_ZERO_USAGE}}}\r\n\r\n"
+        );
+        assert_eq!(
+            tokens(Http2Parser.parse_response(last.as_bytes())),
+            Some((1, 0))
+        );
     }
 
     #[test]
