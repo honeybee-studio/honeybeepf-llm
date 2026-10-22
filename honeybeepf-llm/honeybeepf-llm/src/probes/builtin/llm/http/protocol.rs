@@ -25,10 +25,10 @@ static PROVIDER_REGISTRY: Lazy<ProviderRegistry> = Lazy::new(load_provider_regis
 static KNOWN_HOSTS: Lazy<Vec<&'static str>> = Lazy::new(|| {
     let mut hosts: Vec<&'static str> = Vec::new();
     for pattern in PROVIDER_REGISTRY.providers.iter().flat_map(|p| &p.hosts) {
-        // A `*` pattern is pre-checked by its longest literal part.
+        // A `*` pattern is pre-checked by its first literal part (`aiplatform.`, not `.rep.googleapis.com`).
         let host = pattern
             .split('*')
-            .max_by_key(|s| s.len())
+            .find(|s| !s.is_empty())
             .unwrap_or(pattern.as_str());
         if !host.is_empty() && !hosts.contains(&host) {
             hosts.push(host);
@@ -919,7 +919,7 @@ mod tests {
                 .all(|(i, h)| !hosts[..i].contains(h))
         );
         // Wildcard hosts are pre-checked by their literal part.
-        assert!(hosts.contains(&"bedrock-mantle."));
+        assert!(hosts.contains(&"bedrock-mantle.") && !hosts.contains(&".rep.googleapis.com"));
         assert!(hosts.iter().all(|h| !h.contains('*') && !h.is_empty()));
     }
 

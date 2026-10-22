@@ -245,7 +245,7 @@ fn test_bedrock_converse_prompt_adds_cache_read_and_write() {
 #[test]
 fn test_new_defaults_parse_existing_bodies_like_before() {
     let registry = ProviderRegistry::with_defaults();
-    // The first four entries are the defaults before cloud endpoints were added.
+    // Entries 0-3 are the OpenAI (chat, Responses), Anthropic and Gemini first-party providers.
     let (before, _) = registry.providers.split_at(4);
 
     for response in [
