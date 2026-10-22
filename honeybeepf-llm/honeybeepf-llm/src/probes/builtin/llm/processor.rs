@@ -285,6 +285,7 @@ impl StreamProcessor {
                         latency_secs,
                         usage.prompt_tokens,
                         usage.completion_tokens,
+                        (usage.cache_read_tokens, usage.cache_write_tokens),
                         is_error,
                         #[cfg(feature = "k8s")]
                         pod_info.as_ref(),
@@ -308,20 +309,24 @@ impl StreamProcessor {
                             .thoughts_tokens
                             .map(|t| format!(", Thoughts: {}", t))
                             .unwrap_or_default();
-                        let cached_str = usage
-                            .cached_tokens
-                            .map(|t| format!(", Cached: {}", t))
-                            .unwrap_or_default();
+                        let cache_str = match (usage.cache_read_tokens, usage.cache_write_tokens) {
+                            (None, None) => String::new(),
+                            (read, write) => format!(
+                                ", Cache read: {}, Cache write: {}",
+                                read.unwrap_or(0),
+                                write.unwrap_or(0)
+                            ),
+                        };
                         info!(
                             "LLM SUCCESS | PID: {} | Model: {} | Latency: {:.2}s | Tokens: {} (Prompt: {}, Compl: {}{}{}){}",
                             pid,
                             model_str,
                             latency.as_secs_f64(),
-                            usage.prompt_tokens + usage.completion_tokens,
+                            usage.prompt_tokens.saturating_add(usage.completion_tokens),
                             usage.prompt_tokens,
                             usage.completion_tokens,
                             thoughts_str,
-                            cached_str,
+                            cache_str,
                             pod_str
                         );
                     }

@@ -46,6 +46,8 @@ Collector, which forwards them to Prometheus.
 |--------|------|--------|
 | `honeybeepf_llm_requests_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` |
 | `honeybeepf_llm_tokens_total` | Counter | `model`, `status`, `token_type` (prompt / completion), `target_namespace`, `target_pod_name` |
+| `honeybeepf_llm_cache_read_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
+| `honeybeepf_llm_cache_write_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
 | `honeybeepf_llm_latency_seconds_bucket` | Histogram | `model`, `status`, `target_namespace`, `target_pod_name` |
 
 ### Security / file-access metrics
