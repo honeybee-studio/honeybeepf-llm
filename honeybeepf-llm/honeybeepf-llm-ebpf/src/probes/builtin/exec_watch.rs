@@ -124,6 +124,29 @@ fn copy_tail(path: &[u8; MAX_FILENAME_LEN], len: usize, tail: &mut [u32; TAIL_LE
     ret == 0
 }
 
+/// Whether the path ending in `tail` has a basename starting with "libssl.so".
+#[inline(always)]
+fn libssl_tail(tail: &[u32; TAIL_LEN / 4]) -> bool {
+    // "/libssl.so" in a rolling 10-byte window; a later '/' means it was a directory name. Bytes
+    // after the NUL are left from an earlier, longer path and must not count.
+    let mut hi = 0u64;
+    let mut lo = 0u64;
+    let mut libssl = false;
+    let mut ended = false;
+    let mut i = 0usize;
+    while i < TAIL_LEN {
+        let c = (tail[i / 4] >> ((i % 4) * 8)) as u8;
+        ended = ended || c == 0;
+        hi = ((hi << 8) | (lo >> 56)) & 0xffff;
+        lo = (lo << 8) | c as u64;
+        if !ended {
+            libssl = (hi == LIBSSL_WIN_HI && lo == LIBSSL_WIN_LO) || (libssl && c != b'/');
+        }
+        i += 1;
+    }
+    libssl
+}
+
 /// Reports absolute read-only `.../libssl.so*` opens.
 #[inline(always)]
 fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
@@ -168,33 +191,12 @@ fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
             || w == LIBSSL_BLOCKS[3];
         b += 1;
     }
-    if !candidate {
-        return 0;
-    }
-    // "/libssl.so" in a rolling 10-byte window; a later '/' means it was a directory name. Bytes
-    // after the NUL are left from an earlier, longer path and must not count.
-    let mut hi = 0u64;
-    let mut lo = 0u64;
-    let mut libssl = false;
-    let mut ended = false;
-    let mut i = 0usize;
-    while i < TAIL_LEN {
-        let c = (tail[i / 4] >> ((i % 4) * 8)) as u8;
-        ended = ended || c == 0;
-        hi = ((hi << 8) | (lo >> 56)) & 0xffff;
-        lo = (lo << 8) | c as u64;
-        if !ended {
-            libssl = (hi == LIBSSL_WIN_HI && lo == LIBSSL_WIN_LO) || (libssl && c != b'/');
-        }
-        i += 1;
-    }
-    if !libssl {
+    if !candidate || !libssl_tail(tail) {
         return 0;
     }
 
     // Stale bytes after the NUL must not reach the hash either. Clearing costs a full-buffer copy,
     // so it is done only here, for the rare libssl open, and the path is read again.
-    let checked = *tail;
     let zero = match LIB_OPEN_ZERO.get(0) {
         Some(z) => z,
         None => return 0,
@@ -208,17 +210,8 @@ fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
         Ok(s) if s.len() == len => {}
         _ => return 0,
     }
-    // Another thread may have rewritten the string in between: report only the shape checked above.
-    if path[0] != b'/' || !copy_tail(path, len, tail) {
-        return 0;
-    }
-    let mut same = true;
-    let mut b = 0usize;
-    while b < tail.len() {
-        same &= tail[b] == checked[b];
-        b += 1;
-    }
-    if !same {
+    // Another thread may have rewritten the string in between: report only what passes again.
+    if path[0] != b'/' || !copy_tail(path, len, tail) || !libssl_tail(tail) {
         return 0;
     }
 
