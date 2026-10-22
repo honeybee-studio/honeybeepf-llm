@@ -257,7 +257,7 @@ impl PodResolver {
         });
     }
 
-    /// Drop cgroup_cache entries whose container_id is no longer in pod_store.
+    /// Drop cgroup_cache entries whose container_id is missing from pod_store.
     fn evict_stale_cgroups(&self) {
         // Same order as resolve(): cgroup_cache before pod_store, or a queued watcher write deadlocks both.
         if let (Ok(mut cgroup_cache), Ok(pod_store)) =
