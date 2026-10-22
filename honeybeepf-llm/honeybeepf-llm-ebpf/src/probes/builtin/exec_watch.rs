@@ -238,10 +238,10 @@ fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
     // SAFETY: argument-free helper, valid in kprobe and fentry context.
     let now = unsafe { bpf_ktime_get_ns() };
     // SAFETY: the value is a plain u64 that is only read here; a concurrent update is harmless.
-    if let Some(last) = unsafe { LIB_OPEN_SEEN.get(&key) } {
-        if now.wrapping_sub(*last) < LIB_OPEN_TTL_NS {
-            return 0;
-        }
+    if let Some(last) = unsafe { LIB_OPEN_SEEN.get(&key) }
+        && now.wrapping_sub(*last) < LIB_OPEN_TTL_NS
+    {
+        return 0;
     }
 
     if let Some(mut slot) = LIB_OPEN_EVENTS.reserve::<LibOpenEvent>(0) {

@@ -94,64 +94,60 @@ impl FileAccessProbe {
             let mut ring_buf = ring_buf;
 
             while running.load(Ordering::Relaxed) {
-                if let Some(item) = ring_buf.next() {
-                    if item.len() >= std::mem::size_of::<FileAccessEvent>() {
-                        let event: FileAccessEvent = unsafe {
-                            std::ptr::read_unaligned(item.as_ptr() as *const FileAccessEvent)
-                        };
+                if let Some(item) = ring_buf.next()
+                    && item.len() >= std::mem::size_of::<FileAccessEvent>()
+                {
+                    let event: FileAccessEvent = unsafe {
+                        std::ptr::read_unaligned(item.as_ptr() as *const FileAccessEvent)
+                    };
 
-                        #[cfg(feature = "k8s")]
-                        let pod_info =
-                            _resolver.resolve_pod(event.metadata.pid, event.metadata.cgroup_id);
+                    #[cfg(feature = "k8s")]
+                    let pod_info =
+                        _resolver.resolve_pod(event.metadata.pid, event.metadata.cgroup_id);
 
-                        let comm = std::str::from_utf8(&event.comm)
-                            .unwrap_or("<invalid>")
-                            .trim_matches(char::from(0));
+                    let comm = std::str::from_utf8(&event.comm)
+                        .unwrap_or("<invalid>")
+                        .trim_matches(char::from(0));
 
-                        let filename = std::str::from_utf8(&event.filename)
-                            .unwrap_or("<invalid>")
-                            .trim_matches(char::from(0));
+                    let filename = std::str::from_utf8(&event.filename)
+                        .unwrap_or("<invalid>")
+                        .trim_matches(char::from(0));
 
-                        let flags_str = format_open_flags(event.flags);
+                    let flags_str = format_open_flags(event.flags);
 
-                        #[cfg(feature = "k8s")]
-                        if let Some(pod) = pod_info.as_ref() {
-                            info!(
-                                "FILE_ACCESS pid={} comm={} file={} flags={} cgroup={} namespace={} pod={}",
-                                event.metadata.pid,
-                                comm,
-                                filename,
-                                flags_str,
-                                event.metadata.cgroup_id,
-                                pod.namespace,
-                                pod.pod_name,
-                            );
-                        } else {
-                            info!(
-                                "FILE_ACCESS pid={} comm={} file={} flags={} cgroup={}",
-                                event.metadata.pid,
-                                comm,
-                                filename,
-                                flags_str,
-                                event.metadata.cgroup_id,
-                            );
-                        }
-
-                        #[cfg(not(feature = "k8s"))]
+                    #[cfg(feature = "k8s")]
+                    if let Some(pod) = pod_info.as_ref() {
+                        info!(
+                            "FILE_ACCESS pid={} comm={} file={} flags={} cgroup={} namespace={} pod={}",
+                            event.metadata.pid,
+                            comm,
+                            filename,
+                            flags_str,
+                            event.metadata.cgroup_id,
+                            pod.namespace,
+                            pod.pod_name,
+                        );
+                    } else {
                         info!(
                             "FILE_ACCESS pid={} comm={} file={} flags={} cgroup={}",
                             event.metadata.pid, comm, filename, flags_str, event.metadata.cgroup_id,
                         );
-
-                        telemetry::record_file_access_event(
-                            filename,
-                            &flags_str,
-                            comm,
-                            event.metadata.cgroup_id,
-                            #[cfg(feature = "k8s")]
-                            pod_info.as_ref(),
-                        );
                     }
+
+                    #[cfg(not(feature = "k8s"))]
+                    info!(
+                        "FILE_ACCESS pid={} comm={} file={} flags={} cgroup={}",
+                        event.metadata.pid, comm, filename, flags_str, event.metadata.cgroup_id,
+                    );
+
+                    telemetry::record_file_access_event(
+                        filename,
+                        &flags_str,
+                        comm,
+                        event.metadata.cgroup_id,
+                        #[cfg(feature = "k8s")]
+                        pod_info.as_ref(),
+                    );
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
