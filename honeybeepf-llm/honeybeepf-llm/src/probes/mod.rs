@@ -86,6 +86,8 @@ pub trait Probe {
 pub struct ProcessInfo {
     pub pid: u32,
     pub libs: std::collections::HashSet<String>,
+    /// Host path of the main executable; only exec events carry it.
+    pub exe: Option<String>,
 }
 
 /// A probe that needs to react to new process execution events (e.g. uprobes on lazy-loaded libs).
@@ -168,13 +170,14 @@ where
     Ok(())
 }
 
-/// Attach a uprobe to a function in a shared library.
+/// Attach a uprobe at a file offset in a library or executable.
 /// Loads the program if not already loaded.
 pub fn attach_uprobe(
     bpf: &mut Ebpf,
     prog_name: &str,
     func_name: &str,
     path: &str,
+    offset: u64,
 ) -> Result<UProbeLinkId> {
     let program: &mut UProbe = bpf
         .program_mut(prog_name)
@@ -186,8 +189,9 @@ pub fn attach_uprobe(
         program.load()?;
     }
 
+    // With a name, aya would read the whole file again for every program.
     program
-        .attach(Some(func_name), 0, path, None)
+        .attach(None, offset, path, None)
         .with_context(|| format!("Failed to attach {} to {}", prog_name, func_name))
 }
 

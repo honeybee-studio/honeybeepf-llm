@@ -58,7 +58,8 @@ impl HoneyBeeEngine {
         }
         let mut dynamic_probes: Vec<Box<dyn DynamicProbe>> = Vec::new();
         if settings.builtin_probes.llm.unwrap_or(false) {
-            dynamic_probes.push(Box::new(LlmProbe::default()));
+            let executables = settings.builtin_probes.llm_executables.unwrap_or(true);
+            dynamic_probes.push(Box::new(LlmProbe::new(executables)));
         }
 
         let resolver = IdentityResolver::none();
@@ -163,7 +164,7 @@ impl HoneyBeeEngine {
                             continue;
                         };
                         let libs = HashSet::from([host_path.to_string_lossy().into_owned()]);
-                        self.notify_probes(&ProcessInfo { pid: open.pid, libs });
+                        self.notify_probes(&ProcessInfo { pid: open.pid, libs, exe: None });
                         let _ = lib_seen.insert(open.seen_key, open.ts, 0);
                     }
                 }
@@ -195,7 +196,8 @@ impl HoneyBeeEngine {
                                 continue;
                             }
 
-                            self.notify_probes(&ProcessInfo { pid, libs });
+                            let exe = crate::probes::discovery::get_process_exe(pid);
+                            self.notify_probes(&ProcessInfo { pid, libs, exe });
                         }
                     }
                 }

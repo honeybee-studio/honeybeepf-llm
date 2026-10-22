@@ -1117,6 +1117,7 @@ dependencies = [
  "kube",
  "libc",
  "log",
+ "object",
  "once_cell",
  "opentelemetry",
  "opentelemetry-otlp",

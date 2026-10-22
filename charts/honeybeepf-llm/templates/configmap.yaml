@@ -25,6 +25,9 @@ data:
 
   # === LLM Probes ===
   BUILTIN_PROBES__LLM: {{ .Values.builtinProbes.llm.enabled | quote }}
+  {{- if not (kindIs "invalid" .Values.builtinProbes.llm.executables) }}
+  BUILTIN_PROBES__LLM_EXECUTABLES: {{ .Values.builtinProbes.llm.executables | quote }}
+  {{- end }}
   {{- if .Values.builtinProbes.llm.providers }}
   LLM_PROVIDERS_CONFIG: {{ dict "providers" .Values.builtinProbes.llm.providers | toJson | quote }}
   {{- end }}

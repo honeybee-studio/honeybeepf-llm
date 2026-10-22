@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::OsString,
     path::{Component, Path, PathBuf},
     process::Command,
@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::Result;
 use log::{debug, warn};
+use object::{Object, ObjectSection, ObjectSymbol, read::ReadCache};
 use regex::Regex;
 
 /// Resolves a path from a process's namespace to the host filesystem.
@@ -223,6 +224,63 @@ pub fn find_system_libraries(substring: &str) -> Result<Vec<String>> {
     Ok(paths)
 }
 
+/// File offsets of the functions in `names` that the ELF file at `path` exports in `.dynsym`.
+pub fn exported_function_offsets<'n>(
+    path: &str,
+    names: &[&'n str],
+) -> Result<HashMap<&'n str, u64>> {
+    // ReadCache reads only headers and the dynamic tables, not the whole (120 MB for node) file.
+    let cache = ReadCache::new(std::fs::File::open(path)?);
+    let obj = object::File::parse(&cache)?;
+    let mut offsets = HashMap::new();
+    for sym in obj.dynamic_symbols() {
+        if !sym.is_definition() {
+            continue;
+        }
+        let Some(name) = sym
+            .name()
+            .ok()
+            .and_then(|n| names.iter().find(|w| **w == n))
+        else {
+            continue;
+        };
+        let Some(section) = sym
+            .section_index()
+            .and_then(|i| obj.section_by_index(i).ok())
+        else {
+            continue;
+        };
+        // uprobes take a file offset; in a non-PIE executable the address is far above it.
+        if let (Some((file_offset, _)), Some(rel)) = (
+            section.file_range(),
+            sym.address().checked_sub(section.address()),
+        ) {
+            offsets.entry(*name).or_insert(file_offset + rel);
+        }
+    }
+    Ok(offsets)
+}
+
+/// Host path of a process's main executable.
+pub fn get_process_exe(pid: u32) -> Option<String> {
+    let exe = procfs::process::Process::new(pid as i32).ok()?.exe().ok()?;
+    let host_path = resolve_host_path(pid as i32, &exe);
+    host_path
+        .exists()
+        .then(|| host_path.to_string_lossy().into_owned())
+}
+
+/// Host paths of the main executables of all running processes.
+pub fn find_executables_all() -> HashSet<String> {
+    let Ok(procs) = procfs::process::all_processes() else {
+        return HashSet::new();
+    };
+    procs
+        .filter_map(|p| p.ok())
+        .filter_map(|p| get_process_exe(p.pid as u32))
+        .collect()
+}
+
 /// Get all shared libraries loaded by a specific process.
 /// This avoids rescanning /proc/PID/maps multiple times for different probes.
 pub fn get_process_libraries(pid: u32) -> Result<HashSet<String>> {
@@ -266,6 +324,40 @@ mod tests {
         let via_root = format!("/proc/{}/root/proc/cpuinfo", std::process::id());
         assert_eq!(fs_type(&via_root).as_deref(), Some("proc"));
         assert_eq!(fs_type("/proc/cpuinfo").as_deref(), Some("proc"));
+    }
+
+    /// The offset of libc's `malloc` is where this process has that function mapped from the file.
+    #[test]
+    fn test_exported_function_offsets_match_mapping() -> Result<()> {
+        let addr = libc::malloc as *const () as usize as u64;
+        let maps = procfs::process::Process::myself()?.maps()?;
+        let map = maps
+            .iter()
+            .find(|m| m.address.0 <= addr && addr < m.address.1)
+            .ok_or_else(|| anyhow::anyhow!("malloc at {addr:#x} not mapped"))?;
+        let procfs::process::MMapPath::Path(path) = &map.pathname else {
+            anyhow::bail!("malloc not in a file mapping: {:?}", map.pathname);
+        };
+
+        let offsets =
+            exported_function_offsets(&path.to_string_lossy(), &["malloc", "hb_no_such_fn"])?;
+        assert_eq!(
+            offsets.get("malloc"),
+            Some(&(addr - map.address.0 + map.offset))
+        );
+        assert!(!offsets.contains_key("hb_no_such_fn"));
+        Ok(())
+    }
+
+    /// A binary that only imports a symbol does not define it.
+    #[test]
+    fn test_exported_function_offsets_skips_imports() -> Result<()> {
+        let exe = get_process_exe(std::process::id())
+            .ok_or_else(|| anyhow::anyhow!("no exe for this process"))?;
+        let offsets = exported_function_offsets(&exe, &["malloc", "SSL_read"])?;
+        assert!(offsets.is_empty(), "{offsets:?}");
+        assert_eq!(file_identity(&exe), file_identity("/proc/self/exe"));
+        Ok(())
     }
 
     /// Absolute symlinks and `..` stay inside the root, like the container's loader saw them.

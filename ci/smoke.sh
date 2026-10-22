@@ -89,6 +89,6 @@ if grep -qiE 'panicked|FATAL|verifier|failed to attach|failed to load' /tmp/boot
   exit 1
 fi
 
-grep -qE 'Attaching LLM \(SSL\) probes' /tmp/boot.log
+grep -qE 'Attaching LLM \(SSL\) probes to detected library' /tmp/boot.log
 grep -qE 'Active probe registered: llm' /tmp/boot.log
 grep -qE '\[LLM\] Detected HTTP' /tmp/boot.log
