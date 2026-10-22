@@ -193,12 +193,12 @@ impl ProviderRegistry {
     }
 }
 
-/// Substring match, or with a trailing `$` the path without its query or one trailing `/` must end with the pattern.
+/// Substring match; a trailing `$` anchors the pattern to the path end, ignoring the query and one trailing `/`.
 pub fn path_matches(path: &str, pattern: &str) -> bool {
     match pattern.strip_suffix('$') {
         Some(suffix) => {
             let path = path.split_once('?').map_or(path, |(p, _)| p);
-            path.strip_suffix('/').unwrap_or(path).ends_with(suffix)
+            path.ends_with(suffix) || path.strip_suffix('/').is_some_and(|p| p.ends_with(suffix))
         }
         None => path.contains(pattern),
     }

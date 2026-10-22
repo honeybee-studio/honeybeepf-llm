@@ -93,6 +93,38 @@ impl Http11Parser {
         let mut req = httparse::Request::new(&mut headers);
         matches!(req.parse(buffer), Ok(httparse::Status::Complete(_)))
     }
+
+    /// Whether the buffer holds a whole HTTP/1.1 response by its framing, after any 1xx interim responses.
+    pub fn is_complete_response(buffer: &[u8]) -> bool {
+        let mut rest = buffer;
+        loop {
+            let mut headers = [httparse::EMPTY_HEADER; 64];
+            let mut resp = httparse::Response::new(&mut headers);
+            let Ok(httparse::Status::Complete(n)) = resp.parse(rest) else {
+                return false;
+            };
+            let body = &rest[n..];
+            if resp.code.is_some_and(|c| (100..200).contains(&c)) {
+                rest = body;
+                continue;
+            }
+            let header = |name: &str| {
+                resp.headers
+                    .iter()
+                    .find(|h| h.name.eq_ignore_ascii_case(name))
+                    .map(|h| h.value)
+            };
+            if let Some(len) = header("Content-Length")
+                .and_then(|v| std::str::from_utf8(v).ok())
+                .and_then(|v| v.trim().parse::<usize>().ok())
+            {
+                return body.len() >= len;
+            }
+            return header("Transfer-Encoding")
+                .is_some_and(|v| byte_utils::contains_pattern(v, b"chunked"))
+                && body.ends_with(b"0\r\n\r\n");
+        }
+    }
 }
 
 impl ProtocolParser for Http11Parser {
@@ -746,6 +778,33 @@ mod tests {
         assert!(!Http11Parser::is_request_head(
             b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
         ));
+    }
+
+    #[test]
+    fn complete_response_follows_framing_after_interim_responses() {
+        let complete: [&[u8]; 3] = [
+            b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 2\r\n\r\nok",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n",
+            b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+        ];
+        for buf in complete {
+            assert!(Http11Parser::is_complete_response(buf), "{buf:?}");
+        }
+        let incomplete: [&[u8]; 4] = [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nok",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n",
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: {}\n\n",
+            b"HTTP/1.1 100 Continue\r\n\r\n",
+        ];
+        for buf in incomplete {
+            assert!(!Http11Parser::is_complete_response(buf), "{buf:?}");
+        }
+    }
+
+    #[test]
+    fn only_http2_writes_during_response() {
+        assert!(Http2Parser.writes_during_response());
+        assert!(!Http11Parser.writes_during_response());
     }
 
     #[test]

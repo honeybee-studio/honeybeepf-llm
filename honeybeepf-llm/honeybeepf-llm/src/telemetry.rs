@@ -111,7 +111,9 @@ impl HoneyBeeMetrics {
                 .build(),
             llm_responses_unparsed_total: meter
                 .u64_counter("llm_responses_unparsed_total")
-                .with_description("LLM responses not recorded because bytes were lost in capture")
+                .with_description(
+                    "LLM responses not recorded because bytes were lost in capture or a complete response had no usage",
+                )
                 .with_unit("responses")
                 .build(),
         }

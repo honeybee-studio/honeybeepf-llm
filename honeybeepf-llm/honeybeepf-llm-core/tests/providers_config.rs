@@ -45,6 +45,8 @@ fn test_path_matches_anchor() {
     assert!(path_matches("/v1/chat/completions", "/chat/completions"));
     assert!(path_matches("/v1/responses?x=1", "/v1/responses$"));
     assert!(path_matches("/v1/messages/", "/v1/messages$"));
+    assert!(path_matches("/v1/chat/completions/", "/chat/completions$"));
+    assert!(path_matches("/api/chat/", "/api/chat/$"));
     assert!(!path_matches("/v1/responses/r1", "/v1/responses$"));
     assert!(!path_matches("/v1/messages//", "/v1/messages$"));
 }

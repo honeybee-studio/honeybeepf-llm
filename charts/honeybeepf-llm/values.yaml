@@ -47,7 +47,7 @@ builtinProbes:
     # providers:
     #   - name: "ollama"
     #     hosts: ["localhost", "ollama.internal"]
-    #     paths: ["/api/generate", "/api/chat"]  # substring match; a trailing "$" anchors the end (query ignored)
+    #     paths: ["/api/generate", "/api/chat"]  # substring match; a trailing "$" anchors the end (query and one trailing "/" ignored)
     #     response:
     #       usage_path: "usage"               # JSON path to usage object
     #       prompt_tokens: "prompt_eval_count" # Field name for input tokens

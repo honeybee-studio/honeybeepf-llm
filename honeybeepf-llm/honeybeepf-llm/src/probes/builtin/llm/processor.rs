@@ -141,12 +141,13 @@ impl StreamProcessor {
         }
     }
 
-    /// HTTP/1.1 clients do not write while a response is arriving, so a Write here starts the next request.
+    /// Whether a whole HTTP/1.1 response without usage is buffered, so the next Write starts a new request.
     fn awaits_http11_response(&self) -> bool {
         match &self.state {
-            // A 1xx interim response (100 Continue) is followed by the request body.
+            // Mid-response Writes can come from another connection on the same (pid, tid).
             ProcessorState::ProcessingResponse { parser, .. } => {
-                !parser.writes_during_response() && !self.read_buf.starts_with(b"HTTP/1.1 1")
+                !parser.writes_during_response()
+                    && http::Http11Parser::is_complete_response(&self.read_buf)
             }
             _ => false,
         }
@@ -608,6 +609,55 @@ mod tests {
             out.extend(send(&mut p, LlmDirection::Read, r, None));
         }
         assert_eq!(count(&out, Outcome::Unparsed), 0, "{out:?}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+    }
+
+    #[test]
+    fn test_write_from_another_connection_keeps_streaming_response() {
+        // One asyncio thread: a second request goes out on another connection mid-stream.
+        let mut p = StreamProcessor::new();
+        let mut out = send(&mut p, LlmDirection::Write, REQUEST, None);
+        for r in [
+            &b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"[..],
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        ] {
+            out.extend(send(&mut p, LlmDirection::Read, r, None));
+        }
+        out.extend(send(&mut p, LlmDirection::Write, MESSAGES_REQUEST, None));
+        let tail = b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                     data: {\"model\":\"gpt-4o\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\n\
+                     data: [DONE]\n\n";
+        out.extend(send(&mut p, LlmDirection::Read, tail, None));
+        assert_eq!(count(&out, Outcome::Unparsed), 0, "{out:?}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+    }
+
+    #[test]
+    fn test_unparsed_response_after_100_continue_frees_next_request() {
+        let mut p = StreamProcessor::new();
+        let (head, body) = REQUEST.split_at(REQUEST.len() - 27);
+        let mut out = send(&mut p, LlmDirection::Write, head, None);
+        out.extend(send(
+            &mut p,
+            LlmDirection::Read,
+            b"HTTP/1.1 100 Continue\r\n\r\n",
+            None,
+        ));
+        out.extend(send(&mut p, LlmDirection::Write, body, None));
+        let event = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n";
+        let chunked = format!("{:x}\r\n{event}\r\n0\r\n\r\n", event.len());
+        for r in [
+            &b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"[..],
+            chunked.as_bytes(),
+        ] {
+            out.extend(send(&mut p, LlmDirection::Read, r, None));
+        }
+        out.extend(exchange(
+            &mut p,
+            MESSAGES_REQUEST,
+            &h1("application/json", MESSAGES_RESPONSE),
+        ));
+        assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
     }
 }
