@@ -90,7 +90,7 @@ mod tests {
     use flate2::Compression;
     use flate2::write::{DeflateEncoder, GzEncoder, ZlibEncoder};
 
-    use super::super::protocol::{Http11Parser, ProtocolParser};
+    use super::super::{Http11Parser, ProtocolParser};
     use super::*;
 
     fn gzip(data: &[u8]) -> Vec<u8> {
