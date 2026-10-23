@@ -6,11 +6,11 @@ pub const MAX_SSL_FRAGMENTS: usize = 4;
 pub const MAX_SSL_CAPTURE: usize = MAX_SSL_BUF_SIZE * MAX_SSL_FRAGMENTS;
 
 // Indices into the LLM_STATS per-CPU counter map (kernel increments, userspace sums).
-pub const LLM_STAT_ENTER: u32 = 0; // entry uprobe hits (SSL_read/write/_ex, SSL_do_handshake)
+pub const LLM_STAT_ENTER: u32 = 0; // entry uprobe hits (SSL_read/write/_ex, SSL_do_handshake, SSL_free)
 pub const LLM_STAT_SUBMIT: u32 = 1; // events submitted to SSL_EVENTS (every fragment)
 pub const LLM_STAT_RESERVE_FAIL: u32 = 2; // SSL_EVENTS full at the first fragment, call lost
 pub const LLM_STAT_DISCARD: u32 = 3; // discarded (ret <= 0, no session, read failure)
-pub const LLM_STAT_EMPTY: u32 = 4; // submitted without payload (buf_filled = 0)
+pub const LLM_STAT_EMPTY: u32 = 4; // submitted without payload (buf_filled = 0), SSL_free included
 pub const LLM_STAT_TRUNCATED: u32 = 5; // call sent with bytes missing (> capture_limit, or no room later)
 pub const LLM_STAT_HANDSHAKE: u32 = 6; // handshake events submitted
 pub const LLM_STAT_FRAGMENT: u32 = 7; // fragments after the first (offset > 0), subset of submit
@@ -96,10 +96,11 @@ pub struct LlmEvent {
     pub is_handshake: u8, // 0 or 1 - separate from rw since handshake can occur during read/write
     pub rw: u8,           // Uses LlmDirection
     pub truncated: u8,    // 1 when len > capture_limit(rw): bytes past it are never sent
-    pub _pad: u8,
-    pub len: u32, // total bytes of the SSL call, the same on each of its fragments
+    pub closed: u8,       // 1 for SSL_free: the connection is gone and carries no data
+    pub len: u32,         // total bytes of the SSL call, the same on each of its fragments
     pub buf_filled: u32,
-    pub offset: u32, // position of buf[0] within the call's data
+    pub offset: u32,  // position of buf[0] within the call's data
+    pub ssl_ptr: u64, // the call's SSL*, which identifies the connection
     pub buf: [u8; MAX_SSL_BUF_SIZE],
     pub latency_ns: u64,
     pub comm: [u8; 16],
@@ -113,10 +114,11 @@ impl Default for LlmEvent {
             is_handshake: 0,
             rw: 0,
             truncated: 0,
-            _pad: 0,
+            closed: 0,
             len: 0,
             buf_filled: 0,
             offset: 0,
+            ssl_ptr: 0,
             buf: [0u8; MAX_SSL_BUF_SIZE],
             latency_ns: 0,
             comm: [0u8; 16],
@@ -124,8 +126,9 @@ impl Default for LlmEvent {
     }
 }
 
-// Fragment fields fill alignment padding; a bigger event means fewer ringbuf slots.
-const _: () = assert!(core::mem::size_of::<LlmEvent>() == 4160);
+// No padding (ssl_ptr sits at offset 40); a bigger event means fewer ringbuf slots.
+const _: () = assert!(core::mem::size_of::<LlmEvent>() == 4168);
+const _: () = assert!(core::mem::offset_of!(LlmEvent, ssl_ptr) == 40);
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for LlmEvent {}

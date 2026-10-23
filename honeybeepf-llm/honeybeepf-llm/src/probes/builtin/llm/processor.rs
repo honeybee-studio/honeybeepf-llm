@@ -7,7 +7,6 @@ use log::{info, warn};
 use crate::probes::builtin::llm::http::{self, ProtocolParser};
 
 // Buffer size constants
-const INITIAL_BUFFER_CAPACITY: usize = 8 * 1024; // 8KB initial allocation
 const MAX_REQUEST_BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB max for request (images, large context)
 pub(crate) const MAX_RESPONSE_BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB max for response (streaming)
 const DETECTION_BUFFER_THRESHOLD: usize = 4096; // Give up detection after 4KB
@@ -67,8 +66,9 @@ impl StreamProcessor {
     pub fn new() -> Self {
         Self {
             state: ProcessorState::Detecting,
-            write_buf: Vec::with_capacity(INITIAL_BUFFER_CAPACITY),
-            read_buf: Vec::with_capacity(INITIAL_BUFFER_CAPACITY),
+            // One per connection: most never carry an LLM call, so allocate on first use.
+            write_buf: Vec::new(),
+            read_buf: Vec::new(),
             last_activity: Instant::now(),
             frag_next: 0,
             frag_dir: LlmDirection::Unknown,
@@ -141,10 +141,24 @@ impl StreamProcessor {
         }
     }
 
+    /// End of the connection: an LLM call still without usage (request or response) is counted as unparsed.
+    pub fn close(
+        &mut self,
+        pid: u32,
+        #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
+    ) -> Outcome {
+        self.drop_response(
+            pid,
+            "connection closed before usage was found",
+            #[cfg(feature = "k8s")]
+            pod_info,
+        )
+    }
+
     /// Whether a whole HTTP/1.1 response without usage is buffered, so the next Write starts a new request.
     fn awaits_http11_response(&self) -> bool {
         match &self.state {
-            // Mid-response Writes can come from another connection on the same (pid, tid).
+            // A Write before that is a request body sent after `100 Continue`.
             ProcessorState::ProcessingResponse { parser, .. } => {
                 !parser.writes_during_response()
                     && http::Http11Parser::is_complete_response(&self.read_buf)
@@ -181,8 +195,6 @@ impl StreamProcessor {
         Outcome::Unparsed
     }
 
-    // Follow-up (P0-2, option C): split into write, read and end-of-response handling.
-    #[allow(clippy::too_many_lines)]
     fn handle_event(
         &mut self,
         direction: LlmDirection,
@@ -629,8 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn test_write_from_another_connection_keeps_streaming_response() {
-        // One asyncio thread: a second request goes out on another connection mid-stream.
+    fn test_write_before_whole_response_keeps_streaming_response() {
         let mut p = StreamProcessor::new();
         let mut out = send(&mut p, LlmDirection::Write, REQUEST, None);
         for r in [
