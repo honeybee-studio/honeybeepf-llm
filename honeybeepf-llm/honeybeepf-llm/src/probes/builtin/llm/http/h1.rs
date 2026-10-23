@@ -272,6 +272,10 @@ mod tests {
         assert!(detect(
             "bedrock-runtime.us-east-1.amazonaws.com/model/m/converse"
         ));
+        assert!(detect(
+            "claude.googleapis.com/v1/projects/p/locations/global/workspaces/w/invoke/v1/messages"
+        ));
+        assert!(detect("myres.services.ai.azure.com/anthropic/v1/messages"));
         assert!(!detect("ec2.us-west-2.api.aws/v1/messages"));
     }
 

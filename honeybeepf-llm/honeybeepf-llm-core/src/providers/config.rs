@@ -12,6 +12,8 @@ const ANTHROPIC_HOSTS: &[&str] = &[
     "api.anthropic.com",                // Claude API
     "aws-external-anthropic.*.api.aws", // Claude Platform on AWS
     "bedrock-mantle.*.api.aws",         // Bedrock Mantle /anthropic/v1
+    "claude.googleapis.com",            // Claude on Google Cloud (Anthropic managed)
+    "services.ai.azure.com",            // Claude in Microsoft Foundry /anthropic/v1
 ];
 const GEMINI_HOSTS: &[&str] = &[
     "generativelanguage.googleapis.com", // Gemini API
