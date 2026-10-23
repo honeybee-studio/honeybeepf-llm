@@ -1,12 +1,11 @@
-use std::io::Read;
-
-use flate2::read::GzDecoder;
 use once_cell::sync::Lazy;
 use serde_json::Value;
 
 use honeybeepf_llm_core::byte_utils;
 use honeybeepf_llm_core::providers::{ConfigurableProvider, ProviderRegistry, path_matches};
 use honeybeepf_llm_core::types::{SseChunkDelta, UsageInfo};
+
+use super::encoding;
 
 /// Cached providers - built once at initialization
 static CACHED_PROVIDERS: Lazy<Vec<ConfigurableProvider>> = Lazy::new(|| {
@@ -24,8 +23,13 @@ static PROVIDER_REGISTRY: Lazy<ProviderRegistry> = Lazy::new(load_provider_regis
 /// Distinct provider hosts: the HTTP/2 pre-check scans the whole buffer once per entry.
 static KNOWN_HOSTS: Lazy<Vec<&'static str>> = Lazy::new(|| {
     let mut hosts: Vec<&'static str> = Vec::new();
-    for host in PROVIDER_REGISTRY.providers.iter().flat_map(|p| &p.hosts) {
-        if !hosts.contains(&host.as_str()) {
+    for pattern in PROVIDER_REGISTRY.providers.iter().flat_map(|p| &p.hosts) {
+        // A `*` pattern is pre-checked by its first literal part (`aiplatform.`, not `.rep.googleapis.com`).
+        let host = pattern
+            .split('*')
+            .find(|s| !s.is_empty())
+            .unwrap_or(pattern.as_str());
+        if !host.is_empty() && !hosts.contains(&host) {
             hosts.push(host);
         }
     }
@@ -108,20 +112,14 @@ impl Http11Parser {
                 rest = body;
                 continue;
             }
-            let header = |name: &str| {
-                resp.headers
-                    .iter()
-                    .find(|h| h.name.eq_ignore_ascii_case(name))
-                    .map(|h| h.value)
-            };
-            if let Some(len) = header("Content-Length")
-                .and_then(|v| std::str::from_utf8(v).ok())
-                .and_then(|v| v.trim().parse::<usize>().ok())
-            {
+            if let Some(len) = content_length(resp.headers) {
                 return body.len() >= len;
             }
-            return header("Transfer-Encoding")
-                .is_some_and(|v| byte_utils::contains_pattern(v, b"chunked"))
+            return resp
+                .headers
+                .iter()
+                .find(|h| h.name.eq_ignore_ascii_case("Transfer-Encoding"))
+                .is_some_and(|h| byte_utils::contains_pattern(h.value, b"chunked"))
                 && body.ends_with(b"0\r\n\r\n");
         }
     }
@@ -181,12 +179,18 @@ impl ProtocolParser for Http11Parser {
             h.name.eq_ignore_ascii_case("Transfer-Encoding")
                 && String::from_utf8_lossy(h.value).contains("chunked")
         });
-        let is_gzip = resp.headers.iter().any(|h| {
-            h.name.eq_ignore_ascii_case("Content-Encoding")
-                && String::from_utf8_lossy(h.value).contains("gzip")
-        });
+        let is_encoded = encoding::is_encoded(resp.headers);
 
         let body = &buffer[body_offset..];
+        let ended = if is_chunked {
+            body.ends_with(b"0\r\n\r\n")
+        } else {
+            content_length(resp.headers).is_none_or(|len| body.len() >= len)
+        };
+        // Parsing re-runs on every read and decoding is not incremental, so wait for the framed end.
+        if is_encoded && !ended {
+            return None;
+        }
 
         // Decode chunked transfer encoding first
         let dechunked = if is_chunked {
@@ -194,28 +198,19 @@ impl ProtocolParser for Http11Parser {
         } else {
             std::borrow::Cow::Borrowed(body)
         };
+        let decompressed = encoding::decode(dechunked, resp.headers)?;
 
         // SSE events can straddle chunk boundaries, so they are parsed only after dechunking.
         if is_sse {
             // A truncated read desyncs the chunk framing; once the stream has ended, fall back to raw lines.
-            return parse_sse_body(&dechunked).or_else(|| {
-                if is_chunked && body.ends_with(b"0\r\n\r\n") {
+            return parse_sse_body(&decompressed).or_else(|| {
+                if is_chunked && !is_encoded && ended {
                     parse_sse_body(body)
                 } else {
                     None
                 }
             });
         }
-
-        // Then decompress gzip if needed
-        let decompressed: std::borrow::Cow<'_, [u8]> = if is_gzip {
-            match decompress_gzip(&dechunked) {
-                Ok(data) => std::borrow::Cow::Owned(data),
-                Err(_) => return None,
-            }
-        } else {
-            dechunked
-        };
 
         let trimmed = byte_utils::trim_trailing_whitespace(&decompressed);
 
@@ -323,7 +318,15 @@ impl ProtocolParser for Http2Parser {
                 val = val["response"].take();
             }
             if let Some(info) = parse_response_json_value(&val) {
-                return Some(info);
+                // A Gemini stream chunk before the last has no candidatesTokenCount yet; it is not a 0-token answer.
+                let gemini_partial = info.completion_tokens == 0
+                    && s.contains("\"usageMetadata\"")
+                    && !s.contains("\"candidatesTokenCount\"")
+                    && !s.contains("\"finishReason\"")
+                    && !s.contains("\"blockReason\"");
+                if !gemini_partial {
+                    return Some(info);
+                }
             }
         }
 
@@ -333,13 +336,14 @@ impl ProtocolParser for Http2Parser {
 
 // --- SSE Parsing ---
 
-/// End-of-stream markers: OpenAI `[DONE]`/`finish_reason`, Anthropic `message_stop`, Gemini `finishReason`,
-/// OpenAI Responses terminal event types.
-const SSE_END_MARKERS: [&str; 7] = [
+/// End-of-stream markers: OpenAI `[DONE]`/`finish_reason`, Anthropic `message_stop`, Gemini `finishReason`
+/// or prompt `blockReason`, OpenAI Responses terminal event types.
+const SSE_END_MARKERS: [&str; 8] = [
     "data: [DONE]",
     "\"finish_reason\"",
     "\"message_stop\"",
     "\"finishReason\"",
+    "\"blockReason\"",
     "\"response.completed\"",
     "\"response.failed\"",
     "\"response.incomplete\"",
@@ -453,12 +457,12 @@ fn parse_response_json_value(val: &Value) -> Option<UsageInfo> {
 
 // --- Helpers ---
 
-/// Decompress gzip data
-fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-    let mut decoder = GzDecoder::new(data);
-    let mut decompressed = Vec::new();
-    decoder.read_to_end(&mut decompressed)?;
-    Ok(decompressed)
+fn content_length(headers: &[httparse::Header]) -> Option<usize> {
+    headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case("Content-Length"))
+        .and_then(|h| std::str::from_utf8(h.value).ok())
+        .and_then(|v| v.trim().parse::<usize>().ok())
 }
 
 fn is_llm_path(path: &str) -> bool {
@@ -706,6 +710,92 @@ mod tests {
         assert_eq!(info.model.as_deref(), Some("gemini-test"));
     }
 
+    /// Usage Gemini sends when nothing was generated: no `candidatesTokenCount`.
+    const GEMINI_ZERO_USAGE: &str = "\"usageMetadata\":{\"promptTokenCount\":1,\"totalTokenCount\":1,\
+        \"promptTokensDetails\":[{\"modality\":\"TEXT\",\"tokenCount\":1}],\"serviceTier\":\"standard\"}";
+
+    #[test]
+    fn gemini_json_zero_output_is_recorded() {
+        for finish in ["MAX_TOKENS", "STOP"] {
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n\
+                 {{\"candidates\":[{{\"content\":{{\"role\":\"model\"}},\"finishReason\":\"{finish}\",\"index\":0}}],\
+                 {GEMINI_ZERO_USAGE},\"modelVersion\":\"gemini-test\"}}"
+            );
+            let info = Http11Parser.parse_response(resp.as_bytes());
+            assert_eq!(tokens(info), Some((1, 0)), "{finish}");
+        }
+    }
+
+    #[test]
+    fn gemini_sse_zero_output_is_recorded() {
+        for finish in ["MAX_TOKENS", "STOP"] {
+            let body = format!(
+                "data: {{\"candidates\":[{{\"content\":{{\"role\":\"model\"}},\"finishReason\":\"{finish}\",\"index\":0}}],\
+                 {GEMINI_ZERO_USAGE},\"modelVersion\":\"gemini-test\"}}\r\n\r\n"
+            );
+            let info = Http11Parser.parse_response(&http11_sse(&body));
+            assert_eq!(tokens(info), Some((1, 0)), "{finish}");
+        }
+    }
+
+    #[test]
+    fn vertex_json_thoughts_without_candidates_is_recorded() {
+        // Recorded Vertex AI body (enum-encoding=int): thinking used the whole output budget.
+        let resp = concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n",
+            "{\"candidates\":[{\"content\":{\"role\":\"model\"},\"finishReason\":2}],",
+            "\"usageMetadata\":{\"promptTokenCount\":5,\"totalTokenCount\":9,\"trafficType\":1,",
+            "\"promptTokensDetails\":[{\"modality\":1,\"tokenCount\":5}],\"thoughtsTokenCount\":4},",
+            "\"modelVersion\":\"gemini-2.5-pro\"}",
+        );
+        let info = Http11Parser.parse_response(resp.as_bytes()).expect("usage");
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (5, 0));
+        assert_eq!(info.thoughts_tokens, Some(4));
+    }
+
+    #[test]
+    fn gemini_prompt_block_is_recorded_on_every_path() {
+        let blocked = "{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\
+            \"usageMetadata\":{\"promptTokenCount\":8,\"totalTokenCount\":8},\"modelVersion\":\"gemini-test\"}";
+        let json = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{blocked}");
+        let sse = http11_sse(&format!("data: {blocked}\r\n\r\n"));
+        let h2 = format!("data: {blocked}\r\n\r\n");
+
+        assert_eq!(
+            tokens(Http11Parser.parse_response(json.as_bytes())),
+            Some((8, 0))
+        );
+        assert_eq!(tokens(Http11Parser.parse_response(&sse)), Some((8, 0)));
+        assert_eq!(
+            tokens(Http2Parser.parse_response(h2.as_bytes())),
+            Some((8, 0))
+        );
+    }
+
+    #[test]
+    fn gemini_json_without_usage_metadata_is_not_recorded() {
+        let resp = concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n",
+            "{\"candidates\":[{\"content\":{\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"modelVersion\":\"gemini-test\"}",
+        );
+        assert_eq!(tokens(Http11Parser.parse_response(resp.as_bytes())), None);
+    }
+
+    #[test]
+    fn h2_gemini_stream_waits_for_the_last_chunk() {
+        let first = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"h\"}]}}],\"usageMetadata\":{\"promptTokenCount\":7}}\r\n\r\n";
+        assert_eq!(tokens(Http2Parser.parse_response(first.as_bytes())), None);
+
+        let last = format!(
+            "{first}data: {{\"candidates\":[{{\"content\":{{\"role\":\"model\"}},\"finishReason\":\"MAX_TOKENS\"}}],{GEMINI_ZERO_USAGE}}}\r\n\r\n"
+        );
+        assert_eq!(
+            tokens(Http2Parser.parse_response(last.as_bytes())),
+            Some((1, 0))
+        );
+    }
+
     #[test]
     fn chunked_sse_usage_event_split_across_chunks() {
         let ev1 = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
@@ -913,6 +1003,39 @@ mod tests {
                 .enumerate()
                 .all(|(i, h)| !hosts[..i].contains(h))
         );
+        // Wildcard hosts are pre-checked by their literal part.
+        assert!(hosts.contains(&"bedrock-mantle.") && !hosts.contains(&".rep.googleapis.com"));
+        assert!(hosts.iter().all(|h| !h.contains('*') && !h.is_empty()));
+    }
+
+    #[test]
+    fn cloud_hosts_are_detected_on_http11() {
+        let detect = |url: &str| {
+            let (host, path) = url.split_at(url.find('/').unwrap_or(url.len()));
+            let req = format!("POST {path} HTTP/1.1\r\nHost: {host}\r\n\r\n{{}}");
+            Http11Parser.detect_request(req.as_bytes()).is_some()
+        };
+        assert!(detect(
+            "aws-external-anthropic.us-west-2.api.aws/v1/messages"
+        ));
+        assert!(detect(
+            "bedrock-mantle.us-east-2.api.aws:443/openai/v1/responses"
+        ));
+        assert!(detect(
+            "bedrock-runtime.us-east-1.amazonaws.com/model/m/converse"
+        ));
+        assert!(!detect("ec2.us-west-2.api.aws/v1/messages"));
+    }
+
+    #[test]
+    fn bedrock_converse_json_reads_camel_case_usage() {
+        let resp = concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n",
+            "{\"output\":{\"message\":{\"role\":\"assistant\",\"content\":[{\"text\":\"hi\"}]}},\"stopReason\":\"end_turn\",",
+            "\"usage\":{\"inputTokens\":30,\"outputTokens\":628,\"totalTokens\":658},\"metrics\":{\"latencyMs\":1275}}",
+        );
+        let info = Http11Parser.parse_response(resp.as_bytes());
+        assert_eq!(tokens(info), Some((30, 628)));
     }
 
     #[test]

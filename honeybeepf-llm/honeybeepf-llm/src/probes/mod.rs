@@ -10,9 +10,9 @@ use std::{
 
 use anyhow::{Context, Result};
 use aya::{
-    Ebpf,
+    Btf, Ebpf,
     maps::{HashMap as AyaHashMap, MapData, RingBuf},
-    programs::{KProbe, TracePoint, UProbe, uprobe::UProbeLinkId},
+    programs::{FEntry, KProbe, TracePoint, UProbe, uprobe::UProbeLinkId},
 };
 use honeybeepf_llm_common::{ExecEvent, LibOpenEvent};
 use log::{info, warn};
@@ -210,6 +210,20 @@ pub fn attach_kprobe(bpf: &mut Ebpf, prog_name: &str, func_name: &str) -> Result
     Ok(())
 }
 
+/// Load and attach an fentry program; needs kernel BTF (and 6.0+ on arm64).
+pub fn attach_fentry(bpf: &mut Ebpf, prog_name: &str, func_name: &str) -> Result<()> {
+    let btf = Btf::from_sys_fs().context("kernel BTF not available")?;
+    let program: &mut FEntry = bpf
+        .program_mut(prog_name)
+        .with_context(|| format!("Failed to find program {}", prog_name))?
+        .try_into()?;
+    program.load(func_name, &btf)?;
+    program
+        .attach()
+        .with_context(|| format!("Failed to attach {} to {}", prog_name, func_name))?;
+    Ok(())
+}
+
 /// Detach a uprobe link returned by [`attach_uprobe`].
 pub fn detach_uprobe(bpf: &mut Ebpf, prog_name: &str, link_id: UProbeLinkId) -> Result<()> {
     let program: &mut UProbe = bpf
@@ -266,11 +280,19 @@ pub struct LibOpen {
 pub type LibOpenQueue = Arc<Mutex<VecDeque<LibOpen>>>;
 pub type LibOpenSeen = AyaHashMap<MapData, [u64; 2], u64>;
 
-/// Set up the do_sys_openat2 kprobe that reports `libssl.so*` opens before their first SSL call.
+/// Set up the do_sys_openat2 hook (fentry, else kprobe) that reports `libssl.so*` opens before their first SSL call.
 /// If it fails to attach, only this hook is lost and exec re-discovery still runs.
 pub fn setup_lib_open_watch(bpf: &mut Ebpf) -> Result<(LibOpenQueue, ExecNotify, LibOpenSeen)> {
-    if let Err(e) = attach_kprobe(bpf, "probe_lib_open", "do_sys_openat2") {
-        warn!("libssl open watch not attached: {:#}", e);
+    // fentry runs on every open without the kprobe trap; the kprobe covers kernels without BTF.
+    match attach_fentry(bpf, "probe_lib_open_fentry", "do_sys_openat2") {
+        Ok(()) => info!("libssl open watch: fentry on do_sys_openat2"),
+        Err(fentry_err) => match attach_kprobe(bpf, "probe_lib_open", "do_sys_openat2") {
+            Ok(()) => info!("libssl open watch: kprobe (fentry: {:#})", fentry_err),
+            Err(e) => warn!(
+                "libssl open watch not attached: {:#} (fentry: {:#})",
+                e, fentry_err
+            ),
+        },
     }
     let seen = AyaHashMap::try_from(
         bpf.take_map("LIB_OPEN_SEEN")

@@ -4,7 +4,19 @@ use serde_json::Value;
 
 /// Find byte pattern in haystack
 pub fn find_pattern(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
+    let Some((&first, rest)) = needle.split_first() else {
+        return Some(0);
+    };
+    // Compare only where the first byte matches: a slice compare at every offset dominates the HTTP/2 host scan.
+    let mut from = 0;
+    while let Some(i) = haystack[from..].iter().position(|&b| b == first) {
+        let at = from + i;
+        if haystack[at + 1..].starts_with(rest) {
+            return Some(at);
+        }
+        from = at + 1;
+    }
+    None
 }
 
 /// Check if haystack contains needle

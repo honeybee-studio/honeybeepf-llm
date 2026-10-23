@@ -42,13 +42,13 @@ builtinProbes:
     enabled: false
     # Also probe executables with OpenSSL built in (official Node.js builds, node: images).
     executables: true
-    # Custom providers config (optional). Built-in: OpenAI, Anthropic, Gemini
+    # Custom providers config (optional). Built-in: OpenAI, Anthropic, Gemini (also via Azure, Bedrock, Vertex AI)
     # Add your own providers here (e.g. Ollama, vLLM, private models).
     providers: []
     # Example:
     # providers:
     #   - name: "ollama"
-    #     hosts: ["localhost", "ollama.internal"]
+    #     hosts: ["localhost", "ollama.internal"]  # substring match; one "*" must cover the whole host (e.g. "llm.*.internal")
     #     paths: ["/api/generate", "/api/chat"]  # substring match; a trailing "$" anchors the end (query and one trailing "/" ignored)
     #     response:
     #       usage_path: "usage"               # JSON path to usage object

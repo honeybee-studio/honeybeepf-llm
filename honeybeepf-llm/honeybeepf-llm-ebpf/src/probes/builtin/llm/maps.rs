@@ -14,8 +14,9 @@ pub static SSL_EVENTS: RingBuf = RingBuf::with_byte_size(SSL_RINGBUF_SIZE, 0);
 #[map]
 pub static START_NS: HashMap<u32, u64> = HashMap::with_max_entries(MAX_ENTRIES, 0);
 
+/// (buf, SSL*) of the call in progress; return probes can't read the arguments.
 #[map]
-pub static BUFS: HashMap<u32, u64> = HashMap::with_max_entries(MAX_ENTRIES, 0);
+pub static BUFS: HashMap<u32, [u64; 2]> = HashMap::with_max_entries(MAX_ENTRIES, 0);
 
 #[map]
 pub static READBYTES_PTRS: HashMap<u32, u64> = HashMap::with_max_entries(MAX_ENTRIES, 0);

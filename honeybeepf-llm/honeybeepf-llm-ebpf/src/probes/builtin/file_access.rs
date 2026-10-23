@@ -24,10 +24,7 @@ pub static WATCHED_PATHS: HashMap<u64, u8> = HashMap::with_max_entries(MAX_WATCH
 /// Tracepoint for sys_enter_openat - fires when a process calls openat().
 #[tracepoint]
 pub fn sys_enter_openat(ctx: TracePointContext) -> u32 {
-    match try_sys_enter_openat(&ctx) {
-        Ok(ret) => ret,
-        Err(_) => 0,
-    }
+    try_sys_enter_openat(&ctx).unwrap_or_default()
 }
 
 #[inline(always)]

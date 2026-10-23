@@ -1,6 +1,7 @@
 use honeybeepf_llm_core::providers::{
     ConfigurableProvider, ProviderConfig, ProviderRegistry, RequestExtractorType, ResponseConfig,
 };
+use honeybeepf_llm_core::types::UsageInfo;
 use serde_json::json;
 
 fn openai_config() -> ProviderConfig {
@@ -193,6 +194,98 @@ fn test_gemini_cached_content_tokens_are_part_of_prompt() {
     assert_eq!(usage.cache_read_tokens, Some(4096));
 }
 
+fn gemini_default() -> ConfigurableProvider {
+    default_provider("generativelanguage.googleapis.com", ":generateContent")
+}
+
+#[test]
+fn test_gemini_missing_candidates_count_is_zero_output() {
+    for finish in ["MAX_TOKENS", "STOP"] {
+        let response = json!({
+            "candidates": [{"content": {"role": "model"}, "finishReason": finish, "index": 0}],
+            "usageMetadata": {
+                "promptTokenCount": 1,
+                "totalTokenCount": 1,
+                "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 1}],
+                "serviceTier": "standard"
+            },
+            "modelVersion": "gemini-test"
+        });
+
+        let usage = gemini_default().parse_usage(&response).unwrap();
+        assert_eq!((usage.prompt_tokens, usage.completion_tokens), (1, 0));
+        assert_eq!(usage.thoughts_tokens, None);
+    }
+}
+
+#[test]
+fn test_gemini_thoughts_without_candidates_count() {
+    let response = json!({
+        "usageMetadata": {"promptTokenCount": 5, "totalTokenCount": 9, "thoughtsTokenCount": 4}
+    });
+
+    let usage = gemini_default().parse_usage(&response).unwrap();
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (5, 0));
+    assert_eq!(usage.thoughts_tokens, Some(4));
+}
+
+#[test]
+fn test_gemini_without_prompt_count_is_not_usage() {
+    let provider = gemini_default();
+    assert!(
+        provider
+            .parse_usage(&json!({"usageMetadata": {}}))
+            .is_none()
+    );
+    assert!(
+        provider
+            .parse_usage(&json!({"usageMetadata": {"candidatesTokenCount": 3}}))
+            .is_none()
+    );
+    assert!(provider.parse_usage(&json!({"candidates": []})).is_none());
+}
+
+#[test]
+fn test_missing_completion_is_still_not_usage_for_other_providers() {
+    let registry = ProviderRegistry::with_defaults();
+    let usages = [
+        json!({"usage": {"prompt_tokens": 8, "total_tokens": 8}}),
+        json!({"usage": {"input_tokens": 25}}),
+        json!({"usage": {"input_tokens": 25, "input_tokens_details": {"cached_tokens": 0}}}),
+    ];
+    for config in registry.providers.iter().filter(|p| p.name != "gemini") {
+        let provider = ConfigurableProvider::new(config.clone());
+        for usage in &usages {
+            assert!(
+                provider.parse_usage(usage).is_none(),
+                "{} {usage}",
+                config.name
+            );
+        }
+    }
+}
+
+#[test]
+fn test_custom_provider_requires_completion_by_default() -> Result<(), serde_json::Error> {
+    let registry = ProviderRegistry::from_json(
+        r#"{"providers":[{"name":"bedrock-like","response":{"prompt_tokens":"inputTokens","completion_tokens":"outputTokens"}},
+            {"name":"gemini-proxy","response":{"usage_path":"usageMetadata","prompt_tokens":"promptTokenCount",
+            "completion_tokens":"candidatesTokenCount","completion_optional":true}}]}"#,
+    )?;
+    let strict = ConfigurableProvider::new(registry.providers[0].clone());
+    assert!(
+        strict
+            .parse_usage(&json!({"usage": {"inputTokens": 12}}))
+            .is_none()
+    );
+    let optional = ConfigurableProvider::new(registry.providers[1].clone());
+    let usage = optional
+        .parse_usage(&json!({"usageMetadata": {"promptTokenCount": 12}}))
+        .unwrap();
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (12, 0));
+    Ok(())
+}
+
 #[test]
 fn test_custom_provider_cached_tokens_key_still_reads_cache() -> Result<(), serde_json::Error> {
     let registry = ProviderRegistry::from_json(
@@ -216,6 +309,55 @@ fn test_responses_config_skips_anthropic_usage() {
         "usage": {"input_tokens": 50, "cache_read_input_tokens": 100000, "output_tokens": 300}
     });
     assert!(provider.parse_usage(&anthropic).is_none());
+}
+
+/// Parse like the agent does: try providers in order, without a host check.
+fn parse_in_order(providers: &[ProviderConfig], response: &serde_json::Value) -> Option<UsageInfo> {
+    providers
+        .iter()
+        .find_map(|c| ConfigurableProvider::new(c.clone()).parse_usage(response))
+}
+
+#[test]
+fn test_bedrock_converse_prompt_adds_cache_read_and_write() {
+    let registry = ProviderRegistry::with_defaults();
+    let response = json!({"stopReason": "end_turn", "metrics": {"latencyMs": 1275},
+        "usage": {"inputTokens": 30, "outputTokens": 628, "totalTokens": 1858,
+            "cacheReadInputTokens": 1000, "cacheWriteInputTokens": 200}});
+
+    let u = parse_in_order(&registry.providers, &response).unwrap();
+    let cache = (u.cache_read_tokens, u.cache_write_tokens);
+    assert_eq!(
+        (u.prompt_tokens, u.completion_tokens, u.model),
+        (1230, 628, None)
+    );
+    assert_eq!(cache, (Some(1000), Some(200)));
+}
+
+#[test]
+fn test_new_defaults_parse_existing_bodies_like_before() {
+    let registry = ProviderRegistry::with_defaults();
+    // Entries 0-3 are the OpenAI (chat, Responses), Anthropic and Gemini first-party providers.
+    let (before, _) = registry.providers.split_at(4);
+
+    for response in [
+        json!({"model": "gpt-4o", "usage": {"prompt_tokens": 2000, "completion_tokens": 40,
+            "prompt_tokens_details": {"cached_tokens": 1536}, "completion_tokens_details": {"reasoning_tokens": 8}}}),
+        json!({"model": "gpt-6", "usage": {"input_tokens": 30, "input_tokens_details": {"cached_tokens": 12},
+            "output_tokens": 9, "output_tokens_details": {"reasoning_tokens": 2}}}),
+        json!({"model": "claude-opus-5-5", "usage": {"input_tokens": 50, "cache_creation_input_tokens": 2000,
+            "cache_read_input_tokens": 100000, "output_tokens": 300}}),
+        json!({"modelVersion": "gemini-3.5-flash", "usageMetadata": {"promptTokenCount": 5000,
+            "candidatesTokenCount": 20, "thoughtsTokenCount": 7, "cachedContentTokenCount": 4096}}),
+        // Azure OpenAI chat example (no model field) and Responses example (no input_tokens_details)
+        json!({"usage": {"completion_tokens": 557, "prompt_tokens": 33, "total_tokens": 590}}),
+        json!({"model": "deepseek-v3-0324", "status": "completed",
+            "usage": {"input_tokens": 28, "output_tokens": 52, "total_tokens": 80}}),
+    ] {
+        let now = parse_in_order(&registry.providers, &response);
+        assert!(now.is_some(), "{response}");
+        assert_eq!(now, parse_in_order(before, &response), "{response}");
+    }
 }
 
 #[test]

@@ -11,6 +11,7 @@
 //! - `probe_ssl_read_ex_exit` → Return from `SSL_read_ex`
 //! - `probe_ssl_write_ex_exit` → Return from `SSL_write_ex`
 //! - `probe_ssl_do_handshake_enter/exit` → `SSL_do_handshake` for latency measurement
+//! - `probe_ssl_free` → Entry for `SSL_free(ssl)`, ends the connection's stream
 
 use aya_ebpf::{
     macros::{uprobe, uretprobe},
@@ -34,7 +35,7 @@ use maps::*;
 pub fn probe_ssl_rw_enter(ctx: ProbeContext) -> u32 {
     count(LLM_STAT_ENTER);
     let tid = get_current_tid();
-    Session::start(tid, ctx.arg(1).unwrap_or(0), None);
+    Session::start(tid, ctx.arg(0).unwrap_or(0), ctx.arg(1).unwrap_or(0), None);
     0
 }
 
@@ -56,7 +57,12 @@ pub fn probe_ssl_write_exit(ctx: RetProbeContext) -> u32 {
 pub fn probe_ssl_rw_ex_enter(ctx: ProbeContext) -> u32 {
     count(LLM_STAT_ENTER);
     let tid = get_current_tid();
-    Session::start(tid, ctx.arg(1).unwrap_or(0), Some(ctx.arg(3).unwrap_or(0)));
+    Session::start(
+        tid,
+        ctx.arg(0).unwrap_or(0),
+        ctx.arg(1).unwrap_or(0),
+        Some(ctx.arg(3).unwrap_or(0)),
+    );
     0
 }
 
@@ -74,10 +80,10 @@ pub fn probe_ssl_write_ex_exit(ctx: RetProbeContext) -> u32 {
 
 /// Entry probe for SSL_do_handshake - captures start time for latency.
 #[uprobe]
-pub fn probe_ssl_do_handshake_enter(_ctx: ProbeContext) -> u32 {
+pub fn probe_ssl_do_handshake_enter(ctx: ProbeContext) -> u32 {
     count(LLM_STAT_ENTER);
     let tid = get_current_tid();
-    Session::start(tid, 0, None);
+    Session::start(tid, ctx.arg(0).unwrap_or(0), 0, None);
     0
 }
 
@@ -85,6 +91,20 @@ pub fn probe_ssl_do_handshake_enter(_ctx: ProbeContext) -> u32 {
 #[uretprobe]
 pub fn probe_ssl_do_handshake_exit(ctx: RetProbeContext) -> u32 {
     emit_llm_event(&ctx, LlmDirection::Handshake as u8, true)
+}
+
+/// Entry probe for SSL_free(ssl): tells userspace the connection's stream is over, since the
+/// address can be reused by the next connection.
+#[uprobe]
+pub fn probe_ssl_free(ctx: ProbeContext) -> u32 {
+    count(LLM_STAT_ENTER);
+    match ctx.arg::<u64>(0) {
+        Some(ssl) if ssl != 0 => {
+            emit_fragments(&SslCall::free(ssl), LlmDirection::Unknown as u8, false)
+        }
+        _ => count(LLM_STAT_DISCARD),
+    }
+    0
 }
 
 /// Emit an LLM event to the ring buffer. Always clears session state after processing.
