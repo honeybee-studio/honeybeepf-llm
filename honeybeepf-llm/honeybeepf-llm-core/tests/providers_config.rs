@@ -28,6 +28,8 @@ fn test_default_provider_hosts() {
             "api.anthropic.com",
             "aws-external-anthropic.*.api.aws",
             "bedrock-mantle.*.api.aws",
+            "claude.googleapis.com",
+            "services.ai.azure.com",
         ],
         &["generativelanguage.googleapis.com", vertex[0], vertex[1]],
         &vertex,
@@ -121,6 +123,8 @@ fn test_find_provider_cloud_endpoints() {
                 "aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/anthropic/models/claude-opus-5-5:rawPredict",
                 "us-east5-aiplatform.googleapis.com/v1/projects/p/locations/us-east5/publishers/anthropic/models/claude-sonnet-4-6:streamRawPredict",
                 "aiplatform.eu.rep.googleapis.com/v1/projects/p/locations/eu/publishers/anthropic/models/claude-opus-5-5:rawPredict",
+                "claude.googleapis.com/v1/projects/p/locations/global/workspaces/wrkspc_01/invoke/v1/messages",
+                "myres.services.ai.azure.com/anthropic/v1/messages",
             ],
         ),
         (
@@ -185,9 +189,47 @@ fn test_find_provider_skips_similar_cloud_calls() {
         "myres.openai.azure.com/openai/deployments/d1/embeddings?api-version=2024-10-21",
         "myres.openai.azure.com/openai/deployments/d1/audio/transcriptions?api-version=2024-10-21",
         "myres.openai.azure.com/openai/v1/responses/resp_1",
+        "claude.googleapis.com/v1/projects/p/locations/global/workspaces/wrkspc_01/invoke/v1/messages/count_tokens",
+        "claude.googleapis.com/v1/projects/p/locations/global/workspaces/wrkspc_01/invoke/v1/messages/batches",
+        "claude.googleapis.com/v1/projects/p/locations/global/workspaces/wrkspc_01/invoke/v1/models",
+        "claude.googleapis.com/v1/projects/p/locations/global/claudeOrganization/invoke/v1/organizations/users",
+        "claude.googleapis.com/v1/projects/p/locations/global/publishers/google/models/gemini-3.5-flash:generateContent",
+        "myres.services.ai.azure.com/anthropic/v1/messages/count_tokens",
     ] {
         assert_eq!(provider_for(&registry, url), None, "{url}");
     }
+}
+
+// Foundry serves OpenAI and Anthropic routes on one host, so only the path picks the provider.
+#[test]
+fn test_find_provider_foundry_host_split_by_path() {
+    let registry = ProviderRegistry::with_defaults();
+
+    for (url, name) in [
+        (
+            "myres.services.ai.azure.com/anthropic/v1/messages",
+            "anthropic",
+        ),
+        (
+            "myres.services.ai.azure.com/anthropic/v1/messages/",
+            "anthropic",
+        ),
+        (
+            "myres.services.ai.azure.com/openai/v1/chat/completions",
+            "openai",
+        ),
+        ("myres.services.ai.azure.com/openai/v1/responses", "openai"),
+    ] {
+        assert_eq!(provider_for(&registry, url).as_deref(), Some(name), "{url}");
+    }
+    let anthropic = registry
+        .find_provider("myres.services.ai.azure.com", "/anthropic/v1/messages")
+        .unwrap();
+    assert!(anthropic.response.prompt_excludes_cache);
+    let openai = registry
+        .find_provider("myres.services.ai.azure.com", "/openai/v1/chat/completions")
+        .unwrap();
+    assert!(!openai.response.prompt_excludes_cache);
 }
 
 #[test]
