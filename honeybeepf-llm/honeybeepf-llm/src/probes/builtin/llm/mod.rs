@@ -10,9 +10,11 @@ use std::{
 use anyhow::{Context, Result};
 use aya::{
     Ebpf,
-    maps::{MapData, PerCpuArray},
+    maps::{HashMap as BpfHashMap, MapData, PerCpuArray},
 };
-use honeybeepf_llm_common::{LLM_STAT_COUNT, LLM_STAT_NAMES, LlmEvent};
+use honeybeepf_llm_common::{
+    LLM_STAT_COUNT, LLM_STAT_NAMES, LlmEvent, MAX_SSL_BUF_SIZE, ssl_class_skip_conn,
+};
 use honeybeepf_llm_core::types::LlmDirection;
 use log::{info, warn};
 use processor::{Outcome, StreamProcessor};
@@ -284,6 +286,42 @@ impl DynamicProbe for LlmProbe {
 /// (pid, SSL*): one stream per TLS connection, whichever threads read and write it.
 type StreamKey = (u32, u64);
 type StreamMap = Arc<Mutex<HashMap<StreamKey, StreamProcessor>>>;
+/// The kernel's SSL_CLASS map: [tgid, SSL*] -> class and creation time.
+type ClassMap = BpfHashMap<MapData, [u64; 2], u64>;
+
+/// The SSL call bytes this event carries.
+fn payload(event: &LlmEvent) -> &[u8] {
+    if event.buf_filled == 0 {
+        return &[];
+    }
+    let len = std::cmp::min(
+        event.len.saturating_sub(event.offset) as usize,
+        MAX_SSL_BUF_SIZE,
+    );
+    &event.buf[..len]
+}
+
+/// Whether the event starts a request to a host no provider serves; an HTTP/1.1 connection keeps one Host.
+fn opens_foreign_request(event: &LlmEvent) -> bool {
+    LlmDirection::from(event.rw) == LlmDirection::Write
+        && event.offset == 0
+        && http::Http11Parser::has_foreign_host(payload(event))
+}
+
+/// Have the kernel drop the rest of the event's connection.
+fn skip_connection(classes: &mut ClassMap, event: &LlmEvent) {
+    let key = [u64::from(event.metadata.pid), event.ssl_ptr];
+    if let Some(value) = classes
+        .get(&key, 0)
+        .ok()
+        .and_then(|entry| ssl_class_skip_conn(entry, event.metadata.timestamp))
+    {
+        let _ = classes.insert(key, value, BPF_EXIST);
+    }
+}
+
+/// `BPF_EXIST` from linux/bpf.h: an entry SSL_free removed since the lookup is not brought back.
+const BPF_EXIST: u64 = 2;
 
 /// Feed one ringbuf event to its connection's stream, or end the stream on SSL_free.
 fn route_event(
@@ -303,16 +341,13 @@ fn route_event(
             _ => Outcome::Pending,
         };
     }
-    let data_len = std::cmp::min(
-        event.len.saturating_sub(event.offset) as usize,
-        honeybeepf_llm_common::MAX_SSL_BUF_SIZE,
-    );
-    if event.buf_filled == 0 || data_len == 0 {
+    let data = payload(event);
+    if data.is_empty() {
         return Outcome::Pending;
     }
     streams.entry(key).or_default().handle_fragment(
         LlmDirection::from(event.rw),
-        &event.buf[..data_len],
+        data,
         event.offset,
         event.len,
         event.truncated != 0,
@@ -363,13 +398,26 @@ impl Probe for LlmProbe {
 
         let state: StreamMap = Arc::new(Mutex::new(HashMap::new()));
         let handler_state = state.clone();
+        let mut classes = ClassMap::try_from(
+            bpf.take_map("SSL_CLASS")
+                .context("Failed to get SSL_CLASS map")?,
+        )?;
 
         spawn_ringbuf_handler(bpf, "SSL_EVENTS", move |event: LlmEvent| {
             if event.is_handshake == 1 {
                 return;
             }
 
+            let foreign = opens_foreign_request(&event);
             let mut map = handler_state.lock().unwrap_or_else(|e| e.into_inner());
+            let key = (event.metadata.pid, event.ssl_ptr);
+            // A stream with an LLM call in progress keeps going, so it is still recorded or counted.
+            if foreign && !map.get(&key).is_some_and(StreamProcessor::is_llm) {
+                map.remove(&key);
+                drop(map);
+                skip_connection(&mut classes, &event);
+                return;
+            }
             route_event(
                 &mut map,
                 &event,
@@ -430,7 +478,7 @@ pub fn find_all_targets() -> Result<HashSet<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use honeybeepf_llm_common::{EventMetadata, MAX_SSL_BUF_SIZE};
+    use honeybeepf_llm_common::EventMetadata;
 
     const OPENAI_REQUEST: &[u8] = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"gpt-4o\",\"stream\":true,\"messages\":[]}";
     const ANTHROPIC_REQUEST: &[u8] = b"POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"claude-test\",\"stream\":true,\"messages\":[]}";
@@ -556,6 +604,44 @@ mod tests {
             );
         }
         assert!(streams.is_empty());
+    }
+
+    #[test]
+    fn test_only_a_request_head_to_a_non_provider_host_skips_the_connection() {
+        use LlmDirection::{Read, Write};
+        let noise =
+            b"POST /api/data HTTP/1.1\r\nHost: noise.internal\r\nContent-Length: 2\r\n\r\nxx";
+        assert!(opens_foreign_request(&call(1, OPENAI, Write, noise)));
+        let continued = LlmEvent {
+            offset: MAX_SSL_BUF_SIZE as u32,
+            ..call(1, OPENAI, Write, noise)
+        };
+        for e in [
+            continued,
+            call(1, OPENAI, Write, OPENAI_REQUEST),
+            call(
+                1,
+                OPENAI,
+                Write,
+                b"GET /v1/models HTTP/1.1\r\nHost: api.openai.com\r\n\r\n",
+            ),
+            call(
+                1,
+                OPENAI,
+                Write,
+                b"POST /api/data HTTP/1.1\r\nHost: noise.int",
+            ),
+            call(1, OPENAI, Write, b"POST /api/data HTTP/1.1\r\n\r\n"),
+            call(1, OPENAI, Write, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"),
+            call(
+                1,
+                OPENAI,
+                Read,
+                b"HTTP/1.1 200 OK\r\nHost: noise.internal\r\n\r\n",
+            ),
+        ] {
+            assert!(!opens_foreign_request(&e), "{:?}", payload(&e));
+        }
     }
 
     /// Two paths to one file (like two processes' `/proc/<pid>/root/...`) attach once.

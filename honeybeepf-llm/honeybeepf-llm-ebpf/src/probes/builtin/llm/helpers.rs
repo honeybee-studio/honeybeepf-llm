@@ -6,10 +6,11 @@ use aya_ebpf::{
     programs::RetProbeContext,
 };
 use honeybeepf_llm_common::{
-    EventMetadata, LlmDirection, LlmEvent, MAX_SSL_BUF_SIZE, capture_limit,
+    EventMetadata, LlmDirection, LlmEvent, MAX_SSL_BUF_SIZE, SSL_CLASS_MASK, SSL_CLASS_READ_SEEN,
+    SSL_CLASS_SEND, capture_limit, ssl_class_after_write, ssl_class_drops,
 };
 
-use crate::probes::builtin::llm::maps::{BUFS, LLM_STATS, READBYTES_PTRS, START_NS};
+use crate::probes::builtin::llm::maps::{BUFS, LLM_STATS, READBYTES_PTRS, SSL_CLASS, START_NS};
 
 #[inline(always)]
 pub fn get_current_tid() -> u32 {
@@ -55,6 +56,13 @@ impl Session {
         let _ = BUFS.remove(&tid);
         let _ = READBYTES_PTRS.remove(&tid);
     }
+}
+
+/// Drop the connection's class, since its SSL* address can be reused by the next connection.
+#[inline(always)]
+pub fn forget_class(ssl: u64) {
+    let tgid = bpf_get_current_pid_tgid() >> 32;
+    let _ = SSL_CLASS.remove(&[tgid, ssl]);
 }
 
 /// Metadata for an event of the current task (LlmEvent doesn't use the HoneyBeeEvent trait).
@@ -140,6 +148,33 @@ impl SslCall {
             len,
             closed: 0,
         })
+    }
+
+    /// Whether the connection's class drops this call; a Write first reclasses it by its first 8 bytes.
+    #[inline(always)]
+    pub fn filtered(&self, rw: u8) -> bool {
+        let key = [self.metadata.pid as u64, self.ssl];
+        // SAFETY: the value is copied out at once, before an update or eviction can free it.
+        let entry = unsafe { SSL_CLASS.get(&key) }.copied();
+        let class = entry.map_or(0, |v| (v & SSL_CLASS_MASK) as u8);
+        let born = entry.unwrap_or(self.metadata.timestamp) & !SSL_CLASS_MASK;
+        let next = if rw == LlmDirection::Write as u8 {
+            let head = if self.len >= 8 {
+                // SAFETY: the helper checks the user address; a fault returns Err, read as no head.
+                unsafe { bpf_probe_read_user(self.buf_addr as *const [u8; 8]) }.unwrap_or([0; 8])
+            } else {
+                [0; 8]
+            };
+            ssl_class_after_write(class, head, self.len)
+        } else if class == SSL_CLASS_SEND {
+            SSL_CLASS_SEND | SSL_CLASS_READ_SEEN
+        } else {
+            class
+        };
+        if next != class {
+            let _ = SSL_CLASS.insert(&key, &(born | next as u64), 0);
+        }
+        ssl_class_drops(next)
     }
 }
 

@@ -375,3 +375,18 @@ fn test_custom_provider_json() {
     assert_eq!(registry.providers.len(), 1);
     assert_eq!(registry.providers[0].name, "my-llm");
 }
+
+#[test]
+fn test_may_serve_host() {
+    let registry = ProviderRegistry::with_defaults();
+    assert!(registry.may_serve_host("api.openai.com"));
+    assert!(registry.may_serve_host("bedrock-mantle.us-east-2.api.aws:443"));
+    assert!(!registry.may_serve_host("noise.internal"));
+    assert!(!registry.may_serve_host("ec2.us-west-2.api.aws"));
+
+    // A provider without hosts matches every host, so no host can be ruled out.
+    let any_host =
+        r#"{"providers": [{"name": "gw", "hosts": [], "paths": ["/v1/chat/completions$"]}]}"#;
+    let registry = ProviderRegistry::from_json(any_host).unwrap();
+    assert!(registry.may_serve_host("noise.internal"));
+}
