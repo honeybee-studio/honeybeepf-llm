@@ -26,6 +26,12 @@ use crate::k8s::PodInfo;
 /// Metric export interval in seconds
 const METRIC_EXPORT_INTERVAL_SECS: u64 = 30;
 
+/// `llm_latency_seconds` bucket bounds; the SDK default is millisecond-scale (0, 5, 10, … 10000).
+const LLM_LATENCY_BOUNDARIES_SECS: [f64; 18] = [
+    0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0,
+    180.0, 300.0,
+];
+
 /// Global metrics handle
 static METRICS: OnceLock<HoneyBeeMetrics> = OnceLock::new();
 
@@ -126,6 +132,7 @@ impl HoneyBeeMetrics {
                 .f64_histogram("llm_latency_seconds")
                 .with_description("Latency of LLM requests")
                 .with_unit("s")
+                .with_boundaries(LLM_LATENCY_BOUNDARIES_SECS.to_vec())
                 .build(),
             llm_responses_unparsed_total: meter
                 .u64_counter("llm_responses_unparsed_total")
@@ -367,6 +374,12 @@ pub fn record_process_exit(cause: &str, exit_code: u32, lifetime_secs: u64, cgro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentelemetry::metrics::MeterProvider;
+    use opentelemetry_sdk::metrics::data::{self, ResourceMetrics};
+    use opentelemetry_sdk::metrics::reader::MetricReader;
+    use opentelemetry_sdk::metrics::{
+        InstrumentKind, ManualReader, MetricResult, Pipeline, Temporality,
+    };
     use serial_test::serial;
 
     #[test]
@@ -404,5 +417,70 @@ mod tests {
         let endpoint = get_otlp_endpoint();
         assert_eq!(endpoint, Some("http://collector:4317".to_string()));
         unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT") };
+    }
+
+    /// Lets the test keep a handle to the reader the provider owns.
+    #[derive(Debug, Clone)]
+    struct SharedReader(std::sync::Arc<ManualReader>);
+
+    impl MetricReader for SharedReader {
+        fn register_pipeline(&self, pipeline: std::sync::Weak<Pipeline>) {
+            self.0.register_pipeline(pipeline);
+        }
+        fn collect(&self, rm: &mut ResourceMetrics) -> MetricResult<()> {
+            self.0.collect(rm)
+        }
+        fn force_flush(&self) -> MetricResult<()> {
+            self.0.force_flush()
+        }
+        fn shutdown(&self) -> MetricResult<()> {
+            self.0.shutdown()
+        }
+        fn temporality(&self, kind: InstrumentKind) -> Temporality {
+            self.0.temporality(kind)
+        }
+    }
+
+    #[test]
+    fn llm_latency_uses_second_scale_buckets() -> Result<()> {
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"));
+        for secs in [0.3, 1.2, 3.0, 45.0] {
+            metrics.llm_latency_seconds.record(secs, &[]);
+        }
+
+        let mut rm = ResourceMetrics {
+            resource: Resource::empty(),
+            scope_metrics: vec![],
+        };
+        reader.collect(&mut rm)?;
+        let hist = rm
+            .scope_metrics
+            .iter()
+            .flat_map(|s| &s.metrics)
+            .find(|m| m.name == "llm_latency_seconds")
+            .and_then(|m| m.data.as_any().downcast_ref::<data::Histogram<f64>>())
+            .context("llm_latency_seconds histogram not collected")?;
+        let point = &hist.data_points[0];
+
+        assert_eq!(
+            point.bounds,
+            [
+                0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0,
+                120.0, 180.0, 300.0
+            ]
+        );
+        // Typical 0.3-45 s calls must spread over buckets, not pile into one.
+        let filled: Vec<u64> = point
+            .bucket_counts
+            .iter()
+            .copied()
+            .filter(|&c| c > 0)
+            .collect();
+        assert_eq!(filled, [1, 1, 1, 1]);
+        Ok(())
     }
 }
