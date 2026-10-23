@@ -111,6 +111,7 @@ fn gemini() -> ProviderConfig {
             usage_path: "usageMetadata".to_string(),
             prompt_tokens: "promptTokenCount".to_string(),
             completion_tokens: "candidatesTokenCount".to_string(),
+            completion_optional: true,
             thoughts_tokens: Some("thoughtsTokenCount".to_string()),
             cache_read_tokens: Some("cachedContentTokenCount".to_string()),
             model_path: "modelVersion".to_string(),
@@ -189,6 +190,10 @@ pub struct ResponseConfig {
     #[serde(default = "default_completion_tokens")]
     pub completion_tokens: String,
 
+    /// Whether a missing `completion_tokens` field means 0 (Gemini leaves it out when nothing was generated)
+    #[serde(default)]
+    pub completion_optional: bool,
+
     /// Optional: field name for thinking/reasoning tokens
     pub thoughts_tokens: Option<String>,
 
@@ -230,6 +235,7 @@ impl Default for ResponseConfig {
             usage_path: default_usage_path(),
             prompt_tokens: default_prompt_tokens(),
             completion_tokens: default_completion_tokens(),
+            completion_optional: false,
             thoughts_tokens: None,
             cache_read_tokens: None,
             cache_write_tokens: None,

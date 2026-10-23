@@ -57,8 +57,11 @@ impl ConfigurableProvider {
         // Extract token counts
         let prompt =
             get_nested_value(usage, &response_config.prompt_tokens).and_then(|v| v.as_u64())?;
-        let completion =
-            get_nested_value(usage, &response_config.completion_tokens).and_then(|v| v.as_u64())?;
+        let completion = match get_nested_value(usage, &response_config.completion_tokens) {
+            Some(v) => v.as_u64()?,
+            None if response_config.completion_optional => 0,
+            None => return None,
+        };
 
         // Optional: thoughts/reasoning and cache tokens
         let optional = |path: &Option<String>| {
