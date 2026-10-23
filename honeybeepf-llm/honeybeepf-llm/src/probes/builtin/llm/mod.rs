@@ -1,5 +1,7 @@
 pub mod http;
 pub mod processor;
+#[cfg(test)]
+mod secret_leak_tests;
 
 use std::{
     collections::{HashMap, HashSet},

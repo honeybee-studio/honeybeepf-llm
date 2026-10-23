@@ -235,6 +235,12 @@ pub fn metrics() -> Option<&'static HoneyBeeMetrics> {
     METRICS.get()
 }
 
+/// Install the instruments on a test meter; false when metrics were already initialized.
+#[cfg(test)]
+pub(crate) fn init_test_metrics(meter: &Meter) -> bool {
+    METRICS.set(HoneyBeeMetrics::new(meter)).is_ok()
+}
+
 /// Record active probe count
 /// Updates the global active probes map for ObservableGauge callback
 pub fn record_active_probe(probe_name: &str, count: u64) {
