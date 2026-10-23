@@ -101,7 +101,7 @@ static METRICS: OnceLock<(SdkMeterProvider, Arc<ManualReader>)> = OnceLock::new(
 
 fn init_capture() -> &'static ManualReader {
     let (_, reader) = METRICS.get_or_init(|| {
-        let _ = log::set_logger(&LOGGER);
+        log::set_logger(&LOGGER).expect("no other logger in the test binary");
         log::set_max_level(log::LevelFilter::Trace);
         let reader = Arc::new(ManualReader::builder().build());
         let provider = SdkMeterProvider::builder()
@@ -266,9 +266,9 @@ fn bearer(key: &str) -> String {
 }
 
 /// The completion repeats the pasted key, so response content is covered too.
-fn openai_completion() -> String {
+fn openai_completion(model: &str) -> String {
     format!(
-        r#"{{"id":"c1","object":"chat.completion","model":"gpt-4o","choices":[{{"index":0,"message":{{"role":"assistant","content":"rotate {}"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":11,"completion_tokens":4}}}}"#,
+        r#"{{"id":"c1","object":"chat.completion","model":"{model}","choices":[{{"index":0,"message":{{"role":"assistant","content":"rotate {}"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":11,"completion_tokens":4}}}}"#,
         fake::OPENAI_KEY
     )
 }
@@ -281,11 +281,11 @@ fn openai_bearer_key_stays_out_of_logs_and_metrics() {
         &[("Authorization", &bearer(fake::OPENAI_KEY))],
         &chat_body("gpt-4o"),
     );
-    let resp = json_response("200 OK", &openai_completion());
+    let resp = json_response("200 OK", &openai_completion("leakcheck-openai"));
     let (out, logs) = run(&exchange(&req, &resp));
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
     assert!(logs.contains("LLM SUCCESS"), "{logs}");
-    assert_clean("openai", &logs, Some("llm_tokens_total"));
+    assert_clean("openai", &logs, Some("leakcheck-openai"));
 }
 
 #[test]
@@ -300,7 +300,7 @@ fn anthropic_x_api_key_stays_out_of_logs_and_metrics() {
         &chat_body("claude-opus-5-5"),
     );
     let resp = format!(
-        "{SSE_HEAD}event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"m1\",\"model\":\"claude-opus-5-5\",\"usage\":{{\"input_tokens\":25,\"output_tokens\":1}}}}}}\n\n\
+        "{SSE_HEAD}event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"m1\",\"model\":\"leakcheck-anthropic\",\"usage\":{{\"input_tokens\":25,\"output_tokens\":1}}}}}}\n\n\
          event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"rotate {}\"}}}}\n\n\
          event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":15}}}}\n\n\
          event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n",
@@ -309,7 +309,7 @@ fn anthropic_x_api_key_stays_out_of_logs_and_metrics() {
     let (out, logs) = run(&exchange(&req, resp.as_bytes()));
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
     assert!(logs.contains("LLM SUCCESS"), "{logs}");
-    assert_clean("anthropic", &logs, Some("llm_tokens_total"));
+    assert_clean("anthropic", &logs, Some("leakcheck-anthropic"));
 }
 
 #[test]
@@ -318,14 +318,22 @@ fn gemini_query_and_header_keys_stay_out_of_logs_and_metrics() {
         r#"{{"contents":[{{"role":"user","parts":[{{"text":"{}"}}]}}]}}"#,
         prompt()
     );
-    let usage = r#"{"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3},"modelVersion":"gemini-2.5-flash"}"#;
-    let json = json_response("200 OK", usage);
-    let sse = format!("{SSE_HEAD}data: {usage}\r\n\r\n");
-    let cases: [(&str, &[u8]); 2] = [
-        (":generateContent?", &json),
-        (":streamGenerateContent?alt=sse&", sse.as_bytes()),
+    let usage = |model: &str| {
+        format!(
+            r#"{{"candidates":[{{"content":{{"parts":[{{"text":"ok"}}],"role":"model"}},"finishReason":"STOP"}}],"usageMetadata":{{"promptTokenCount":7,"candidatesTokenCount":3}},"modelVersion":"{model}"}}"#
+        )
+    };
+    let json = json_response("200 OK", &usage("leakcheck-gemini-json"));
+    let sse = format!("{SSE_HEAD}data: {}\r\n\r\n", usage("leakcheck-gemini-sse"));
+    let cases: [(&str, &[u8], &str); 2] = [
+        (":generateContent?", &json, "leakcheck-gemini-json"),
+        (
+            ":streamGenerateContent?alt=sse&",
+            sse.as_bytes(),
+            "leakcheck-gemini-sse",
+        ),
     ];
-    for (method, resp) in cases {
+    for (method, resp, model) in cases {
         let path = format!(
             "/v1beta/models/gemini-2.5-flash{method}key={}",
             fake::GEMINI_KEY
@@ -339,7 +347,7 @@ fn gemini_query_and_header_keys_stay_out_of_logs_and_metrics() {
         let (out, logs) = run(&exchange(&req, resp));
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{method}: {out:?}");
         assert!(logs.contains("Detected HTTP/1.1"), "{logs}");
-        assert_clean(method, &logs, Some("llm_tokens_total"));
+        assert_clean(method, &logs, Some(model));
     }
 }
 
@@ -351,10 +359,11 @@ fn azure_api_key_stays_out_of_logs_and_metrics() {
         &[("api-key", fake::AZURE_KEY)],
         &chat_body("gpt-4o"),
     );
-    let resp = json_response("200 OK", &openai_completion());
+    let resp = json_response("200 OK", &openai_completion("leakcheck-azure"));
     let (out, logs) = run(&exchange(&req, &resp));
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
-    assert_clean("azure", &logs, Some("llm_tokens_total"));
+    assert!(logs.contains("LLM SUCCESS"), "{logs}");
+    assert_clean("azure", &logs, Some("leakcheck-azure"));
 }
 
 #[test]
@@ -369,23 +378,36 @@ fn aws_sigv4_credentials_stay_out_of_logs_and_metrics() {
         r#"{{"messages":[{{"role":"user","content":[{{"text":"{}"}}]}}]}}"#,
         prompt()
     );
-    let req = post(
-        "/model/anthropic.claude-sonnet-5-5-v1:0/converse",
-        "bedrock-runtime.us-east-1.amazonaws.com",
-        &[
-            ("Authorization", &authorization),
-            ("X-Amz-Date", "20261023T000000Z"),
-            ("X-Amz-Security-Token", fake::AWS_SESSION_TOKEN),
-        ],
-        &body,
+    let path = "/model/anthropic.claude-sonnet-5-5-v1:0/converse";
+    let presigned = format!(
+        "{path}?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential={}%2F20261023%2Fus-east-1%2Fbedrock%2Faws4_request\
+         &X-Amz-Security-Token={}&X-Amz-Signature={}",
+        fake::AWS_ACCESS_KEY_ID,
+        fake::AWS_SESSION_TOKEN,
+        fake::AWS_SIGNATURE
     );
+    let signed_headers = [
+        ("Authorization", authorization.as_str()),
+        ("X-Amz-Date", "20261023T000000Z"),
+        ("X-Amz-Security-Token", fake::AWS_SESSION_TOKEN),
+    ];
     let resp = json_response(
         "200 OK",
         r#"{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}},"stopReason":"end_turn","usage":{"inputTokens":30,"outputTokens":9,"totalTokens":39}}"#,
     );
-    let (out, logs) = run(&exchange(&req, &resp));
-    assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
-    assert_clean("bedrock", &logs, Some("llm_tokens_total"));
+    let cases: [(&str, &[(&str, &str)]); 2] = [(path, &signed_headers), (presigned.as_str(), &[])];
+    for (target, headers) in cases {
+        let req = post(
+            target,
+            "bedrock-runtime.us-east-1.amazonaws.com",
+            headers,
+            &body,
+        );
+        let (out, logs) = run(&exchange(&req, &resp));
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+        assert!(logs.contains("LLM SUCCESS"), "{logs}");
+        assert_clean("bedrock", &logs, Some("llm_tokens_total"));
+    }
 }
 
 #[test]
@@ -477,6 +499,7 @@ fn hpack_literal(block: &mut Vec<u8>, name: &str, value: &str) {
     block.extend_from_slice(value.as_bytes());
 }
 
+// Real clients Huffman-code HPACK headers, so a header key would not show as text; the body key still would.
 #[test]
 fn http2_authorization_stays_out_of_logs_and_metrics() {
     let mut headers = Vec::new();
@@ -496,12 +519,12 @@ fn http2_authorization_stays_out_of_logs_and_metrics() {
     let mut status = Vec::new();
     hpack_literal(&mut status, ":status", "200");
     let head = h2_frame(0x1, 0x4, 1, &status);
-    let data = h2_frame(0x0, 0x1, 1, openai_completion().as_bytes());
+    let data = h2_frame(0x0, 0x1, 1, openai_completion("leakcheck-h2").as_bytes());
 
     let (out, logs) = run(&[Step::Write(&req), Step::Read(&head), Step::Read(&data)]);
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
     assert!(logs.contains("Detected HTTP/2"), "{logs}");
-    assert_clean("http2", &logs, Some("llm_tokens_total"));
+    assert_clean("http2", &logs, Some("leakcheck-h2"));
 }
 
 #[test]
