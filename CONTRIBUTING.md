@@ -59,6 +59,19 @@ make test
 
 All checks must pass before your PR can be merged.
 
+### Binary Files
+
+Reviewers can't read binary files in a pull request diff. When you add one (for example a compressed
+test fixture), put it in a `testdata/` directory and add a row
+`| <file name> | <sha256> | <command that regenerates it> |` to the `README.md` in the same directory.
+Read it only from test code: a `#[cfg(test)]` module, a `#![cfg(test)]` file, or a crate's `tests/`.
+CI runs `ci/check-binary-provenance.sh`, which fails when a binary file (git's binary check, any NUL
+byte, or invalid UTF-8) is outside `testdata/`, has no such row or a different sha256, or when a build
+or deploy file (`build.rs`, `Cargo.toml`, Dockerfiles, workflows, charts, ...) or non-test Rust code
+mentions `testdata` or a binary file's name. Only the files listed one by one in the script's `allowlist` (today
+`docs/images/architecture.png`) need no row; add a new documentation image there as its own line. Run
+`bash ci/check-binary-provenance.sh` (bash 4.4+) before you push.
+
 ## AI Tooling Policy
 
 This policy is adapted from the Kubernetes project's
