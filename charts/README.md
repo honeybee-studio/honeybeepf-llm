@@ -129,6 +129,7 @@ Since the agent pushes metrics via OTLP, you must have an OTel Collector running
 | **OTLP Endpoint** | `output.otlp.endpoint` | `OTEL_EXPORTER_OTLP_ENDPOINT` |
 | **Service Name** | (Internal template) | `OTEL_SERVICE_NAME` |
 | **LLM Probe** | `builtinProbes.llm.enabled` | `BUILTIN_PROBES__LLM` |
+| **LLM Probe: executables with built-in OpenSSL (Node.js)** | `builtinProbes.llm.executables` | `BUILTIN_PROBES__LLM_EXECUTABLES` |
 
 ---
 

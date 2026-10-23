@@ -53,6 +53,8 @@ pub struct BuiltinProbes {
     #[serde(default)]
     pub filesystem: FilesystemProbes,
     pub llm: Option<bool>,
+    /// Probe executables with OpenSSL built in (Node.js); on unless set to false.
+    pub llm_executables: Option<bool>,
     pub process_lifecycle: Option<bool>,
     pub interval: Option<u32>,
 }
@@ -120,17 +122,20 @@ mod tests {
         unsafe {
             std::env::set_var("BUILTIN_PROBES__FILESYSTEM__FILE_ACCESS", "true");
             std::env::set_var("BUILTIN_PROBES__INTERVAL", "42");
+            std::env::set_var("BUILTIN_PROBES__LLM_EXECUTABLES", "false");
         }
 
         let settings = Settings::new().expect("Failed to load settings");
 
         assert_eq!(settings.builtin_probes.filesystem.file_access, Some(true));
         assert_eq!(settings.builtin_probes.interval, Some(42));
+        assert_eq!(settings.builtin_probes.llm_executables, Some(false));
 
         // 환경변수 정리
         unsafe {
             std::env::remove_var("BUILTIN_PROBES__FILESYSTEM__FILE_ACCESS");
             std::env::remove_var("BUILTIN_PROBES__INTERVAL");
+            std::env::remove_var("BUILTIN_PROBES__LLM_EXECUTABLES");
         }
     }
 
@@ -145,6 +150,7 @@ mod tests {
                     watched_paths: None,
                 },
                 llm: None,
+                llm_executables: None,
                 process_lifecycle: None,
                 interval: None,
             },
