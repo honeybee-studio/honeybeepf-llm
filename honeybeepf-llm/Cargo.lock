@@ -327,39 +327,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aya-log-ebpf"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a10bbadd0829895a91eb1cd2bb02d7af145704087f03812bed60cb9fe65dbb3"
-dependencies = [
- "aya-ebpf",
- "aya-log-common",
- "aya-log-ebpf-macros",
-]
-
-[[package]]
-name = "aya-log-ebpf-macros"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6d8251a75f56077db51892041aa6b77c70ef2723845d7a210979700b2f01bc4"
-dependencies = [
- "aya-log-common",
- "aya-log-parser",
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "aya-log-parser"
-version = "0.1.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14b102eb5c88c9aa0b49102d3fbcee08ecb0dfa81014f39b373311de7a7032cb"
-dependencies = [
- "aya-log-common",
-]
-
-[[package]]
 name = "aya-obj"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -492,10 +459,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fac4744fb15ae8337dc853fee7fb3f4e48c0fbaa23d0afe49c447b4fab126118"
 dependencies = [
  "iana-time-zone",
- "js-sys",
  "num-traits",
  "serde",
- "wasm-bindgen",
  "windows-link",
 ]
 
@@ -788,25 +753,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "env_filter"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bf3c259d255ca70051b30e2e95b5446cdb8949ac4cd22c0d7fd634d89f568e2"
-dependencies = [
- "log",
-]
-
-[[package]]
-name = "env_logger"
-version = "0.11.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13c863f0904021b108aa8b2f55046443e6b1ebde8fd4a15c399893aae4fa069f"
-dependencies = [
- "env_filter",
- "log",
 ]
 
 [[package]]
@@ -1123,16 +1069,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "aya",
- "aya-build",
  "aya-log",
  "brotli-decompressor",
- "bytes",
- "cargo_metadata",
- "chrono",
  "clap",
  "config",
  "dotenvy",
- "env_logger",
  "flate2",
  "futures",
  "honeybeepf-llm-common",
@@ -1155,7 +1096,6 @@ dependencies = [
  "serde_json",
  "serial_test",
  "tokio",
- "tracing",
  "tracing-subscriber",
 ]
 
@@ -1180,9 +1120,7 @@ name = "honeybeepf-llm-ebpf"
 version = "0.1.0"
 dependencies = [
  "aya-ebpf",
- "aya-log-ebpf",
  "honeybeepf-llm-common",
- "which",
 ]
 
 [[package]]
