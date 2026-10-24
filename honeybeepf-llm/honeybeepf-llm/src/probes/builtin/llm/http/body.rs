@@ -163,7 +163,7 @@ mod tests {
             "\"modelVersion\":\"gemini-2.5-pro\"}",
         );
         let info = Http11Parser.parse_response(resp.as_bytes()).expect("usage");
-        assert_eq!((info.prompt_tokens, info.completion_tokens), (5, 0));
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (5, 4));
         assert_eq!(info.thoughts_tokens, Some(4));
     }
 

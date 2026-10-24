@@ -10,6 +10,7 @@
 //! 2. Direct environment variable configuration
 
 use anyhow::{Context, Result};
+use honeybeepf_llm_core::types::UsageInfo;
 use log::info;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 use opentelemetry::{KeyValue, global};
@@ -59,6 +60,7 @@ pub struct HoneyBeeMetrics {
     pub llm_tokens_total: Counter<u64>,
     pub llm_cache_read_tokens_total: Counter<u64>,
     pub llm_cache_write_tokens_total: Counter<u64>,
+    pub llm_reasoning_tokens_total: Counter<u64>,
     pub llm_latency_seconds: Histogram<f64>,
     pub llm_responses_unparsed_total: Counter<u64>,
 }
@@ -128,6 +130,14 @@ impl HoneyBeeMetrics {
                 )
                 .with_unit("tokens")
                 .build(),
+            // Subset of the completion count, for the same reason.
+            llm_reasoning_tokens_total: meter
+                .u64_counter("llm_reasoning_tokens_total")
+                .with_description(
+                    "Completion tokens spent on reasoning, already in llm_tokens_total",
+                )
+                .with_unit("tokens")
+                .build(),
             llm_latency_seconds: meter
                 .f64_histogram("llm_latency_seconds")
                 .with_description("Latency of LLM requests")
@@ -141,6 +151,43 @@ impl HoneyBeeMetrics {
                 )
                 .with_unit("responses")
                 .build(),
+        }
+    }
+
+    fn record_llm(
+        &self,
+        usage: &UsageInfo,
+        latency_secs: f64,
+        is_error: bool,
+        attrs: Vec<KeyValue>,
+    ) {
+        // 1. total requests
+        self.llm_requests_total.add(1, &attrs);
+
+        // 2. latency
+        self.llm_latency_seconds.record(latency_secs, &attrs);
+
+        // 3. tokens
+        if !is_error {
+            if let Some(n) = usage.cache_read_tokens {
+                self.llm_cache_read_tokens_total.add(n, &attrs);
+            }
+            if let Some(n) = usage.cache_write_tokens {
+                self.llm_cache_write_tokens_total.add(n, &attrs);
+            }
+            if let Some(n) = usage.thoughts_tokens {
+                self.llm_reasoning_tokens_total.add(n, &attrs);
+            }
+
+            let mut prompt_attrs = attrs.clone();
+            prompt_attrs.push(KeyValue::new("token_type", "prompt"));
+            self.llm_tokens_total
+                .add(usage.prompt_tokens, &prompt_attrs);
+
+            let mut comp_attrs = attrs; // move ownership
+            comp_attrs.push(KeyValue::new("token_type", "completion"));
+            self.llm_tokens_total
+                .add(usage.completion_tokens, &comp_attrs);
         }
     }
 }
@@ -280,11 +327,9 @@ pub fn record_file_access_event(
 
 // Record LLM request metrics
 pub fn record_llm_request(
+    usage: &UsageInfo,
     model: &str,
     latency_secs: f64,
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    (cache_read_tokens, cache_write_tokens): (Option<u64>, Option<u64>),
     is_error: bool,
     #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
 ) {
@@ -304,29 +349,7 @@ pub fn record_llm_request(
             attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
         }
 
-        // 1. total requests
-        m.llm_requests_total.add(1, &attrs);
-
-        // 2. latency
-        m.llm_latency_seconds.record(latency_secs, &attrs);
-
-        // 3. tokens
-        if !is_error {
-            if let Some(n) = cache_read_tokens {
-                m.llm_cache_read_tokens_total.add(n, &attrs);
-            }
-            if let Some(n) = cache_write_tokens {
-                m.llm_cache_write_tokens_total.add(n, &attrs);
-            }
-
-            let mut prompt_attrs = attrs.clone();
-            prompt_attrs.push(KeyValue::new("token_type", "prompt"));
-            m.llm_tokens_total.add(prompt_tokens, &prompt_attrs);
-
-            let mut comp_attrs = attrs; // move ownership
-            comp_attrs.push(KeyValue::new("token_type", "completion"));
-            m.llm_tokens_total.add(completion_tokens, &comp_attrs);
-        }
+        m.record_llm(usage, latency_secs, is_error, attrs);
     }
 }
 
@@ -481,6 +504,45 @@ mod tests {
             .filter(|&c| c > 0)
             .collect();
         assert_eq!(filled, [1, 1, 1, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn llm_reasoning_tokens_are_a_subset_and_skip_errors() -> Result<()> {
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"));
+        let usage = UsageInfo {
+            prompt_tokens: 5,
+            completion_tokens: 4,
+            thoughts_tokens: Some(4),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            model: None,
+        };
+        metrics.record_llm(&usage, 1.0, false, vec![]);
+        metrics.record_llm(&usage, 1.0, true, vec![]);
+
+        let mut rm = ResourceMetrics {
+            resource: Resource::empty(),
+            scope_metrics: vec![],
+        };
+        reader.collect(&mut rm)?;
+        let total = |name: &str| -> Result<u64> {
+            let sum = rm
+                .scope_metrics
+                .iter()
+                .flat_map(|s| &s.metrics)
+                .find(|m| m.name == name)
+                .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
+                .with_context(|| format!("{name} counter not collected"))?;
+            Ok(sum.data_points.iter().map(|p| p.value).sum())
+        };
+
+        assert_eq!(total("llm_reasoning_tokens_total")?, 4);
+        assert_eq!(total("llm_tokens_total")?, 9);
         Ok(())
     }
 }
