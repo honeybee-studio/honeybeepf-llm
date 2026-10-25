@@ -737,4 +737,23 @@ mod tests {
         assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
     }
+
+    #[test]
+    fn test_chunk_larger_than_response_buffer_frees_next_request() {
+        for size in ["2000000", "ffffffffffffffff"] {
+            let mut p = StreamProcessor::new();
+            let garbled = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n\
+                 {size}\r\n{{}}\r\n0\r\n\r\n"
+            );
+            let mut out = exchange(&mut p, MESSAGES_REQUEST, garbled.as_bytes());
+            out.extend(exchange(
+                &mut p,
+                MESSAGES_REQUEST,
+                &h1("application/json", MESSAGES_RESPONSE),
+            ));
+            assert_eq!(count(&out, Outcome::Unparsed), 1, "{size}: {out:?}");
+            assert_eq!(out.last(), Some(&Outcome::Recorded), "{size}: {out:?}");
+        }
+    }
 }
