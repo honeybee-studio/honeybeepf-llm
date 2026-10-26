@@ -70,7 +70,8 @@ impl ProtocolParser for Http11Parser {
                 .find_provider(&host_header, path)
                 .is_some()
             {
-                return Some(path.to_string());
+                // The path is logged and the query can carry a credential (Gemini `?key=`).
+                return Some(path.split_once('?').map_or(path, |(p, _)| p).to_string());
             }
         }
         None
@@ -256,6 +257,15 @@ mod tests {
     }
 
     #[test]
+    fn detected_path_leaves_out_the_query() {
+        let req = b"POST /v1beta/models/m:generateContent?key=AIzaFAKE HTTP/1.1\r\nHost: generativelanguage.googleapis.com\r\n\r\n{}";
+        assert_eq!(
+            Http11Parser.detect_request(req).as_deref(),
+            Some("/v1beta/models/m:generateContent")
+        );
+    }
+
+    #[test]
     fn request_head_needs_a_complete_http11_head() {
         assert!(Http11Parser::is_request_head(
             b"POST /v1/embeddings HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{}"
@@ -334,6 +344,12 @@ mod tests {
             "claude.googleapis.com/v1/projects/p/locations/global/workspaces/w/invoke/v1/messages"
         ));
         assert!(detect("myres.services.ai.azure.com/anthropic/v1/messages"));
+        assert!(detect(
+            "myres.openai.azure.com/openai/responses?api-version=2025-04-01-preview"
+        ));
+        assert!(detect(
+            "myres.openai.azure.com/openai/deployments/d1/completions?api-version=2024-10-21"
+        ));
         assert!(!detect("ec2.us-west-2.api.aws/v1/messages"));
     }
 
