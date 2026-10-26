@@ -9,6 +9,14 @@ updates:
       github-actions:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
+    # Majors change runtimes and defaults (setup-rust-toolchain v2 broke the eBPF build), so they are reviewed by hand.
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-major
     commit-message:
       prefix: ci
     labels:
