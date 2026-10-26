@@ -1,9 +1,28 @@
 use honeybeepf_llm_core::providers::{
     ProviderRegistry, RequestExtractorType, host_matches, path_matches,
 };
+use serde::Deserialize;
 
-/// `<provider|none>  <host/path>  # reason` lines checked against the default registry.
-const PROVIDER_URLS: &str = include_str!("fixtures/provider_urls.txt");
+/// `host/path` cases grouped by expected provider, checked against the default registry.
+const PROVIDER_URLS: &str = include_str!("fixtures/provider_urls.toml");
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UrlCase {
+    url: String,
+    reason: String,
+}
+
+/// One array per expected provider; `none` lists URLs no provider may match.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderUrls {
+    openai: Vec<UrlCase>,
+    anthropic: Vec<UrlCase>,
+    bedrock: Vec<UrlCase>,
+    gemini: Vec<UrlCase>,
+    none: Vec<UrlCase>,
+}
 
 #[test]
 fn test_default_providers() {
@@ -52,35 +71,32 @@ fn provider_for(registry: &ProviderRegistry, url: &str) -> Option<String> {
 
 #[test]
 fn test_find_provider_url_fixtures() {
+    let fixture: ProviderUrls = toml::from_str(PROVIDER_URLS)
+        .unwrap_or_else(|e| panic!("fixtures/provider_urls.toml: {e}"));
     let registry = ProviderRegistry::with_defaults();
+    let groups = [
+        ("openai", &fixture.openai),
+        ("anthropic", &fixture.anthropic),
+        ("bedrock", &fixture.bedrock),
+        ("gemini", &fixture.gemini),
+        ("none", &fixture.none),
+    ];
     let mut cases = 0;
     let mut failures = Vec::new();
-    for (i, line) in PROVIDER_URLS.lines().enumerate() {
-        let line_no = i + 1;
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
+    for (provider, group) in groups {
+        let expected = (provider != "none").then_some(provider);
+        for UrlCase { url, reason } in group {
+            cases += 1;
+            if reason.trim().is_empty() {
+                failures.push(format!("{provider}: {url}: empty reason"));
+            }
+            let actual = provider_for(&registry, url);
+            if actual.as_deref() != expected {
+                failures.push(format!("{provider}: {url} ({reason}): got {actual:?}"));
+            }
         }
-        let (case, reason) = line.split_once(" #").unwrap_or((line, ""));
-        let mut fields = case.split_whitespace();
-        let (Some(expected), Some(url), None) = (fields.next(), fields.next(), fields.next())
-        else {
-            panic!("line {line_no}: want `<provider|none>  <host/path>  # reason`, got {line:?}");
-        };
-        assert!(
-            !reason.trim().is_empty(),
-            "line {line_no}: missing `# reason`"
-        );
-        let expected = (expected != "none").then_some(expected);
-        let actual = provider_for(&registry, url);
-        if actual.as_deref() != expected {
-            failures.push(format!(
-                "line {line_no}: {url}: expected {expected:?}, got {actual:?}"
-            ));
-        }
-        cases += 1;
     }
-    assert!(cases > 0, "no cases in fixtures/provider_urls.txt");
+    assert!(cases > 0, "no cases in fixtures/provider_urls.toml");
     assert!(
         failures.is_empty(),
         "{} of {cases} cases failed:\n{}",

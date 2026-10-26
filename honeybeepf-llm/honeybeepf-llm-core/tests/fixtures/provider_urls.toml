@@ -1,0 +1,122 @@
+# Default-registry detection cases, read by tests/providers_config.rs.
+# Each key is the expected provider; `none` lists URLs no provider may match.
+# The host is everything before the first `/`.
+
+openai = [
+  # OpenAI regional domains
+  { url = "us.api.openai.com/v1/chat/completions", reason = "US data residency domain" },
+  { url = "eu.api.openai.com/v1/responses", reason = "EU data residency domain" },
+  { url = "ae.api.openai.com/v1/chat/completions", reason = "UAE data residency domain" },
+
+  # Cloud endpoints: OpenAI-compatible
+  { url = "bedrock-mantle.us-east-2.api.aws/openai/v1/responses", reason = "Bedrock Mantle Responses" },
+  { url = "bedrock-mantle.us-east-1.api.aws/v1/chat/completions", reason = "Bedrock Mantle chat" },
+  { url = "bedrock-mantle.us-east-1.api.aws/openai/v1/chat/completions", reason = "Bedrock Mantle chat under /openai" },
+  { url = "bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions", reason = "Bedrock Runtime OpenAI chat" },
+  { url = "bedrock-runtime.us-east-1.amazonaws.com/openai/v1/responses", reason = "Bedrock Runtime OpenAI Responses" },
+  { url = "myres.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21", reason = "Azure api-version chat" },
+  { url = "myres.openai.azure.com/openai/deployments/gpt-35-turbo-instruct/completions?api-version=2024-10-21", reason = "Azure api-version legacy completions" },
+  { url = "myres.openai.azure.com/openai/responses?api-version=2025-04-01-preview", reason = "Azure api-version Responses" },
+  { url = "myres.openai.azure.com/openai/deployments/gpt-4o/responses?api-version=2025-04-01-preview", reason = "Azure Responses, client bound to a deployment" },
+  { url = "myres.openai.azure.com/openai/v1/chat/completions", reason = "Azure v1 chat" },
+  { url = "myres.openai.azure.com/openai/v1/responses", reason = "Azure v1 Responses" },
+  { url = "myres.services.ai.azure.com/openai/v1/responses", reason = "Foundry v1 Responses" },
+
+  # Foundry: one host serves OpenAI and Anthropic routes, so only the path picks the provider
+  { url = "myres.services.ai.azure.com/openai/v1/chat/completions", reason = "Foundry OpenAI chat" },
+  { url = "myres.services.ai.azure.com/openai/v1/responses", reason = "Foundry OpenAI Responses" },
+
+  # Generation endpoints
+  { url = "api.openai.com/v1/chat/completions", reason = "Chat Completions" },
+  { url = "api.openai.com/v1/completions", reason = "legacy completions" },
+  { url = "api.openai.com/openai/deployments/d1/chat/completions?api-version=2026-10-01", reason = "Azure-style path on any OpenAI host" },
+
+  # Basic detection
+  { url = "api.openai.com/v1/chat/completions", reason = "OpenAI chat" },
+]
+
+anthropic = [
+  # Cloud endpoints: Anthropic
+  { url = "aws-external-anthropic.us-west-2.api.aws/v1/messages", reason = "Claude Platform on AWS" },
+  { url = "bedrock-mantle.us-east-1.api.aws/anthropic/v1/messages", reason = "Bedrock Mantle Anthropic route" },
+  { url = "aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/anthropic/models/claude-opus-5-5:rawPredict", reason = "Vertex Claude, global" },
+  { url = "us-east5-aiplatform.googleapis.com/v1/projects/p/locations/us-east5/publishers/anthropic/models/claude-sonnet-4-6:streamRawPredict", reason = "Vertex Claude, regional stream" },
+  { url = "aiplatform.eu.rep.googleapis.com/v1/projects/p/locations/eu/publishers/anthropic/models/claude-opus-5-5:rawPredict", reason = "Vertex Claude, multi-region" },
+  { url = "claude.googleapis.com/v1/projects/p/locations/global/workspaces/wrkspc_01/invoke/v1/messages", reason = "Claude on Google Cloud" },
+  { url = "myres.services.ai.azure.com/anthropic/v1/messages", reason = "Claude in Microsoft Foundry" },
+
+  # Foundry: one host serves OpenAI and Anthropic routes, so only the path picks the provider
+  { url = "myres.services.ai.azure.com/anthropic/v1/messages", reason = "Foundry Anthropic route" },
+  { url = "myres.services.ai.azure.com/anthropic/v1/messages/", reason = "trailing slash" },
+
+  # Generation endpoints
+  { url = "api.anthropic.com/v1/messages", reason = "Messages" },
+  { url = "api.anthropic.com/v1/messages?beta=true", reason = "query ignored by the anchor" },
+  { url = "api.anthropic.com/v1/messages/", reason = "trailing slash" },
+  { url = "api.anthropic.com/anthropic/v1/messages", reason = "proxy prefix" },
+]
+
+bedrock = [
+  # Cloud endpoints: Bedrock Runtime native
+  { url = "bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-sonnet-20240229-v1:0/converse", reason = "Converse" },
+  { url = "bedrock-runtime.us-east-1.amazonaws.com/model/us.anthropic.claude-3-5-sonnet-20240620-v1%3A0/invoke", reason = "InvokeModel, Anthropic model, encoded colon" },
+]
+
+gemini = [
+  # Cloud endpoints: Gemini on Vertex AI
+  { url = "us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/gemini-3.5-flash:generateContent", reason = "regional" },
+  { url = "aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/google/models/gemini-3.5-flash:streamGenerateContent?alt=sse", reason = "global stream" },
+  { url = "aiplatform.us.rep.googleapis.com/v1/projects/p/locations/us/publishers/google/models/gemini-3.5-flash:generateContent", reason = "multi-region" },
+
+  # Basic detection
+  { url = "generativelanguage.googleapis.com/v1/models/gemini:generateContent", reason = "Gemini API" },
+  { url = "generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse", reason = "Gemini stream; path match is case-sensitive" },
+]
+
+none = [
+  # Other services under the same parent domains
+  { url = "ec2.us-east-1.api.aws/v1/messages", reason = "other api.aws service" },
+  { url = "bedrock-mantle.us-east-1.api.aws.example.com/v1/messages", reason = "wildcard host must cover the whole host" },
+  { url = "bedrock.us-east-1.amazonaws.com/model/anthropic.claude-x/invoke", reason = "Bedrock control plane" },
+  { url = "bedrock-agent-runtime.us-east-1.amazonaws.com/model/anthropic.claude-x/converse", reason = "Bedrock Agents" },
+  { url = "storage.googleapis.com/v1/b/models:generateContent", reason = "other googleapis.com service" },
+
+  # Non-generation routes on LLM hosts
+  { url = "bedrock-mantle.us-east-1.api.aws/anthropic/v1/messages/count_tokens", reason = "token counting" },
+  { url = "bedrock-mantle.us-east-1.api.aws/v1/models", reason = "model list" },
+  { url = "aws-external-anthropic.us-west-2.api.aws/v1/messages/batches", reason = "batches" },
+  { url = "bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-x/invoke-with-response-stream", reason = "binary eventstream" },
+  { url = "bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-x/converse-stream", reason = "binary eventstream" },
+  { url = "bedrock-runtime.us-east-1.amazonaws.com/model/amazon.titan-text-express-v1/invoke", reason = "non-Anthropic InvokeModel body" },
+  { url = "bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-x/count-tokens", reason = "token counting" },
+  { url = "us-east5-aiplatform.googleapis.com/v1/projects/p/locations/us-east5/publishers/anthropic/models/count-tokens:rawPredict", reason = "Vertex Claude token counting" },
+  { url = "us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/endpoints/123:rawPredict", reason = "Vertex custom endpoint" },
+  { url = "us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/gemini-3.5-flash:countTokens", reason = "Gemini token counting" },
+  { url = "myres.openai.azure.com/openai/deployments/d1/embeddings?api-version=2024-10-21", reason = "Azure embeddings" },
+  { url = "myres.openai.azure.com/openai/deployments/d1/audio/transcriptions?api-version=2024-10-21", reason = "Azure audio" },
+  { url = "myres.openai.azure.com/openai/v1/responses/resp_1", reason = "Azure v1 Responses retrieval" },
+  { url = "myres.openai.azure.com/openai/responses/resp_1?api-version=2025-04-01-preview", reason = "Azure api-version Responses retrieval" },
+  { url = "myres.openai.azure.com/openai/deployments/gpt-4o/responses/resp_1/cancel?api-version=2025-04-01-preview", reason = "Azure Responses cancel" },
+  { url = "myres.openai.azure.com/openai/deployments/d1/completions/x?api-version=2024-10-21", reason = "path continues after /completions" },
+  { url = "claude.googleapis.com/v1/projects/p/locations/global/workspaces/wrkspc_01/invoke/v1/messages/count_tokens", reason = "token counting" },
+  { url = "claude.googleapis.com/v1/projects/p/locations/global/workspaces/wrkspc_01/invoke/v1/messages/batches", reason = "batches" },
+  { url = "claude.googleapis.com/v1/projects/p/locations/global/workspaces/wrkspc_01/invoke/v1/models", reason = "model list" },
+  { url = "claude.googleapis.com/v1/projects/p/locations/global/claudeOrganization/invoke/v1/organizations/users", reason = "admin API" },
+  { url = "claude.googleapis.com/v1/projects/p/locations/global/publishers/google/models/gemini-3.5-flash:generateContent", reason = "Gemini path on the Claude host" },
+  { url = "myres.services.ai.azure.com/anthropic/v1/messages/count_tokens", reason = "Foundry token counting" },
+
+  # Responses retrieval
+  { url = "api.openai.com/v1/responses/resp_123", reason = "GET a stored response" },
+  { url = "api.openai.com/v1/responses/resp_123/input_items", reason = "list input items" },
+  { url = "api.openai.com/v1/responses/resp_123/cancel", reason = "cancel a background response" },
+
+  # Non-generation endpoints
+  { url = "api.anthropic.com/v1/messages/count_tokens", reason = "token counting" },
+  { url = "api.anthropic.com/v1/messages/count_tokens?beta=true", reason = "token counting with query" },
+  { url = "api.anthropic.com/v1/messages/batches", reason = "create a batch" },
+  { url = "api.anthropic.com/v1/messages/batches/msgbatch_01", reason = "batch status" },
+  { url = "api.anthropic.com/v1/messages/batches/msgbatch_01/results", reason = "batch results" },
+  { url = "api.anthropic.com/v1/messages/batches/msgbatch_01/cancel", reason = "batch cancel" },
+  { url = "api.openai.com/v1/chat/completions/chatcmpl-abc123", reason = "stored completion" },
+  { url = "api.openai.com/v1/chat/completions/chatcmpl-abc123/messages", reason = "stored completion messages" },
+]
