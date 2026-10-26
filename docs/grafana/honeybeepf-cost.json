@@ -85,7 +85,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (target_namespace) (rate(honeybeepf_llm_requests_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
+          "expr": "sum by (target_namespace) (rate(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
           "legendFormat": "{{ target_namespace }}",
           "refId": "A"
         }
@@ -143,7 +143,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (target_namespace) (rate(honeybeepf_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
+          "expr": "sum by (target_namespace) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
           "legendFormat": "{{ target_namespace }}",
           "refId": "A"
         }
@@ -193,7 +193,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (target_namespace) (increase(honeybeepf_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[5m]))",
+          "expr": "sum by (target_namespace) (increase(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[5m]))",
           "legendFormat": "{{ target_namespace }}",
           "refId": "A"
         }
@@ -276,7 +276,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (target_namespace, token_type) (rate(honeybeepf_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
+          "expr": "sum by (target_namespace, token_type) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
           "legendFormat": "{{ target_namespace }} ({{ token_type }})",
           "refId": "A"
         }
@@ -351,17 +351,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (target_namespace, le) (rate(honeybeepf_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])))",
+          "expr": "histogram_quantile(0.50, sum by (target_namespace, le) (rate(honeybeepf_llm_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])))",
           "legendFormat": "{{ target_namespace }} p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (target_namespace, le) (rate(honeybeepf_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])))",
+          "expr": "histogram_quantile(0.95, sum by (target_namespace, le) (rate(honeybeepf_llm_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])))",
           "legendFormat": "{{ target_namespace }} p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (target_namespace, le) (rate(honeybeepf_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])))",
+          "expr": "histogram_quantile(0.99, sum by (target_namespace, le) (rate(honeybeepf_llm_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])))",
           "legendFormat": "{{ target_namespace }} p99",
           "refId": "C"
         }
@@ -419,7 +419,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (model) (rate(honeybeepf_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
+          "expr": "sum by (model) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
           "legendFormat": "{{ model }}",
           "refId": "A"
         }
@@ -476,7 +476,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (model) (rate(honeybeepf_llm_requests_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
+          "expr": "sum by (model) (rate(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
           "legendFormat": "{{ model }}",
           "refId": "A"
         }
@@ -526,7 +526,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(honeybeepf_llm_requests_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[5m]))",
+          "expr": "sum(increase(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[5m]))",
           "legendFormat": "Total",
           "refId": "A"
         }
@@ -576,7 +576,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(honeybeepf_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[5m]))",
+          "expr": "sum(increase(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[5m]))",
           "legendFormat": "Total",
           "refId": "A"
         }
@@ -622,7 +622,7 @@
       },
       "targets": [
         {
-          "expr": "sum(honeybeepf_active_probes)",
+          "expr": "sum(honeybeepf_llm_active_probes)",
           "legendFormat": "Probes",
           "refId": "A"
         }
@@ -691,7 +691,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (target_namespace, target_pod_name) (rate(honeybeepf_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
+          "expr": "sum by (target_namespace, target_pod_name) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
           "legendFormat": "{{ target_namespace }} / {{ target_pod_name }}",
           "refId": "A"
         }
@@ -743,7 +743,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (target_namespace, target_pod_name, le) (rate(honeybeepf_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])))",
+          "expr": "histogram_quantile(0.95, sum by (target_namespace, target_pod_name, le) (rate(honeybeepf_llm_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])))",
           "legendFormat": "{{ target_namespace }} / {{ target_pod_name }}",
           "refId": "A"
         }
@@ -803,7 +803,7 @@
       },
       "targets": [
         {
-          "expr": "topk(10, sum by (target_namespace, target_pod_name) (increase(honeybeepf_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[5m])))",
+          "expr": "topk(10, sum by (target_namespace, target_pod_name) (increase(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[5m])))",
           "legendFormat": "{{ target_namespace }} / {{ target_pod_name }}",
           "refId": "A"
         }
@@ -849,14 +849,14 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(honeybeepf_llm_requests_total, target_namespace)",
+        "definition": "label_values(honeybeepf_llm_llm_requests_total, target_namespace)",
         "hide": 0,
         "includeAll": true,
         "label": "Team",
         "multi": true,
         "name": "team",
         "options": [],
-        "query": "label_values(honeybeepf_llm_requests_total, target_namespace)",
+        "query": "label_values(honeybeepf_llm_llm_requests_total, target_namespace)",
         "refresh": 2,
         "sort": 1,
         "type": "query"
@@ -875,14 +875,14 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(honeybeepf_llm_requests_total{target_namespace=~\"$team\"}, target_pod_name)",
+        "definition": "label_values(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\"}, target_pod_name)",
         "hide": 0,
         "includeAll": true,
         "label": "Pod",
         "multi": true,
         "name": "pod",
         "options": [],
-        "query": "label_values(honeybeepf_llm_requests_total{target_namespace=~\"$team\"}, target_pod_name)",
+        "query": "label_values(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\"}, target_pod_name)",
         "refresh": 2,
         "sort": 1,
         "type": "query"
@@ -901,14 +901,14 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(honeybeepf_llm_requests_total{target_namespace=~\"$team\"}, model)",
+        "definition": "label_values(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\"}, model)",
         "hide": 0,
         "includeAll": true,
         "label": "Model",
         "multi": true,
         "name": "model",
         "options": [],
-        "query": "label_values(honeybeepf_llm_requests_total{target_namespace=~\"$team\"}, model)",
+        "query": "label_values(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\"}, model)",
         "refresh": 2,
         "sort": 1,
         "type": "query"

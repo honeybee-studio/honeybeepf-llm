@@ -80,7 +80,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (target_namespace, target_pod_name, filename) (rate(honeybeepf_file_access_events_total{process=~\"$process\"}[1m])) * 60",
+          "expr": "sum by (target_namespace, target_pod_name, filename) (rate(honeybeepf_llm_file_access_events_total{process=~\"$process\"}[1m])) * 60",
           "legendFormat": "{{ target_namespace }}/{{ target_pod_name }} — {{ filename }}",
           "refId": "A"
         }
@@ -130,7 +130,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (target_namespace) (increase(honeybeepf_file_access_events_total{process=~\"$process\"}[5m]))",
+          "expr": "sum by (target_namespace) (increase(honeybeepf_llm_file_access_events_total{process=~\"$process\"}[5m]))",
           "legendFormat": "{{ target_namespace }}",
           "refId": "A"
         }
@@ -257,7 +257,7 @@
       ],
       "targets": [
         {
-          "expr": "topk(10, sum by (target_namespace, target_pod_name, filename, process, flags) (increase(honeybeepf_file_access_events_total{process=~\"$process\"}[5m])))",
+          "expr": "topk(10, sum by (target_namespace, target_pod_name, filename, process, flags) (increase(honeybeepf_llm_file_access_events_total{process=~\"$process\"}[5m])))",
           "format": "table",
           "instant": true,
           "refId": "A"
@@ -321,12 +321,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (target_namespace) (rate(honeybeepf_llm_requests_total[1m])) * 60",
+          "expr": "sum by (target_namespace) (rate(honeybeepf_llm_llm_requests_total[1m])) * 60",
           "legendFormat": "{{ target_namespace }} (LLM calls)",
           "refId": "A"
         },
         {
-          "expr": "sum by (target_namespace) (rate(honeybeepf_file_access_events_total[1m])) * 60",
+          "expr": "sum by (target_namespace) (rate(honeybeepf_llm_file_access_events_total[1m])) * 60",
           "legendFormat": "{{ target_namespace }} (File access)",
           "refId": "B"
         }
@@ -384,7 +384,7 @@
       },
       "targets": [
         {
-          "expr": "topk(10, sum by (filename) (increase(honeybeepf_file_access_events_total{process=~\"$process\"}[5m])))",
+          "expr": "topk(10, sum by (filename) (increase(honeybeepf_llm_file_access_events_total{process=~\"$process\"}[5m])))",
           "legendFormat": "{{ filename }}",
           "refId": "A"
         }
@@ -446,7 +446,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(honeybeepf_file_access_events_total{process=~\"$process\"}[5m]))",
+          "expr": "sum(increase(honeybeepf_llm_file_access_events_total{process=~\"$process\"}[5m]))",
           "legendFormat": "Events",
           "refId": "A"
         }
@@ -496,7 +496,7 @@
       },
       "targets": [
         {
-          "expr": "count(count by (filename) (increase(honeybeepf_file_access_events_total{process=~\"$process\"}[5m]) > 0))",
+          "expr": "count(count by (filename) (increase(honeybeepf_llm_file_access_events_total{process=~\"$process\"}[5m]) > 0))",
           "legendFormat": "Files",
           "refId": "A"
         }
@@ -542,7 +542,7 @@
       },
       "targets": [
         {
-          "expr": "sum(honeybeepf_active_probes)",
+          "expr": "sum(honeybeepf_llm_active_probes)",
           "legendFormat": "Probes",
           "refId": "A"
         }
@@ -588,14 +588,14 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(honeybeepf_file_access_events_total, process)",
+        "definition": "label_values(honeybeepf_llm_file_access_events_total, process)",
         "hide": 0,
         "includeAll": true,
         "label": "Process",
         "multi": true,
         "name": "process",
         "options": [],
-        "query": "label_values(honeybeepf_file_access_events_total, process)",
+        "query": "label_values(honeybeepf_llm_file_access_events_total, process)",
         "refresh": 2,
         "sort": 1,
         "type": "query"

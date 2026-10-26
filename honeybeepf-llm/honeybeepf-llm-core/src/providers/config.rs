@@ -40,6 +40,7 @@ fn openai_chat() -> ProviderConfig {
         paths: vec![
             "/chat/completions$".to_string(),
             "/v1/completions$".to_string(),
+            "/deployments/*/completions$".to_string(), // Azure api-version route
         ],
         response: ResponseConfig {
             usage_path: "usage".to_string(),
@@ -56,12 +57,17 @@ fn openai_chat() -> ProviderConfig {
 
 // Responses API. Usage parsing tries providers in order without a host check and anthropic
 // has the same input/output_tokens keys; only Responses usage carries input_tokens_details.
-// `$` keeps GET /v1/responses/{id} out.
+// `$` keeps GET /v1/responses/{id} out. Azure api-version clients post to /openai/responses, or under
+// /deployments/{d} when the client is bound to a deployment.
 fn openai_responses() -> ProviderConfig {
     ProviderConfig {
         name: "openai".to_string(),
         hosts: to_strings(OPENAI_HOSTS),
-        paths: vec!["/v1/responses$".to_string()],
+        paths: vec![
+            "/v1/responses$".to_string(),
+            "/openai/responses$".to_string(),
+            "/deployments/*/responses$".to_string(),
+        ],
         response: ResponseConfig {
             usage_path: "usage".to_string(),
             prompt_tokens: "input_tokens".to_string(),
@@ -115,6 +121,7 @@ fn gemini() -> ProviderConfig {
             completion_tokens: "candidatesTokenCount".to_string(),
             completion_optional: true,
             thoughts_tokens: Some("thoughtsTokenCount".to_string()),
+            completion_excludes_thoughts: true,
             cache_read_tokens: Some("cachedContentTokenCount".to_string()),
             model_path: "modelVersion".to_string(),
             ..ResponseConfig::default()
@@ -199,6 +206,10 @@ pub struct ResponseConfig {
     /// Optional: field name for thinking/reasoning tokens
     pub thoughts_tokens: Option<String>,
 
+    /// Whether `completion_tokens` leaves out thinking tokens (Gemini), so the output total adds them back
+    #[serde(default)]
+    pub completion_excludes_thoughts: bool,
+
     /// Optional: field name for prompt tokens read from the provider cache
     #[serde(alias = "cached_tokens")]
     pub cache_read_tokens: Option<String>,
@@ -239,6 +250,7 @@ impl Default for ResponseConfig {
             completion_tokens: default_completion_tokens(),
             completion_optional: false,
             thoughts_tokens: None,
+            completion_excludes_thoughts: false,
             cache_read_tokens: None,
             cache_write_tokens: None,
             prompt_excludes_cache: false,

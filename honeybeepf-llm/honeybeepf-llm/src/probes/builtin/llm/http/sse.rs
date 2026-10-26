@@ -6,10 +6,9 @@ use honeybeepf_llm_core::types::{SseChunkDelta, UsageInfo};
 
 use super::body::{is_responses_event, parse_response_json_value};
 
-/// End-of-stream markers: OpenAI `[DONE]`/`finish_reason`, Anthropic `message_stop`, Gemini `finishReason`
+/// End-of-stream markers: OpenAI `finish_reason`, Anthropic `message_stop`, Gemini `finishReason`
 /// or prompt `blockReason`, OpenAI Responses terminal event types.
-const SSE_END_MARKERS: [&str; 8] = [
-    "data: [DONE]",
+const SSE_END_MARKERS: [&str; 7] = [
     "\"finish_reason\"",
     "\"message_stop\"",
     "\"finishReason\"",
@@ -24,7 +23,9 @@ pub(super) fn parse_sse_body(body: &[u8]) -> Option<UsageInfo> {
     // Only complete lines count: a partial last event can show its end marker before its usage.
     let text = text.rfind('\n').map_or("", |end| &text[..end]);
 
-    if !SSE_END_MARKERS.iter().any(|m| text.contains(m)) {
+    // `[DONE]` counts only as its own line: generated text can quote it unescaped inside a JSON string.
+    let done = text.lines().any(|line| line.trim() == "data: [DONE]");
+    if !done && !SSE_END_MARKERS.iter().any(|m| text.contains(m)) {
         return None;
     }
 
@@ -129,6 +130,38 @@ mod tests {
         );
         let info = Http11Parser.parse_response(&http11_sse(body));
         assert_eq!(tokens(info), Some((25, 15)));
+    }
+
+    const DONE_IN_TEXT: &str = "The stream ends with data: [DONE]";
+
+    #[test]
+    fn anthropic_sse_text_quoting_done_waits_for_message_stop() {
+        let start = format!(
+            "event: message_start\n\
+             data: {{\"type\":\"message_start\",\"message\":{{\"id\":\"m1\",\"model\":\"claude-test\",\"usage\":{{\"input_tokens\":25,\"output_tokens\":1}}}}}}\n\n\
+             event: content_block_delta\n\
+             data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{DONE_IN_TEXT}\"}}}}\n\n"
+        );
+        let info = Http11Parser.parse_response(&http11_sse(&start));
+        assert_eq!(tokens(info), None);
+
+        let full = format!(
+            "{start}event: message_delta\n\
+             data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":15}}}}\n\n\
+             event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+        );
+        let info = Http11Parser.parse_response(&http11_sse(&full));
+        assert_eq!(tokens(info), Some((25, 15)));
+    }
+
+    #[test]
+    fn gemini_sse_text_quoting_done_is_incomplete() {
+        let body = format!(
+            "data: {{\"candidates\":[{{\"content\":{{\"parts\":[{{\"text\":\"{DONE_IN_TEXT}\"}}]}}}}],\
+             \"usageMetadata\":{{\"promptTokenCount\":7,\"candidatesTokenCount\":2}},\"modelVersion\":\"gemini-test\"}}\r\n\r\n"
+        );
+        let info = Http11Parser.parse_response(&http11_sse(&body));
+        assert_eq!(tokens(info), None);
     }
 
     #[test]

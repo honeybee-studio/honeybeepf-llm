@@ -275,8 +275,10 @@ impl StreamProcessor {
             // Don't buffer responses if we haven't detected a valid LLM request yet
             ProcessorState::Detecting => {
                 // The server is answering a non-LLM request; the next request must not sit behind it.
+                // An HTTP/1.x status line also covers upload body writes left over after detection gave up.
                 if !self.write_buf.is_empty()
-                    && http::Http11Parser::is_request_head(&self.write_buf)
+                    && (data.starts_with(b"HTTP/1.")
+                        || http::Http11Parser::is_request_head(&self.write_buf))
                 {
                     self.write_buf.clear();
                 }
@@ -350,11 +352,9 @@ fn record_usage(
     let is_error = usage.prompt_tokens == 0 && usage.completion_tokens == 0;
 
     crate::telemetry::record_llm_request(
+        usage,
         model_str,
         latency_secs,
-        usage.prompt_tokens,
-        usage.completion_tokens,
-        (usage.cache_read_tokens, usage.cache_write_tokens),
         is_error,
         #[cfg(feature = "k8s")]
         pod_info.as_ref(),
@@ -594,6 +594,75 @@ mod tests {
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
     }
 
+    /// A multipart upload whose last body writes land after detection gave up at 4 KB, as httpx sends it.
+    fn upload(p: &mut StreamProcessor, expect_continue: bool) -> Vec<Outcome> {
+        let head = format!(
+            "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: api.openai.com\r\n\
+             Content-Type: multipart/form-data; boundary=b0\r\nContent-Length: 66614\r\n{}\r\n",
+            if expect_continue {
+                "Expect: 100-continue\r\n"
+            } else {
+                ""
+            }
+        );
+        let mut out = send(p, LlmDirection::Write, head.as_bytes(), None);
+        if expect_continue {
+            out.extend(send(
+                p,
+                LlmDirection::Read,
+                b"HTTP/1.1 100 Continue\r\n\r\n",
+                None,
+            ));
+        }
+        let part =
+            b"--b0\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\r\n";
+        for body in [&part[..], &[0xAB; 65536], &[0xCD; 1000], b"\r\n--b0--\r\n"] {
+            out.extend(send(p, LlmDirection::Write, body, None));
+        }
+        out.extend(send(
+            p,
+            LlmDirection::Read,
+            &h1("application/json", r#"{"text":"hello"}"#),
+            None,
+        ));
+        out
+    }
+
+    #[test]
+    fn test_calls_after_upload_are_recorded() {
+        use std::io::Write as _;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(MESSAGES_RESPONSE.as_bytes()).expect("gzip");
+        let body = gz.finish().expect("gzip");
+        let gzip = [
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\n\
+                 Content-Length: {}\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+            &body,
+        ]
+        .concat();
+        for expect_continue in [false, true] {
+            let mut p = StreamProcessor::new();
+            let mut out = upload(&mut p, expect_continue);
+            for response in [&gzip, &h1("application/json", MESSAGES_RESPONSE)] {
+                out.extend(exchange(&mut p, MESSAGES_REQUEST, response));
+            }
+            assert_eq!(
+                count(&out, Outcome::Recorded),
+                2,
+                "{expect_continue}: {out:?}"
+            );
+            assert_eq!(
+                count(&out, Outcome::Unparsed),
+                0,
+                "{expect_continue}: {out:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_stored_completion_retrieval_is_not_recorded() {
         let mut p = StreamProcessor::new();
@@ -670,7 +739,8 @@ mod tests {
             None,
         ));
         out.extend(send(&mut p, LlmDirection::Write, body, None));
-        let event = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n";
+        let event =
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
         let chunked = format!("{:x}\r\n{event}\r\n0\r\n\r\n", event.len());
         for r in [
             &b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"[..],
@@ -684,6 +754,30 @@ mod tests {
             &h1("application/json", MESSAGES_RESPONSE),
         ));
         assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+    }
+
+    #[test]
+    fn test_streamed_response_after_100_continue_is_recorded() {
+        let mut p = StreamProcessor::new();
+        let (head, body) = REQUEST.split_at(REQUEST.len() - 27);
+        let mut out = send(&mut p, LlmDirection::Write, head, None);
+        out.extend(send(
+            &mut p,
+            LlmDirection::Read,
+            b"HTTP/1.1 100 Continue\r\n\r\n",
+            None,
+        ));
+        out.extend(send(&mut p, LlmDirection::Write, body, None));
+        let event = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n";
+        let chunked = format!("{:x}\r\n{event}\r\n0\r\n\r\n", event.len());
+        for r in [
+            &b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"[..],
+            chunked.as_bytes(),
+        ] {
+            out.extend(send(&mut p, LlmDirection::Read, r, None));
+        }
+        assert_eq!(count(&out, Outcome::Unparsed), 0, "{out:?}");
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
     }
 
@@ -736,5 +830,83 @@ mod tests {
         ));
         assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+    }
+
+    #[test]
+    fn test_chunk_larger_than_response_buffer_frees_next_request() {
+        for size in ["2000000", "ffffffffffffffff"] {
+            let mut p = StreamProcessor::new();
+            let garbled = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n\
+                 {size}\r\n{{}}\r\n0\r\n\r\n"
+            );
+            let mut out = exchange(&mut p, MESSAGES_REQUEST, garbled.as_bytes());
+            out.extend(exchange(
+                &mut p,
+                MESSAGES_REQUEST,
+                &h1("application/json", MESSAGES_RESPONSE),
+            ));
+            assert_eq!(count(&out, Outcome::Unparsed), 1, "{size}: {out:?}");
+            assert_eq!(out.last(), Some(&Outcome::Recorded), "{size}: {out:?}");
+        }
+    }
+
+    thread_local! {
+        static LOGS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+
+    /// Keeps every record at every level, per thread so parallel tests don't mix their output.
+    struct CaptureLogger;
+
+    impl log::Log for CaptureLogger {
+        fn enabled(&self, _: &log::Metadata) -> bool {
+            true
+        }
+
+        fn log(&self, r: &log::Record) {
+            let line = format!("{} {}\n", r.level(), r.args());
+            LOGS.with(|logs| logs.borrow_mut().push_str(&line));
+        }
+
+        fn flush(&self) {}
+    }
+
+    static LOGGER: CaptureLogger = CaptureLogger;
+
+    #[test]
+    fn test_credentials_stay_out_of_logs() {
+        log::set_logger(&LOGGER).expect("no other logger in the test binary");
+        log::set_max_level(log::LevelFilter::Trace);
+        // Fake keys carry HBTEST; the query and header forms are how Gemini and SigV4 send them.
+        let gemini = "AIzaSyHBTEST0gemini0000000000000000000";
+        let presigned = "X-Amz-Credential=AKIAHBTEST0000000000%2F20261023%2Fus-east-1%2Fbedrock%2Faws4_request\
+                         &X-Amz-Security-Token=HBTEST0token&X-Amz-Signature=HBTEST0signature";
+        let openai = "sk-proj-HBTEST0openai00000000000000000000000000";
+        let requests = [
+            format!(
+                "POST /v1beta/models/gemini-2.5-flash:generateContent?key={gemini} HTTP/1.1\r\n\
+                     Host: generativelanguage.googleapis.com\r\nx-goog-api-key: {gemini}\r\n\r\n{{}}"
+            ),
+            format!(
+                "POST /model/anthropic.claude-sonnet-5-5-v1:0/converse?{presigned} HTTP/1.1\r\n\
+                     Host: bedrock-runtime.us-east-1.amazonaws.com\r\n\r\n{{}}"
+            ),
+            format!(
+                "POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer {openai}\r\n\r\n\
+                     {{\"messages\":[{{\"role\":\"user\",\"content\":\"{openai}\"}}]}}"
+            ),
+        ];
+        let response = h1(
+            "application/json",
+            r#"{"model":"m","usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
+        );
+        for request in &requests {
+            LOGS.with(|logs| logs.borrow_mut().clear());
+            let out = exchange(&mut StreamProcessor::new(), request.as_bytes(), &response);
+            let logs = LOGS.with(|logs| logs.take());
+            assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+            assert!(logs.contains("[LLM] Detected"), "{logs}");
+            assert!(!logs.contains("HBTEST"), "{logs}");
+        }
     }
 }
