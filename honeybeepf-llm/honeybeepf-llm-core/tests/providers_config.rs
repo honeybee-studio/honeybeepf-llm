@@ -142,6 +142,9 @@ fn test_find_provider_cloud_endpoints() {
                 "myres.openai.azure.com/openai/v1/chat/completions",
                 "myres.openai.azure.com/openai/v1/responses",
                 "myres.services.ai.azure.com/openai/v1/responses",
+                "myres.openai.azure.com/openai/responses/compact?api-version=2025-04-01-preview",
+                "myres.openai.azure.com/openai/deployments/gpt-4o/responses/compact?api-version=2025-04-01-preview",
+                "myres.services.ai.azure.com/openai/v1/responses/compact",
             ],
         ),
         (
@@ -248,6 +251,11 @@ fn test_find_provider_openai_responses() {
         "/openai/v1/responses",
         "/openai/responses?api-version=2025-04-01-preview",
         "/openai/deployments/gpt-4o/responses?api-version=2025-04-01-preview",
+        "/v1/responses/compact",
+        "/v1/responses/compact/",
+        "/openai/v1/responses/compact",
+        "/openai/responses/compact?api-version=2025-04-01-preview",
+        "/openai/deployments/gpt-4o/responses/compact?api-version=2025-04-01-preview",
     ] {
         let p = registry.find_provider("api.openai.com", path);
         assert_eq!(p.map(|p| p.name.as_str()), Some("openai"), "{path}");
@@ -266,6 +274,12 @@ fn test_find_provider_skips_responses_retrieval() {
         "/v1/responses/resp_123",
         "/v1/responses/resp_123/input_items",
         "/v1/responses/resp_123/cancel",
+        "/v1/responses/input_tokens",
+        "/openai/v1/responses/input_tokens",
+        "/openai/responses/input_tokens?api-version=2025-04-01-preview",
+        "/openai/deployments/gpt-4o/responses/input_tokens?api-version=2025-04-01-preview",
+        "/v1/responses/compact/resp_123",
+        "/v1/responses/resp_123/compact",
     ] {
         assert!(
             registry.find_provider("api.openai.com", path).is_none(),
