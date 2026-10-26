@@ -57,8 +57,8 @@ fn openai_chat() -> ProviderConfig {
 
 // Responses API. Usage parsing tries providers in order without a host check and anthropic
 // has the same input/output_tokens keys; only Responses usage carries input_tokens_details.
-// `$` keeps GET /v1/responses/{id} out. Azure api-version clients post to /openai/responses, or under
-// /deployments/{d} when the client is bound to a deployment.
+// `$` keeps GET /v1/responses/{id} and the unbilled /responses/input_tokens out; /compact is billed.
+// Azure api-version clients post to /openai/responses, or under /deployments/{d} when bound to one.
 fn openai_responses() -> ProviderConfig {
     ProviderConfig {
         name: "openai".to_string(),
@@ -67,6 +67,9 @@ fn openai_responses() -> ProviderConfig {
             "/v1/responses$".to_string(),
             "/openai/responses$".to_string(),
             "/deployments/*/responses$".to_string(),
+            "/v1/responses/compact$".to_string(),
+            "/openai/responses/compact$".to_string(),
+            "/deployments/*/responses/compact$".to_string(),
         ],
         response: ResponseConfig {
             usage_path: "usage".to_string(),

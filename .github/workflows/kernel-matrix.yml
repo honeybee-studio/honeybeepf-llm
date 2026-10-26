@@ -81,7 +81,7 @@ jobs:
 
       - run: chmod +x bin/honeybeepf-llm
 
-      - uses: cilium/little-vm-helper@e249f34602b03d331320955be94cbaa2cc4fb6a8 # v0.0.29
+      - uses: cilium/little-vm-helper@f86d344aca812dda5aef167867a9a0a90ca6cca5 # v0.0.31
         with:
           test-name: smoke-${{ matrix.kernel }}
           image: 'kind'

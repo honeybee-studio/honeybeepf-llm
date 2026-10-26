@@ -172,6 +172,31 @@ fn test_messages_after_count_tokens_is_recorded() {
 }
 
 #[test]
+fn test_responses_compact_after_input_tokens_is_recorded() {
+    let input_tokens = b"POST /v1/responses/input_tokens HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"gpt-6\",\"input\":\"Hello\"}";
+    let compact = b"POST /v1/responses/compact HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"gpt-6\",\"input\":\"Hello\"}";
+    let compacted = h1(
+        "application/json",
+        r#"{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","id":"cmp_1","encrypted_content":"e"}],"created_at":1731459200,"usage":{"input_tokens":1200,"input_tokens_details":{"cached_tokens":1024},"output_tokens":300,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":1500}}"#,
+    );
+    let mut p = StreamProcessor::new();
+    let mut out = exchange(
+        &mut p,
+        input_tokens,
+        &h1(
+            "application/json",
+            r#"{"object":"response.input_tokens","input_tokens":11}"#,
+        ),
+    );
+    out.extend(exchange(&mut p, compact, &compacted));
+    // Head and body in one read.
+    out.extend(send(&mut p, LlmDirection::Write, compact, None));
+    out.extend(send(&mut p, LlmDirection::Read, &compacted, None));
+    assert_eq!(count(&out, Outcome::Recorded), 2, "{out:?}");
+    assert_eq!(count(&out, Outcome::Unparsed), 0, "{out:?}");
+}
+
+#[test]
 fn test_chat_after_non_llm_request_is_recorded() {
     let mut p = StreamProcessor::new();
     let embeddings = b"POST /v1/embeddings HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"text-embedding-3-small\",\"input\":\"hi\"}";
