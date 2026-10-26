@@ -329,6 +329,12 @@ mod tests {
             "claude.googleapis.com/v1/projects/p/locations/global/workspaces/w/invoke/v1/messages"
         ));
         assert!(detect("myres.services.ai.azure.com/anthropic/v1/messages"));
+        assert!(detect(
+            "myres.openai.azure.com/openai/responses?api-version=2025-04-01-preview"
+        ));
+        assert!(detect(
+            "myres.openai.azure.com/openai/deployments/d1/completions?api-version=2024-10-21"
+        ));
         assert!(!detect("ec2.us-west-2.api.aws/v1/messages"));
     }
 

@@ -136,6 +136,9 @@ fn test_find_provider_cloud_endpoints() {
                 "bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions",
                 "bedrock-runtime.us-east-1.amazonaws.com/openai/v1/responses",
                 "myres.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21",
+                "myres.openai.azure.com/openai/deployments/gpt-35-turbo-instruct/completions?api-version=2024-10-21",
+                "myres.openai.azure.com/openai/responses?api-version=2025-04-01-preview",
+                "myres.openai.azure.com/openai/deployments/gpt-4o/responses?api-version=2025-04-01-preview",
                 "myres.openai.azure.com/openai/v1/chat/completions",
                 "myres.openai.azure.com/openai/v1/responses",
                 "myres.services.ai.azure.com/openai/v1/responses",
@@ -189,6 +192,9 @@ fn test_find_provider_skips_similar_cloud_calls() {
         "myres.openai.azure.com/openai/deployments/d1/embeddings?api-version=2024-10-21",
         "myres.openai.azure.com/openai/deployments/d1/audio/transcriptions?api-version=2024-10-21",
         "myres.openai.azure.com/openai/v1/responses/resp_1",
+        "myres.openai.azure.com/openai/responses/resp_1?api-version=2025-04-01-preview",
+        "myres.openai.azure.com/openai/deployments/gpt-4o/responses/resp_1/cancel?api-version=2025-04-01-preview",
+        "myres.openai.azure.com/openai/deployments/d1/completions/x?api-version=2024-10-21",
         "claude.googleapis.com/v1/projects/p/locations/global/workspaces/wrkspc_01/invoke/v1/messages/count_tokens",
         "claude.googleapis.com/v1/projects/p/locations/global/workspaces/wrkspc_01/invoke/v1/messages/batches",
         "claude.googleapis.com/v1/projects/p/locations/global/workspaces/wrkspc_01/invoke/v1/models",
@@ -240,6 +246,8 @@ fn test_find_provider_openai_responses() {
         "/v1/responses",
         "/v1/responses?stream=true",
         "/openai/v1/responses",
+        "/openai/responses?api-version=2025-04-01-preview",
+        "/openai/deployments/gpt-4o/responses?api-version=2025-04-01-preview",
     ] {
         let p = registry.find_provider("api.openai.com", path);
         assert_eq!(p.map(|p| p.name.as_str()), Some("openai"), "{path}");
