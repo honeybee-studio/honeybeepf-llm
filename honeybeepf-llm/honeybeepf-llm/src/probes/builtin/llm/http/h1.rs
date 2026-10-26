@@ -251,6 +251,17 @@ mod tests {
     }
 
     #[test]
+    fn responses_compact_is_detected_but_input_tokens_is_not() {
+        let compact = b"POST /v1/responses/compact HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{\"model\":\"gpt-6\",\"input\":\"hi\"}";
+        assert_eq!(
+            Http11Parser.detect_request(compact).as_deref(),
+            Some("/v1/responses/compact")
+        );
+        let count = b"POST /v1/responses/input_tokens HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{\"model\":\"gpt-6\",\"input\":\"hi\"}";
+        assert_eq!(Http11Parser.detect_request(count), None);
+    }
+
+    #[test]
     fn only_post_to_a_generation_path_is_detected() {
         let post = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{}";
         assert!(Http11Parser.detect_request(post).is_some());
