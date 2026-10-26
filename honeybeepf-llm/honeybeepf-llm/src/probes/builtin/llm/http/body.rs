@@ -22,14 +22,7 @@ pub(super) fn parse_response_json_value(val: &Value) -> Option<UsageInfo> {
     let is_error = val.get("error").is_some_and(|e| !e.is_null())
         || val.get("status").and_then(Value::as_str) == Some("failed");
     if is_error {
-        return Some(UsageInfo {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            thoughts_tokens: None,
-            cache_read_tokens: None,
-            cache_write_tokens: None,
-            model: None,
-        });
+        return Some(UsageInfo::default());
     }
 
     for provider in get_providers() {

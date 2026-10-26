@@ -357,6 +357,149 @@ fn test_responses_config_skips_anthropic_usage() {
     assert!(provider.parse_usage(&anthropic).is_none());
 }
 
+#[test]
+fn test_openai_responses_reads_cache_writes_their_ttl_and_service_tier() {
+    // Usage example from the OpenAI prompt caching guide (12-hour retention).
+    let response = json!({"model": "gpt-6.1-sol", "service_tier": "priority", "usage": {
+        "input_tokens": 12000, "output_tokens": 500,
+        "input_tokens_details": {"cached_tokens": 4000, "cache_write_tokens": 7000,
+            "cache_write_tokens_details": {"ttl_30m_tokens": 3000, "ttl_12h_tokens": 4000}}}});
+
+    let u = openai_responses_provider().parse_usage(&response).unwrap();
+    assert_eq!((u.prompt_tokens, u.completion_tokens), (12000, 500));
+    assert_eq!(
+        (
+            u.cache_read_tokens,
+            u.cache_write_tokens,
+            u.cache_write_long_ttl_tokens
+        ),
+        (Some(4000), Some(7000), Some(4000))
+    );
+    assert_eq!(u.service_tier.as_deref(), Some("priority"));
+}
+
+#[test]
+fn test_openai_responses_write_count_without_ttl_details_has_no_long_ttl() {
+    let response = json!({"model": "gpt-5.5", "service_tier": "default", "usage": {
+        "input_tokens": 30, "output_tokens": 9,
+        "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0}}});
+
+    let u = openai_responses_provider().parse_usage(&response).unwrap();
+    assert_eq!(u.prompt_tokens, 30);
+    assert_eq!(
+        (u.cache_write_tokens, u.cache_write_long_ttl_tokens),
+        (Some(0), None)
+    );
+}
+
+#[test]
+fn test_anthropic_reads_1h_cache_writes_speed_and_inference_geo() {
+    let provider = default_provider("api.anthropic.com", "/v1/messages");
+    let response = json!({"type": "message", "model": "claude-opus-5-5", "usage": {
+        "input_tokens": 10000, "output_tokens": 2000,
+        "cache_creation_input_tokens": 2000, "cache_read_input_tokens": 0,
+        "cache_creation": {"ephemeral_5m_input_tokens": 500, "ephemeral_1h_input_tokens": 1500},
+        "service_tier": "standard", "speed": "fast", "inference_geo": "us"}});
+
+    let u = provider.parse_usage(&response).unwrap();
+    assert_eq!(u.prompt_tokens, 12_000);
+    assert_eq!(
+        (u.cache_write_tokens, u.cache_write_long_ttl_tokens),
+        (Some(2000), Some(1500))
+    );
+    assert_eq!(
+        (u.speed.as_deref(), u.inference_geo.as_deref()),
+        (Some("fast"), Some("us"))
+    );
+    // Anthropic usage.service_tier is the commitment tier, not an OpenAI-style price tier.
+    assert_eq!(u.service_tier, None);
+}
+
+#[test]
+fn test_long_ttl_writes_never_exceed_the_write_total() {
+    let provider = default_provider("api.anthropic.com", "/v1/messages");
+    let long_ttl = |usage: serde_json::Value| {
+        let u = provider
+            .parse_usage(&json!({"model": "claude-opus-5-5", "usage": usage}))
+            .unwrap();
+        (u.cache_write_tokens, u.cache_write_long_ttl_tokens)
+    };
+
+    assert_eq!(
+        long_ttl(
+            json!({"input_tokens": 10, "output_tokens": 2, "cache_creation_input_tokens": 100,
+            "cache_creation": {"ephemeral_1h_input_tokens": 999_999}})
+        ),
+        (Some(100), Some(100))
+    );
+    assert_eq!(
+        long_ttl(json!({"input_tokens": 10, "output_tokens": 2,
+            "cache_creation": {"ephemeral_1h_input_tokens": 1500}})),
+        (None, None)
+    );
+}
+
+#[test]
+fn test_openai_chat_reads_served_service_tier() {
+    let provider = default_provider("api.openai.com", "/v1/chat/completions");
+    let response = json!({"model": "gpt-6.1-sol", "service_tier": "flex",
+        "usage": {"prompt_tokens": 10000, "completion_tokens": 2000}});
+
+    let u = provider.parse_usage(&response).unwrap();
+    assert_eq!(u.service_tier.as_deref(), Some("flex"));
+    assert_eq!((u.speed, u.inference_geo), (None, None));
+}
+
+#[test]
+fn test_pricing_fields_are_read_only_from_their_paths() {
+    let registry = ProviderRegistry::with_defaults();
+    let lookalike = r#"{"service_tier":"flex","speed":"fast","inference_geo":"us"}"#;
+    for response in [
+        // Model output quoting the fields, and a non-string or null tier.
+        json!({"model": "gpt-4o", "service_tier": 5,
+            "choices": [{"message": {"content": lookalike}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2}}),
+        json!({"model": "claude-opus-5-5", "content": [{"type": "text", "text": lookalike}],
+            "usage": {"input_tokens": 10, "output_tokens": 2, "speed": null, "inference_geo": 1}}),
+        json!({"model": "gpt-6", "service_tier": null, "output": [{"content": [{"text": lookalike}]}],
+            "usage": {"input_tokens": 10, "output_tokens": 2, "input_tokens_details": {"cached_tokens": 0}}}),
+    ] {
+        let u = parse_in_order(&registry.providers, &response).unwrap();
+        assert_eq!(
+            (u.prompt_tokens, u.completion_tokens),
+            (10, 2),
+            "{response}"
+        );
+        assert_eq!(
+            (u.service_tier, u.speed, u.inference_geo),
+            (None, None, None),
+            "{response}"
+        );
+    }
+}
+
+#[test]
+fn test_custom_provider_can_read_pricing_fields() -> Result<(), serde_json::Error> {
+    let registry = ProviderRegistry::from_json(
+        r#"{"providers":[{"name":"proxy","response":{"service_tier_path":"meta.tier","speed":"mode",
+            "cache_write_tokens":"writes","cache_write_long_ttl_tokens":"writes_1h"}}]}"#,
+    )?;
+    let provider = ConfigurableProvider::new(registry.providers[0].clone());
+    let response = json!({"meta": {"tier": "flex"}, "usage": {"prompt_tokens": 10,
+        "completion_tokens": 2, "mode": "fast", "writes": 6, "writes_1h": 4}});
+
+    let u = provider.parse_usage(&response).unwrap();
+    assert_eq!(
+        (u.service_tier.as_deref(), u.speed.as_deref()),
+        (Some("flex"), Some("fast"))
+    );
+    assert_eq!(
+        (u.cache_write_tokens, u.cache_write_long_ttl_tokens),
+        (Some(6), Some(4))
+    );
+    Ok(())
+}
+
 /// Parse like the agent does: try providers in order, without a host check.
 fn parse_in_order(providers: &[ProviderConfig], response: &serde_json::Value) -> Option<UsageInfo> {
     providers
