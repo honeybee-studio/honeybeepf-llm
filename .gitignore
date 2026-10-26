@@ -45,6 +45,7 @@ terraform.rc
 # Test/temp files
 *.txt
 !requirements.txt
+!honeybeepf-llm/honeybeepf-llm-core/tests/fixtures/*.txt
 *.log
 *.json
 *.tar
