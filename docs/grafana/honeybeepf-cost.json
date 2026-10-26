@@ -65,7 +65,7 @@
               "mode": "none"
             }
           },
-          "unit": "reqps"
+          "unit": "short"
         },
         "overrides": []
       },
