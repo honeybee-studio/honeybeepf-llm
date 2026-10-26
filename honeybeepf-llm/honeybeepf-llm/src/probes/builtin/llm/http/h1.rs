@@ -8,6 +8,7 @@ use super::body::{extract_text_from_json, parse_response_json};
 use super::encoding;
 use super::registry::PROVIDER_REGISTRY;
 use super::sse::parse_sse_body;
+use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
 
 #[derive(Clone)]
 pub struct Http11Parser;
@@ -167,6 +168,10 @@ fn chunked_ended(body: &[u8]) -> bool {
         else {
             return desynced();
         };
+        // A chunk the response buffer can never hold is a garbled size line, not one still arriving.
+        if size > MAX_RESPONSE_BUFFER_SIZE {
+            return desynced();
+        }
         rest = &rest[line_end + 2..];
         if size == 0 {
             return rest.starts_with(b"\r\n") || byte_utils::contains_pattern(rest, b"\r\n\r\n");

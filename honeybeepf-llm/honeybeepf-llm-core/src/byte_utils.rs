@@ -59,12 +59,14 @@ pub fn decode_chunked_body(buffer: &[u8]) -> Cow<'_, [u8]> {
         }
 
         let data_start = size_end + 2;
-        let data_end = data_start + chunk_size;
-
-        if data_end > buffer.len() {
-            result.extend_from_slice(&buffer[data_start..]);
-            break;
-        }
+        // A garbled size line can claim more than usize holds; treat it like any chunk past the buffer.
+        let data_end = match data_start.checked_add(chunk_size) {
+            Some(end) if end <= buffer.len() => end,
+            _ => {
+                result.extend_from_slice(&buffer[data_start..]);
+                break;
+            }
+        };
 
         result.extend_from_slice(&buffer[data_start..data_end]);
         pos = data_end + 2;
