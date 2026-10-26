@@ -23,10 +23,11 @@ use honeybeepf_llm_common::{
     LlmEvent, MAX_SSL_BUF_SIZE, MAX_SSL_FRAGMENTS, capture_limit,
 };
 
+mod filter;
 mod helpers;
 pub mod maps;
 
-use helpers::{LlmEventExt, Session, SslCall, count, forget_class, get_current_tid};
+use helpers::{LlmEventExt, Session, SslCall, count, get_current_tid};
 use maps::*;
 
 /// Entry probe for SSL_read/SSL_write. Captures buffer pointer from arg1.
@@ -84,7 +85,7 @@ pub fn probe_ssl_do_handshake_enter(ctx: ProbeContext) -> u32 {
     count(LLM_STAT_ENTER);
     let tid = get_current_tid();
     let ssl = ctx.arg(0).unwrap_or(0);
-    forget_class(ssl);
+    filter::forget(ssl);
     Session::start(tid, ssl, 0, None);
     0
 }
@@ -102,7 +103,7 @@ pub fn probe_ssl_free(ctx: ProbeContext) -> u32 {
     count(LLM_STAT_ENTER);
     match ctx.arg::<u64>(0) {
         Some(ssl) if ssl != 0 => {
-            forget_class(ssl);
+            filter::forget(ssl);
             emit_fragments(&SslCall::free(ssl), LlmDirection::Unknown as u8, false)
         }
         _ => count(LLM_STAT_DISCARD),
@@ -115,7 +116,7 @@ pub fn probe_ssl_free(ctx: ProbeContext) -> u32 {
 fn emit_llm_event(ctx: &RetProbeContext, rw: u8, is_handshake: bool) -> u32 {
     let tid = get_current_tid();
     match SslCall::capture(ctx, is_handshake) {
-        Ok(call) if !is_handshake && call.filtered(rw) => count(LLM_STAT_FILTERED),
+        Ok(call) if !is_handshake && filter::drops(&call, rw) => count(LLM_STAT_FILTERED),
         Ok(call) => emit_fragments(&call, rw, is_handshake),
         Err(_) => count(LLM_STAT_DISCARD),
     }

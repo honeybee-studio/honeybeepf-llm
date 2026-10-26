@@ -23,7 +23,7 @@ pub static BUFS: HashMap<u32, [u64; 2]> = HashMap::with_max_entries(MAX_ENTRIES,
 #[map]
 pub static READBYTES_PTRS: HashMap<u32, u64> = HashMap::with_max_entries(MAX_ENTRIES, 0);
 
-/// `SSL_CLASS_*` and creation time of each connection, keyed by [tgid, SSL*]; userspace adds SKIP_CONN by Host.
+/// `ssl_class::ClassEntry` of each connection, keyed by [tgid, SSL*]; userspace adds SkipConnection by Host.
 #[map]
 pub static SSL_CLASS: LruHashMap<[u64; 2], u64> =
     LruHashMap::with_max_entries(SSL_CLASS_ENTRIES, 0);
