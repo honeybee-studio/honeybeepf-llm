@@ -211,6 +211,19 @@ mod tests {
     }
 
     #[test]
+    fn encoded_body_after_100_continue_is_decoded() {
+        let interim = b"HTTP/1.1 100 Continue\r\n\r\n";
+        let json = [interim, &json_response("gzip", &gzip(JSON.as_bytes()))[..]].concat();
+        assert_eq!(tokens(&json), Some((25, 15)));
+        let sse = [
+            interim,
+            &sse_response("gzip", &gzip(SSE.as_bytes()), true)[..],
+        ]
+        .concat();
+        assert_eq!(tokens(&sse), Some((11, 4)));
+    }
+
+    #[test]
     fn stacked_codings_are_undone_last_first() {
         let body = zstd(&gzip(JSON.as_bytes()));
         assert_eq!(tokens(&json_response("gzip, zstd", &body)), Some((25, 15)));

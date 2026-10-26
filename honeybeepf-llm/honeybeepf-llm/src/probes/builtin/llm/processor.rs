@@ -670,7 +670,8 @@ mod tests {
             None,
         ));
         out.extend(send(&mut p, LlmDirection::Write, body, None));
-        let event = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n";
+        let event =
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
         let chunked = format!("{:x}\r\n{event}\r\n0\r\n\r\n", event.len());
         for r in [
             &b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"[..],
@@ -684,6 +685,30 @@ mod tests {
             &h1("application/json", MESSAGES_RESPONSE),
         ));
         assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+    }
+
+    #[test]
+    fn test_streamed_response_after_100_continue_is_recorded() {
+        let mut p = StreamProcessor::new();
+        let (head, body) = REQUEST.split_at(REQUEST.len() - 27);
+        let mut out = send(&mut p, LlmDirection::Write, head, None);
+        out.extend(send(
+            &mut p,
+            LlmDirection::Read,
+            b"HTTP/1.1 100 Continue\r\n\r\n",
+            None,
+        ));
+        out.extend(send(&mut p, LlmDirection::Write, body, None));
+        let event = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n";
+        let chunked = format!("{:x}\r\n{event}\r\n0\r\n\r\n", event.len());
+        for r in [
+            &b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"[..],
+            chunked.as_bytes(),
+        ] {
+            out.extend(send(&mut p, LlmDirection::Read, r, None));
+        }
+        assert_eq!(count(&out, Outcome::Unparsed), 0, "{out:?}");
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
     }
 

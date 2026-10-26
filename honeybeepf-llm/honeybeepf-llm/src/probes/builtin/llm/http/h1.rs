@@ -23,27 +23,36 @@ impl Http11Parser {
 
     /// Whether the buffer holds a whole HTTP/1.1 response by its framing, after any 1xx interim responses.
     pub fn is_complete_response(buffer: &[u8]) -> bool {
-        let mut rest = buffer;
-        loop {
-            let mut headers = [httparse::EMPTY_HEADER; 64];
-            let mut resp = httparse::Response::new(&mut headers);
-            let Ok(httparse::Status::Complete(n)) = resp.parse(rest) else {
-                return false;
-            };
-            let body = &rest[n..];
-            if resp.code.is_some_and(|c| (100..200).contains(&c)) {
-                rest = body;
-                continue;
+        let rest = skip_interim_responses(buffer);
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut resp = httparse::Response::new(&mut headers);
+        let Ok(httparse::Status::Complete(n)) = resp.parse(rest) else {
+            return false;
+        };
+        let body = &rest[n..];
+        if let Some(len) = content_length(resp.headers) {
+            return body.len() >= len;
+        }
+        resp.headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("Transfer-Encoding"))
+            .is_some_and(|h| byte_utils::contains_pattern(h.value, b"chunked"))
+            && chunked_ended(body)
+    }
+}
+
+/// The buffer from the final response head on, past any complete 1xx interim responses.
+fn skip_interim_responses(mut buffer: &[u8]) -> &[u8] {
+    loop {
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut resp = httparse::Response::new(&mut headers);
+        match resp.parse(buffer) {
+            Ok(httparse::Status::Complete(n))
+                if resp.code.is_some_and(|c| (100..200).contains(&c)) =>
+            {
+                buffer = &buffer[n..];
             }
-            if let Some(len) = content_length(resp.headers) {
-                return body.len() >= len;
-            }
-            return resp
-                .headers
-                .iter()
-                .find(|h| h.name.eq_ignore_ascii_case("Transfer-Encoding"))
-                .is_some_and(|h| byte_utils::contains_pattern(h.value, b"chunked"))
-                && chunked_ended(body);
+            _ => return buffer,
         }
     }
 }
@@ -87,6 +96,8 @@ impl ProtocolParser for Http11Parser {
     }
 
     fn parse_response(&self, buffer: &[u8]) -> Option<UsageInfo> {
+        // `100 Continue` (large uploads) and `103 Early Hints` carry none of the final response's framing.
+        let buffer = skip_interim_responses(buffer);
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut resp = httparse::Response::new(&mut headers);
 
@@ -296,6 +307,36 @@ mod tests {
         ];
         for buf in incomplete {
             assert!(!Http11Parser::is_complete_response(buf), "{buf:?}");
+        }
+    }
+
+    #[test]
+    fn final_response_after_interim_responses_is_parsed() {
+        let json =
+            r#"{"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":4}}"#;
+        let event = format!("data: {json}\n\ndata: [DONE]\n\n");
+        let finals = [
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n\
+                 {:x}\r\n{json}\r\n0\r\n\r\n",
+                json.len()
+            ),
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n\
+                 {:x}\r\n{event}\r\n0\r\n\r\n",
+                event.len()
+            ),
+            format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{event}"),
+        ];
+        for interim in [
+            "HTTP/1.1 100 Continue\r\n\r\n",
+            "HTTP/1.1 103 Early Hints\r\nLink: </s.css>; rel=preload\r\n\r\nHTTP/1.1 100 Continue\r\n\r\n",
+        ] {
+            for last in &finals {
+                let resp = format!("{interim}{last}");
+                let info = Http11Parser.parse_response(resp.as_bytes());
+                assert_eq!(tokens(info), Some((11, 4)), "{resp:?}");
+            }
         }
     }
 
