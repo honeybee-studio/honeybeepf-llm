@@ -12,6 +12,8 @@ const ANTHROPIC_HOSTS: &[&str] = &[
     "api.anthropic.com",                // Claude API
     "aws-external-anthropic.*.api.aws", // Claude Platform on AWS
     "bedrock-mantle.*.api.aws",         // Bedrock Mantle /anthropic/v1
+    "claude.googleapis.com",            // Claude on Google Cloud (Anthropic managed)
+    "services.ai.azure.com",            // Claude in Microsoft Foundry /anthropic/v1
 ];
 const GEMINI_HOSTS: &[&str] = &[
     "generativelanguage.googleapis.com", // Gemini API
@@ -38,6 +40,7 @@ fn openai_chat() -> ProviderConfig {
         paths: vec![
             "/chat/completions$".to_string(),
             "/v1/completions$".to_string(),
+            "/deployments/*/completions$".to_string(), // Azure api-version route
         ],
         response: ResponseConfig {
             usage_path: "usage".to_string(),
@@ -54,12 +57,17 @@ fn openai_chat() -> ProviderConfig {
 
 // Responses API. Usage parsing tries providers in order without a host check and anthropic
 // has the same input/output_tokens keys; only Responses usage carries input_tokens_details.
-// `$` keeps GET /v1/responses/{id} out.
+// `$` keeps GET /v1/responses/{id} out. Azure api-version clients post to /openai/responses, or under
+// /deployments/{d} when the client is bound to a deployment.
 fn openai_responses() -> ProviderConfig {
     ProviderConfig {
         name: "openai".to_string(),
         hosts: to_strings(OPENAI_HOSTS),
-        paths: vec!["/v1/responses$".to_string()],
+        paths: vec![
+            "/v1/responses$".to_string(),
+            "/openai/responses$".to_string(),
+            "/deployments/*/responses$".to_string(),
+        ],
         response: ResponseConfig {
             usage_path: "usage".to_string(),
             prompt_tokens: "input_tokens".to_string(),

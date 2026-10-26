@@ -20,6 +20,7 @@ chrono = "0.4"
 env_logger = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
+object = { version = "0.36", default-features = false, features = ["elf", "read_core", "std"] }
 tokio = { workspace = true, features = [
     "macros",
     "rt",

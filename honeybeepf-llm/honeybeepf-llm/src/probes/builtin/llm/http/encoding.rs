@@ -203,6 +203,14 @@ mod tests {
     }
 
     #[test]
+    fn encoded_chunked_body_with_trailers_is_decoded_at_the_last_chunk() {
+        let mut resp = sse_response("gzip", &gzip(SSE.as_bytes()), false);
+        resp.extend_from_slice(b"0\r\nX-Request-Id: r1\r\n\r\n");
+        assert_eq!(tokens(&resp), Some((11, 4)));
+        assert_eq!(tokens(&resp[..resp.len() - 2]), None);
+    }
+
+    #[test]
     fn stacked_codings_are_undone_last_first() {
         let body = zstd(&gzip(JSON.as_bytes()));
         assert_eq!(tokens(&json_response("gzip, zstd", &body)), Some((25, 15)));

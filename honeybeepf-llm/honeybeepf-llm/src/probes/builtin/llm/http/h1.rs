@@ -42,7 +42,7 @@ impl Http11Parser {
                 .iter()
                 .find(|h| h.name.eq_ignore_ascii_case("Transfer-Encoding"))
                 .is_some_and(|h| byte_utils::contains_pattern(h.value, b"chunked"))
-                && body.ends_with(b"0\r\n\r\n");
+                && chunked_ended(body);
         }
     }
 }
@@ -106,7 +106,7 @@ impl ProtocolParser for Http11Parser {
 
         let body = &buffer[body_offset..];
         let ended = if is_chunked {
-            body.ends_with(b"0\r\n\r\n")
+            chunked_ended(body)
         } else {
             content_length(resp.headers).is_none_or(|len| body.len() >= len)
         };
@@ -148,6 +148,34 @@ impl ProtocolParser for Http11Parser {
         let json_body = &s[start..];
 
         parse_response_json(json_body)
+    }
+}
+
+/// Whether a chunked body holds its last chunk and trailer section, found by following the chunk sizes.
+fn chunked_ended(body: &[u8]) -> bool {
+    // Bytes lost in capture break the framing; then only the terminator bytes are left to go by.
+    let desynced = || body.ends_with(b"0\r\n\r\n");
+    let mut rest = body;
+    loop {
+        let Some(line_end) = byte_utils::find_pattern(rest, b"\r\n") else {
+            return false;
+        };
+        let size = rest[..line_end].split(|&b| b == b';').next().unwrap_or(&[]);
+        let Some(size) = std::str::from_utf8(size)
+            .ok()
+            .and_then(|s| usize::from_str_radix(s.trim(), 16).ok())
+        else {
+            return desynced();
+        };
+        rest = &rest[line_end + 2..];
+        if size == 0 {
+            return rest.starts_with(b"\r\n") || byte_utils::contains_pattern(rest, b"\r\n\r\n");
+        }
+        match rest.get(size..).and_then(|after| after.get(..2)) {
+            None => return false,
+            Some(b"\r\n") => rest = &rest[size + 2..],
+            Some(_) => return desynced(),
+        }
     }
 }
 
@@ -267,6 +295,31 @@ mod tests {
     }
 
     #[test]
+    fn chunked_end_follows_chunk_sizes() {
+        // The first chunk's data ends in `0\r\n`, so the bytes after it look like a last chunk.
+        let head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+        for last in [
+            "0\r\n\r\n",
+            "0;ext=1\r\n\r\n",
+            "0\r\nX-Request-Id: r1\r\n\r\n",
+        ] {
+            let resp = format!("{head}5\r\nab0\r\n\r\n3;n=v\r\n{{}}\n\r\n{last}");
+            assert!(
+                Http11Parser::is_complete_response(resp.as_bytes()),
+                "{resp:?}"
+            );
+            for cut in head.len()..resp.len() {
+                let part = &resp.as_bytes()[..cut];
+                assert!(
+                    !Http11Parser::is_complete_response(part),
+                    "{:?}",
+                    &resp[..cut]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn cloud_hosts_are_detected_on_http11() {
         let detect = |url: &str| {
             let (host, path) = url.split_at(url.find('/').unwrap_or(url.len()));
@@ -281,6 +334,16 @@ mod tests {
         ));
         assert!(detect(
             "bedrock-runtime.us-east-1.amazonaws.com/model/m/converse"
+        ));
+        assert!(detect(
+            "claude.googleapis.com/v1/projects/p/locations/global/workspaces/w/invoke/v1/messages"
+        ));
+        assert!(detect("myres.services.ai.azure.com/anthropic/v1/messages"));
+        assert!(detect(
+            "myres.openai.azure.com/openai/responses?api-version=2025-04-01-preview"
+        ));
+        assert!(detect(
+            "myres.openai.azure.com/openai/deployments/d1/completions?api-version=2024-10-21"
         ));
         assert!(!detect("ec2.us-west-2.api.aws/v1/messages"));
     }
