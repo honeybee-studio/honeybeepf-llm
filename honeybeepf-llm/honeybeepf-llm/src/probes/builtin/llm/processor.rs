@@ -275,8 +275,10 @@ impl StreamProcessor {
             // Don't buffer responses if we haven't detected a valid LLM request yet
             ProcessorState::Detecting => {
                 // The server is answering a non-LLM request; the next request must not sit behind it.
+                // An HTTP/1.x status line also covers upload body writes left over after detection gave up.
                 if !self.write_buf.is_empty()
-                    && http::Http11Parser::is_request_head(&self.write_buf)
+                    && (data.starts_with(b"HTTP/1.")
+                        || http::Http11Parser::is_request_head(&self.write_buf))
                 {
                     self.write_buf.clear();
                 }
@@ -592,6 +594,75 @@ mod tests {
         out.extend(outcomes(&mut p, &reads, None));
         assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+    }
+
+    /// A multipart upload whose last body writes land after detection gave up at 4 KB, as httpx sends it.
+    fn upload(p: &mut StreamProcessor, expect_continue: bool) -> Vec<Outcome> {
+        let head = format!(
+            "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: api.openai.com\r\n\
+             Content-Type: multipart/form-data; boundary=b0\r\nContent-Length: 66614\r\n{}\r\n",
+            if expect_continue {
+                "Expect: 100-continue\r\n"
+            } else {
+                ""
+            }
+        );
+        let mut out = send(p, LlmDirection::Write, head.as_bytes(), None);
+        if expect_continue {
+            out.extend(send(
+                p,
+                LlmDirection::Read,
+                b"HTTP/1.1 100 Continue\r\n\r\n",
+                None,
+            ));
+        }
+        let part =
+            b"--b0\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\r\n";
+        for body in [&part[..], &[0xAB; 65536], &[0xCD; 1000], b"\r\n--b0--\r\n"] {
+            out.extend(send(p, LlmDirection::Write, body, None));
+        }
+        out.extend(send(
+            p,
+            LlmDirection::Read,
+            &h1("application/json", r#"{"text":"hello"}"#),
+            None,
+        ));
+        out
+    }
+
+    #[test]
+    fn test_calls_after_upload_are_recorded() {
+        use std::io::Write as _;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(MESSAGES_RESPONSE.as_bytes()).expect("gzip");
+        let body = gz.finish().expect("gzip");
+        let gzip = [
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\n\
+                 Content-Length: {}\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+            &body,
+        ]
+        .concat();
+        for expect_continue in [false, true] {
+            let mut p = StreamProcessor::new();
+            let mut out = upload(&mut p, expect_continue);
+            for response in [&gzip, &h1("application/json", MESSAGES_RESPONSE)] {
+                out.extend(exchange(&mut p, MESSAGES_REQUEST, response));
+            }
+            assert_eq!(
+                count(&out, Outcome::Recorded),
+                2,
+                "{expect_continue}: {out:?}"
+            );
+            assert_eq!(
+                count(&out, Outcome::Unparsed),
+                0,
+                "{expect_continue}: {out:?}"
+            );
+        }
     }
 
     #[test]
