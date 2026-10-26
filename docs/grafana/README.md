@@ -49,7 +49,11 @@ Collector, which forwards them to Prometheus.
 | `honeybeepf_llm_llm_cache_read_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
 | `honeybeepf_llm_llm_cache_write_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
 | `honeybeepf_llm_llm_reasoning_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of completion tokens) |
+| `honeybeepf_llm_llm_cost_usd_total` | Counter (USD) | `model`, `status`, `cost_type` (input / cache_read / cache_write / output), `price_table_version`, `target_namespace`, `target_pod_name` |
+| `honeybeepf_llm_llm_unpriced_tokens_total` | Counter | `model`, `status`, `reason` (unknown_model / missing_price / unsupported_modifier / inconsistent_usage), `price_table_version`, `target_namespace`, `target_pod_name` |
 | `honeybeepf_llm_llm_latency_seconds_bucket` | Histogram | `model`, `status`, `target_namespace`, `target_pod_name` |
+
+Cost comes from the built-in price table (`honeybeepf-llm-core/src/prices.json`; every provider entry names its pricing page and the date it was checked). A call the table cannot price is counted in `llm_unpriced_tokens_total`, never as $0, so compare the two before trusting a total. Prices are the providers' first-party list prices: the price is chosen by model name, not by host, so Azure OpenAI, Bedrock, Vertex AI and regional endpoints (such as OpenAI data residency, +10%) are priced as the first-party API. Per-request tool fees (web search) and audio input prices are not included.
 
 ### Security / file-access metrics
 

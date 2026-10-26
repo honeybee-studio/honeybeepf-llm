@@ -51,6 +51,8 @@ terraform.rc
 
 # Allow Grafana dashboard JSON files under docs/grafana/
 !docs/grafana/*.json
+# Built-in price table compiled into the agent
+!honeybeepf-llm/honeybeepf-llm-core/src/prices.json
 check-status.ps1
 install.bat
 

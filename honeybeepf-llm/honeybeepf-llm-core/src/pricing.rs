@@ -141,9 +141,9 @@ struct RawProvider {
     /// Model -> speed mode (`fast`) -> multiplier on every price.
     #[serde(default)]
     speed: Unique<Unique<f64>>,
-    /// Inference geography (`us`) -> multiplier on every price.
+    /// Model -> inference geography (`us`) -> multiplier, only for models that accept the setting.
     #[serde(default)]
-    geo: Unique<f64>,
+    geo: Unique<Unique<f64>>,
 }
 
 impl RawProvider {
@@ -154,12 +154,14 @@ impl RawProvider {
         }
         let models = &self.models.0;
         let speed_modes = self.speed.0.values().flat_map(|m| m.0.iter());
+        let geos = self.geo.0.values().flat_map(|m| m.0.iter());
         let unknown = self
             .tiers
             .0
             .values()
             .flat_map(|m| m.0.keys())
             .chain(self.speed.0.keys())
+            .chain(self.geo.0.keys())
             .find(|name| !models.contains_key(*name));
         if let Some(name) = unknown {
             return Err(format!("{name} has no standard prices"));
@@ -176,13 +178,13 @@ impl RawProvider {
                     .map(|(s, _)| s)
                     .find(|s| *s == "standard")
             })
-            .or_else(|| self.geo.0.keys().find(|g| *g == "global"));
+            .or_else(|| geos.clone().map(|(g, _)| g).find(|g| *g == "global"));
         if let Some(key) = dead {
             return Err(format!("{key} is never looked up"));
         }
         // A zero factor would turn a priced call into $0.
         if !speed_modes
-            .chain(&self.geo.0)
+            .chain(geos)
             .all(|(_, f)| *f > 0.0 && *f <= MAX_FACTOR)
         {
             return Err("multipliers must be above 0 and at most 100".into());
@@ -223,6 +225,18 @@ pub enum Unpriced {
     InconsistentUsage,
 }
 
+impl Unpriced {
+    /// Value of the `reason` label on the unpriced token counter.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Unpriced::UnknownModel => "unknown_model",
+            Unpriced::MissingPrice => "missing_price",
+            Unpriced::UnsupportedModifier => "unsupported_modifier",
+            Unpriced::InconsistentUsage => "inconsistent_usage",
+        }
+    }
+}
+
 /// Cost of one call in USD, split the way providers bill it.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Cost {
@@ -241,6 +255,11 @@ pub struct PriceTable {
 }
 
 impl PriceTable {
+    /// The table shipped with the agent, copied from the providers' pricing pages.
+    pub fn builtin() -> Result<Self, serde_json::Error> {
+        Self::from_json(include_str!("prices.json"))
+    }
+
     /// Load and check a table; a typo, duplicate, bad date or negative price is an error.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         let raw: RawTable = serde_json::from_str(json)?;
@@ -258,7 +277,7 @@ impl PriceTable {
                     standard,
                     tiers,
                     speed: speed.get(&name).map(|m| m.0.clone()).unwrap_or_default(),
-                    geo: geo.clone(),
+                    geo: geo.get(&name).map(|m| m.0.clone()).unwrap_or_default(),
                 };
                 match models.entry(name) {
                     Entry::Occupied(e) => {
