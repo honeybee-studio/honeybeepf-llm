@@ -20,6 +20,9 @@ openai = [
   { url = "myres.openai.azure.com/openai/v1/chat/completions", reason = "Azure v1 chat" },
   { url = "myres.openai.azure.com/openai/v1/responses", reason = "Azure v1 Responses" },
   { url = "myres.services.ai.azure.com/openai/v1/responses", reason = "Foundry v1 Responses" },
+  { url = "myres.openai.azure.com/openai/responses/compact?api-version=2025-04-01-preview", reason = "Azure api-version compaction (AzureOpenAI SDK path)" },
+  { url = "myres.openai.azure.com/openai/deployments/gpt-4o/responses/compact?api-version=2025-04-01-preview", reason = "Azure compaction, client bound to a deployment" },
+  { url = "myres.services.ai.azure.com/openai/v1/responses/compact", reason = "Foundry v1 compaction" },
   # Foundry: one host serves OpenAI and Anthropic routes, so only the path picks the provider
   { url = "myres.services.ai.azure.com/openai/v1/chat/completions", reason = "Foundry OpenAI chat" },
   { url = "myres.services.ai.azure.com/openai/v1/responses", reason = "Foundry OpenAI Responses" },
@@ -100,6 +103,12 @@ none = [
   { url = "api.openai.com/v1/responses/resp_123", reason = "GET a stored response" },
   { url = "api.openai.com/v1/responses/resp_123/input_items", reason = "list input items" },
   { url = "api.openai.com/v1/responses/resp_123/cancel", reason = "cancel a background response" },
+  { url = "api.openai.com/v1/responses/input_tokens", reason = "Responses token counting, not billed" },
+  { url = "api.openai.com/openai/v1/responses/input_tokens", reason = "token counting under /openai/v1" },
+  { url = "myres.openai.azure.com/openai/responses/input_tokens?api-version=2025-04-01-preview", reason = "Azure api-version token counting" },
+  { url = "myres.openai.azure.com/openai/deployments/gpt-4o/responses/input_tokens?api-version=2025-04-01-preview", reason = "Azure deployment token counting" },
+  { url = "api.openai.com/v1/responses/compact/resp_123", reason = "path continues after /compact" },
+  { url = "api.openai.com/v1/responses/resp_123/compact", reason = "not an API route" },
   # Non-generation endpoints
   { url = "api.anthropic.com/v1/messages/count_tokens", reason = "token counting" },
   { url = "api.anthropic.com/v1/messages/count_tokens?beta=true", reason = "token counting with query" },

@@ -120,6 +120,42 @@ fn test_openai_responses_parse_usage() {
     assert_eq!(usage.model, Some("gpt-6".to_string()));
 }
 
+// The compacted response carries Responses usage but no `model`; its output items have their own `status`.
+#[test]
+fn test_openai_responses_compact_parse_usage() {
+    let registry = ProviderRegistry::with_defaults();
+    let config = registry
+        .find_provider("api.openai.com", "/v1/responses/compact")
+        .unwrap()
+        .clone();
+    let provider = ConfigurableProvider::new(config);
+    let response = json!({
+        "id": "resp_001",
+        "object": "response.compaction",
+        "output": [
+            {"id": "msg_001", "status": "completed", "type": "message", "role": "user",
+             "content": [{"type": "input_text", "text": "usage: {\"input_tokens\": 1}"}]},
+            {"type": "compaction", "id": "cmp_001", "encrypted_content": "encrypted-summary"}
+        ],
+        "created_at": 1731459200,
+        "usage": {
+            "input_tokens": 1200,
+            "input_tokens_details": {"cached_tokens": 1024, "cache_write_tokens": 0},
+            "output_tokens": 300,
+            "output_tokens_details": {"reasoning_tokens": 64},
+            "total_tokens": 1500
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!(usage.prompt_tokens, 1200);
+    assert_eq!(usage.completion_tokens, 300);
+    assert_eq!(usage.thoughts_tokens, Some(64));
+    assert_eq!(usage.cache_read_tokens, Some(1024));
+    assert_eq!(usage.cache_write_tokens, None);
+    assert_eq!(usage.model, None);
+}
+
 fn default_provider(host: &str, path: &str) -> ConfigurableProvider {
     let registry = ProviderRegistry::with_defaults();
     ConfigurableProvider::new(registry.find_provider(host, path).unwrap().clone())
@@ -225,8 +261,54 @@ fn test_gemini_thoughts_without_candidates_count() {
     });
 
     let usage = gemini_default().parse_usage(&response).unwrap();
-    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (5, 0));
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (5, 4));
     assert_eq!(usage.thoughts_tokens, Some(4));
+}
+
+#[test]
+fn test_gemini_thoughts_are_part_of_completion() {
+    let response = json!({
+        "usageMetadata": {"promptTokenCount": 15, "candidatesTokenCount": 25,
+            "thoughtsTokenCount": 100, "totalTokenCount": 140},
+        "modelVersion": "gemini-2.5-pro"
+    });
+
+    let usage = gemini_default().parse_usage(&response).unwrap();
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (15, 125));
+    assert_eq!(usage.thoughts_tokens, Some(100));
+}
+
+#[test]
+fn test_openai_reasoning_is_not_added_to_completion_again() {
+    let chat = json!({"model": "gpt-5", "usage": {"prompt_tokens": 1200, "completion_tokens": 800,
+        "completion_tokens_details": {"reasoning_tokens": 600}}});
+    let responses = json!({"model": "gpt-5", "usage": {"input_tokens": 1200,
+        "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 800,
+        "output_tokens_details": {"reasoning_tokens": 600}}});
+
+    for (path, response) in [("/v1/chat/completions", chat), ("/v1/responses", responses)] {
+        let usage = default_provider("api.openai.com", path)
+            .parse_usage(&response)
+            .unwrap();
+        assert_eq!(usage.completion_tokens, 800, "{path}");
+        assert_eq!(usage.thoughts_tokens, Some(600), "{path}");
+    }
+}
+
+#[test]
+fn test_custom_provider_can_add_thoughts_to_completion() -> Result<(), serde_json::Error> {
+    let registry = ProviderRegistry::from_json(
+        r#"{"providers":[{"name":"gemini-proxy","response":{"usage_path":"usageMetadata",
+            "prompt_tokens":"promptTokenCount","completion_tokens":"candidatesTokenCount",
+            "thoughts_tokens":"thoughtsTokenCount","completion_excludes_thoughts":true}}]}"#,
+    )?;
+    let provider = ConfigurableProvider::new(registry.providers[0].clone());
+    let usage = provider
+        .parse_usage(&json!({"usageMetadata": {"promptTokenCount": 3,
+            "candidatesTokenCount": 2, "thoughtsTokenCount": 7}}))
+        .unwrap();
+    assert_eq!(usage.completion_tokens, 9);
+    Ok(())
 }
 
 #[test]

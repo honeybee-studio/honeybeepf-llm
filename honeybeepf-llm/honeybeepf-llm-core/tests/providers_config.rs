@@ -176,6 +176,11 @@ fn test_find_provider_openai_responses() {
         "/openai/v1/responses",
         "/openai/responses?api-version=2025-04-01-preview",
         "/openai/deployments/gpt-4o/responses?api-version=2025-04-01-preview",
+        "/v1/responses/compact",
+        "/v1/responses/compact/",
+        "/openai/v1/responses/compact",
+        "/openai/responses/compact?api-version=2025-04-01-preview",
+        "/openai/deployments/gpt-4o/responses/compact?api-version=2025-04-01-preview",
     ] {
         let p = registry.find_provider("api.openai.com", path);
         assert_eq!(p.map(|p| p.name.as_str()), Some("openai"), "{path}");
