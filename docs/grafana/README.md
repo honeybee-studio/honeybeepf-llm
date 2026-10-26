@@ -44,24 +44,24 @@ Collector, which forwards them to Prometheus.
 
 | Metric | Type | Labels |
 |--------|------|--------|
-| `honeybeepf_llm_requests_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` |
-| `honeybeepf_llm_tokens_total` | Counter | `model`, `status`, `token_type` (prompt / completion), `target_namespace`, `target_pod_name` |
-| `honeybeepf_llm_cache_read_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
-| `honeybeepf_llm_cache_write_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
-| `honeybeepf_llm_reasoning_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of completion tokens) |
-| `honeybeepf_llm_latency_seconds_bucket` | Histogram | `model`, `status`, `target_namespace`, `target_pod_name` |
+| `honeybeepf_llm_llm_requests_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` |
+| `honeybeepf_llm_llm_tokens_total` | Counter | `model`, `status`, `token_type` (prompt / completion), `target_namespace`, `target_pod_name` |
+| `honeybeepf_llm_llm_cache_read_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
+| `honeybeepf_llm_llm_cache_write_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
+| `honeybeepf_llm_llm_reasoning_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of completion tokens) |
+| `honeybeepf_llm_llm_latency_seconds_bucket` | Histogram | `model`, `status`, `target_namespace`, `target_pod_name` |
 
 ### Security / file-access metrics
 
 | Metric | Type | Labels |
 |--------|------|--------|
-| `honeybeepf_file_access_events_total` | Counter | `filename`, `flags`, `process`, `cgroup_id`, `target_namespace`, `target_pod_name` |
+| `honeybeepf_llm_file_access_events_total` | Counter | `filename`, `flags`, `process`, `cgroup_id`, `target_namespace`, `target_pod_name` |
 
 ### Agent metrics
 
 | Metric | Type | Labels |
 |--------|------|--------|
-| `honeybeepf_active_probes` | Gauge | `probe` |
+| `honeybeepf_llm_active_probes` | Gauge | `probe` |
 
 > **Note:** `target_namespace` and `target_pod_name` labels are only populated
 > when the agent is built with the `k8s` feature flag (the Docker image uses

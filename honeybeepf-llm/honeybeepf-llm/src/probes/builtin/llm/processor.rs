@@ -223,15 +223,14 @@ impl StreamProcessor {
                     pod_info.as_ref(),
                 );
             }
-            ProcessorState::ProcessingRequest { start_time, parser } => {
-                // Write finished (implied by Read starting), transition to Response phase
-                self.state = if direction == LlmDirection::Read {
-                    ProcessorState::ProcessingResponse { start_time, parser }
-                } else {
-                    ProcessorState::ProcessingRequest { start_time, parser }
-                };
+            ProcessorState::ProcessingRequest { start_time, parser }
+                if direction != LlmDirection::Read =>
+            {
+                self.state = ProcessorState::ProcessingRequest { start_time, parser };
             }
-            ProcessorState::ProcessingResponse { start_time, parser } => {
+            // The first Read ends the request and may already hold the whole response.
+            ProcessorState::ProcessingRequest { start_time, parser }
+            | ProcessorState::ProcessingResponse { start_time, parser } => {
                 // Parse once the SSL call's last fragment is in, not on a partial record
                 if complete && let Some(usage) = parser.parse_response(&self.read_buf) {
                     record_usage(
@@ -684,5 +683,134 @@ mod tests {
         ));
         assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+    }
+
+    #[test]
+    fn test_whole_response_in_one_read_is_recorded() {
+        let sse = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n\
+                    data: {\"model\":\"gpt-4o\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\n\
+                    data: [DONE]\n\n";
+        for response in [h1("application/json", MESSAGES_RESPONSE), sse.to_vec()] {
+            let mut p = StreamProcessor::new();
+            let mut out = Vec::new();
+            for _ in 0..2 {
+                out.extend(send(&mut p, LlmDirection::Write, MESSAGES_REQUEST, None));
+                out.extend(send(&mut p, LlmDirection::Read, &response, None));
+            }
+            assert_eq!(
+                out,
+                [
+                    Outcome::Pending,
+                    Outcome::Recorded,
+                    Outcome::Pending,
+                    Outcome::Recorded
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn test_head_with_part_of_body_in_one_read_is_recorded_once() {
+        let response = h1("application/json", MESSAGES_RESPONSE);
+        let (first, rest) = response.split_at(response.len() - 20);
+        let mut p = StreamProcessor::new();
+        let mut out = send(&mut p, LlmDirection::Write, MESSAGES_REQUEST, None);
+        out.extend(send(&mut p, LlmDirection::Read, first, None));
+        out.extend(send(&mut p, LlmDirection::Read, rest, None));
+        assert_eq!(out, [Outcome::Pending, Outcome::Pending, Outcome::Recorded]);
+    }
+
+    #[test]
+    fn test_chunked_response_with_trailers_frees_next_request() {
+        let mut p = StreamProcessor::new();
+        let error = b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n\
+                      Transfer-Encoding: chunked\r\nTrailer: X-Request-Id\r\n\r\n\
+                      5\r\noops!\r\n0\r\nX-Request-Id: r1\r\n\r\n";
+        let mut out = exchange(&mut p, MESSAGES_REQUEST, error);
+        out.extend(exchange(
+            &mut p,
+            MESSAGES_REQUEST,
+            &h1("application/json", MESSAGES_RESPONSE),
+        ));
+        assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+    }
+
+    #[test]
+    fn test_chunk_larger_than_response_buffer_frees_next_request() {
+        for size in ["2000000", "ffffffffffffffff"] {
+            let mut p = StreamProcessor::new();
+            let garbled = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n\
+                 {size}\r\n{{}}\r\n0\r\n\r\n"
+            );
+            let mut out = exchange(&mut p, MESSAGES_REQUEST, garbled.as_bytes());
+            out.extend(exchange(
+                &mut p,
+                MESSAGES_REQUEST,
+                &h1("application/json", MESSAGES_RESPONSE),
+            ));
+            assert_eq!(count(&out, Outcome::Unparsed), 1, "{size}: {out:?}");
+            assert_eq!(out.last(), Some(&Outcome::Recorded), "{size}: {out:?}");
+        }
+    }
+
+    thread_local! {
+        static LOGS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+
+    /// Keeps every record at every level, per thread so parallel tests don't mix their output.
+    struct CaptureLogger;
+
+    impl log::Log for CaptureLogger {
+        fn enabled(&self, _: &log::Metadata) -> bool {
+            true
+        }
+
+        fn log(&self, r: &log::Record) {
+            let line = format!("{} {}\n", r.level(), r.args());
+            LOGS.with(|logs| logs.borrow_mut().push_str(&line));
+        }
+
+        fn flush(&self) {}
+    }
+
+    static LOGGER: CaptureLogger = CaptureLogger;
+
+    #[test]
+    fn test_credentials_stay_out_of_logs() {
+        log::set_logger(&LOGGER).expect("no other logger in the test binary");
+        log::set_max_level(log::LevelFilter::Trace);
+        // Fake keys carry HBTEST; the query and header forms are how Gemini and SigV4 send them.
+        let gemini = "AIzaSyHBTEST0gemini0000000000000000000";
+        let presigned = "X-Amz-Credential=AKIAHBTEST0000000000%2F20261023%2Fus-east-1%2Fbedrock%2Faws4_request\
+                         &X-Amz-Security-Token=HBTEST0token&X-Amz-Signature=HBTEST0signature";
+        let openai = "sk-proj-HBTEST0openai00000000000000000000000000";
+        let requests = [
+            format!(
+                "POST /v1beta/models/gemini-2.5-flash:generateContent?key={gemini} HTTP/1.1\r\n\
+                     Host: generativelanguage.googleapis.com\r\nx-goog-api-key: {gemini}\r\n\r\n{{}}"
+            ),
+            format!(
+                "POST /model/anthropic.claude-sonnet-5-5-v1:0/converse?{presigned} HTTP/1.1\r\n\
+                     Host: bedrock-runtime.us-east-1.amazonaws.com\r\n\r\n{{}}"
+            ),
+            format!(
+                "POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer {openai}\r\n\r\n\
+                     {{\"messages\":[{{\"role\":\"user\",\"content\":\"{openai}\"}}]}}"
+            ),
+        ];
+        let response = h1(
+            "application/json",
+            r#"{"model":"m","usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
+        );
+        for request in &requests {
+            LOGS.with(|logs| logs.borrow_mut().clear());
+            let out = exchange(&mut StreamProcessor::new(), request.as_bytes(), &response);
+            let logs = LOGS.with(|logs| logs.take());
+            assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+            assert!(logs.contains("[LLM] Detected"), "{logs}");
+            assert!(!logs.contains("HBTEST"), "{logs}");
+        }
     }
 }
