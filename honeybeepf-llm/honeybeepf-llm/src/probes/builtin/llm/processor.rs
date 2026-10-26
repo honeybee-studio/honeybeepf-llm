@@ -737,4 +737,63 @@ mod tests {
         assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
     }
+
+    thread_local! {
+        static LOGS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+
+    /// Keeps every record at every level, per thread so parallel tests don't mix their output.
+    struct CaptureLogger;
+
+    impl log::Log for CaptureLogger {
+        fn enabled(&self, _: &log::Metadata) -> bool {
+            true
+        }
+
+        fn log(&self, r: &log::Record) {
+            let line = format!("{} {}\n", r.level(), r.args());
+            LOGS.with(|logs| logs.borrow_mut().push_str(&line));
+        }
+
+        fn flush(&self) {}
+    }
+
+    static LOGGER: CaptureLogger = CaptureLogger;
+
+    #[test]
+    fn test_credentials_stay_out_of_logs() {
+        log::set_logger(&LOGGER).expect("no other logger in the test binary");
+        log::set_max_level(log::LevelFilter::Trace);
+        // Fake keys carry HBTEST; the query and header forms are how Gemini and SigV4 send them.
+        let gemini = "AIzaSyHBTEST0gemini0000000000000000000";
+        let presigned = "X-Amz-Credential=AKIAHBTEST0000000000%2F20261023%2Fus-east-1%2Fbedrock%2Faws4_request\
+                         &X-Amz-Security-Token=HBTEST0token&X-Amz-Signature=HBTEST0signature";
+        let openai = "sk-proj-HBTEST0openai00000000000000000000000000";
+        let requests = [
+            format!(
+                "POST /v1beta/models/gemini-2.5-flash:generateContent?key={gemini} HTTP/1.1\r\n\
+                     Host: generativelanguage.googleapis.com\r\nx-goog-api-key: {gemini}\r\n\r\n{{}}"
+            ),
+            format!(
+                "POST /model/anthropic.claude-sonnet-5-5-v1:0/converse?{presigned} HTTP/1.1\r\n\
+                     Host: bedrock-runtime.us-east-1.amazonaws.com\r\n\r\n{{}}"
+            ),
+            format!(
+                "POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer {openai}\r\n\r\n\
+                     {{\"messages\":[{{\"role\":\"user\",\"content\":\"{openai}\"}}]}}"
+            ),
+        ];
+        let response = h1(
+            "application/json",
+            r#"{"model":"m","usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
+        );
+        for request in &requests {
+            LOGS.with(|logs| logs.borrow_mut().clear());
+            let out = exchange(&mut StreamProcessor::new(), request.as_bytes(), &response);
+            let logs = LOGS.with(|logs| logs.take());
+            assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+            assert!(logs.contains("[LLM] Detected"), "{logs}");
+            assert!(!logs.contains("HBTEST"), "{logs}");
+        }
+    }
 }

@@ -69,7 +69,8 @@ impl ProtocolParser for Http11Parser {
                 .find_provider(&host_header, path)
                 .is_some()
             {
-                return Some(path.to_string());
+                // The path is logged and the query can carry a credential (Gemini `?key=`).
+                return Some(path.split_once('?').map_or(path, |(p, _)| p).to_string());
             }
         }
         None
@@ -248,6 +249,15 @@ mod tests {
             let line = String::from_utf8_lossy(req);
             assert_eq!(Http11Parser.detect_request(req), None, "{line}");
         }
+    }
+
+    #[test]
+    fn detected_path_leaves_out_the_query() {
+        let req = b"POST /v1beta/models/m:generateContent?key=AIzaFAKE HTTP/1.1\r\nHost: generativelanguage.googleapis.com\r\n\r\n{}";
+        assert_eq!(
+            Http11Parser.detect_request(req).as_deref(),
+            Some("/v1beta/models/m:generateContent")
+        );
     }
 
     #[test]
