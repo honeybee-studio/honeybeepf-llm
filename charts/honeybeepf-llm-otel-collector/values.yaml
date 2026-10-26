@@ -70,8 +70,7 @@ opentelemetry-collector:
     exporters:
       prometheus:
         endpoint: 0.0.0.0:8889
-        # docs/grafana dashboards query honeybeepf_* names.
-        namespace: honeybeepf
+        namespace: honeybeepf-llm
         const_labels:
           collector: otel
         resource_to_telemetry_conversion:
