@@ -80,6 +80,11 @@ impl ConfigurableProvider {
         } else {
             prompt
         };
+        let completion = if response_config.completion_excludes_thoughts {
+            completion.saturating_add(thoughts.unwrap_or(0))
+        } else {
+            completion
+        };
 
         // Model name from root
         let model = get_nested_value(json, &response_config.model_path)

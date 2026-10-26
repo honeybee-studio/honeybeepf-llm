@@ -7,7 +7,9 @@ use serde_json::Value;
 pub struct UsageInfo {
     /// All input tokens, cache reads and writes included (OTel `gen_ai.usage.input_tokens`).
     pub prompt_tokens: u64,
+    /// All output tokens, reasoning included (OTel `gen_ai.usage.output_tokens`).
     pub completion_tokens: u64,
+    /// Reasoning tokens, a subset of `completion_tokens`.
     pub thoughts_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
     pub cache_write_tokens: Option<u64>,

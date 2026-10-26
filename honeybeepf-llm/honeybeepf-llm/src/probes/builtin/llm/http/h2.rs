@@ -98,9 +98,9 @@ impl ProtocolParser for Http2Parser {
                 val = val["response"].take();
             }
             if let Some(info) = parse_response_json_value(&val) {
-                // A Gemini stream chunk before the last has no candidatesTokenCount yet; it is not a 0-token answer.
-                let gemini_partial = info.completion_tokens == 0
-                    && s.contains("\"usageMetadata\"")
+                // A Gemini stream chunk before the last has no candidatesTokenCount yet (thinking chunks may
+                // already count thoughts); it is not the final usage.
+                let gemini_partial = s.contains("\"usageMetadata\"")
                     && !s.contains("\"candidatesTokenCount\"")
                     && !s.contains("\"finishReason\"")
                     && !s.contains("\"blockReason\"");
@@ -131,6 +131,24 @@ mod tests {
         assert_eq!(
             tokens(Http2Parser.parse_response(last.as_bytes())),
             Some((1, 0))
+        );
+    }
+
+    #[test]
+    fn h2_gemini_thinking_chunk_waits_for_the_last_chunk() {
+        let thinking = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"plan\",\"thought\":true}]}}],\"usageMetadata\":{\"promptTokenCount\":7,\"thoughtsTokenCount\":50}}\r\n\r\n";
+        assert_eq!(
+            tokens(Http2Parser.parse_response(thinking.as_bytes())),
+            None
+        );
+
+        let last = format!(
+            "{thinking}data: {{\"candidates\":[{{\"content\":{{\"parts\":[{{\"text\":\"hi\"}}]}},\"finishReason\":\"STOP\"}}],\
+             \"usageMetadata\":{{\"promptTokenCount\":7,\"candidatesTokenCount\":25,\"thoughtsTokenCount\":100}}}}\r\n\r\n"
+        );
+        assert_eq!(
+            tokens(Http2Parser.parse_response(last.as_bytes())),
+            Some((7, 125))
         );
     }
 

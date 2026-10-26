@@ -121,6 +121,7 @@ fn gemini() -> ProviderConfig {
             completion_tokens: "candidatesTokenCount".to_string(),
             completion_optional: true,
             thoughts_tokens: Some("thoughtsTokenCount".to_string()),
+            completion_excludes_thoughts: true,
             cache_read_tokens: Some("cachedContentTokenCount".to_string()),
             model_path: "modelVersion".to_string(),
             ..ResponseConfig::default()
@@ -205,6 +206,10 @@ pub struct ResponseConfig {
     /// Optional: field name for thinking/reasoning tokens
     pub thoughts_tokens: Option<String>,
 
+    /// Whether `completion_tokens` leaves out thinking tokens (Gemini), so the output total adds them back
+    #[serde(default)]
+    pub completion_excludes_thoughts: bool,
+
     /// Optional: field name for prompt tokens read from the provider cache
     #[serde(alias = "cached_tokens")]
     pub cache_read_tokens: Option<String>,
@@ -245,6 +250,7 @@ impl Default for ResponseConfig {
             completion_tokens: default_completion_tokens(),
             completion_optional: false,
             thoughts_tokens: None,
+            completion_excludes_thoughts: false,
             cache_read_tokens: None,
             cache_write_tokens: None,
             prompt_excludes_cache: false,

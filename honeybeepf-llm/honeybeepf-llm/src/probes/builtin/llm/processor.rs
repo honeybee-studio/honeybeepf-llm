@@ -352,11 +352,9 @@ fn record_usage(
     let is_error = usage.prompt_tokens == 0 && usage.completion_tokens == 0;
 
     crate::telemetry::record_llm_request(
+        usage,
         model_str,
         latency_secs,
-        usage.prompt_tokens,
-        usage.completion_tokens,
-        (usage.cache_read_tokens, usage.cache_write_tokens),
         is_error,
         #[cfg(feature = "k8s")]
         pod_info.as_ref(),
