@@ -120,6 +120,42 @@ fn test_openai_responses_parse_usage() {
     assert_eq!(usage.model, Some("gpt-6".to_string()));
 }
 
+// The compacted response carries Responses usage but no `model`; its output items have their own `status`.
+#[test]
+fn test_openai_responses_compact_parse_usage() {
+    let registry = ProviderRegistry::with_defaults();
+    let config = registry
+        .find_provider("api.openai.com", "/v1/responses/compact")
+        .unwrap()
+        .clone();
+    let provider = ConfigurableProvider::new(config);
+    let response = json!({
+        "id": "resp_001",
+        "object": "response.compaction",
+        "output": [
+            {"id": "msg_001", "status": "completed", "type": "message", "role": "user",
+             "content": [{"type": "input_text", "text": "usage: {\"input_tokens\": 1}"}]},
+            {"type": "compaction", "id": "cmp_001", "encrypted_content": "encrypted-summary"}
+        ],
+        "created_at": 1731459200,
+        "usage": {
+            "input_tokens": 1200,
+            "input_tokens_details": {"cached_tokens": 1024, "cache_write_tokens": 0},
+            "output_tokens": 300,
+            "output_tokens_details": {"reasoning_tokens": 64},
+            "total_tokens": 1500
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!(usage.prompt_tokens, 1200);
+    assert_eq!(usage.completion_tokens, 300);
+    assert_eq!(usage.thoughts_tokens, Some(64));
+    assert_eq!(usage.cache_read_tokens, Some(1024));
+    assert_eq!(usage.cache_write_tokens, Some(0));
+    assert_eq!(usage.model, None);
+}
+
 fn default_provider(host: &str, path: &str) -> ConfigurableProvider {
     let registry = ProviderRegistry::with_defaults();
     ConfigurableProvider::new(registry.find_provider(host, path).unwrap().clone())

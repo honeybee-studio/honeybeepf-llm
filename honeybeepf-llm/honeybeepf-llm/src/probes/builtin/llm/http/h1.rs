@@ -21,40 +21,97 @@ impl Http11Parser {
         matches!(req.parse(buffer), Ok(httparse::Status::Complete(_)))
     }
 
+    /// Whether the buffer starts with a complete request head whose Host no provider serves.
+    pub fn has_foreign_host(buffer: &[u8]) -> bool {
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut req = httparse::Request::new(&mut headers);
+        if !matches!(req.parse(buffer), Ok(httparse::Status::Complete(_))) {
+            return false;
+        }
+        req.headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("Host"))
+            .and_then(|h| std::str::from_utf8(h.value).ok())
+            .is_some_and(|host| !PROVIDER_REGISTRY.may_serve_host(host))
+    }
+
     /// Whether the buffer holds a whole HTTP/1.1 response by its framing, after any 1xx interim responses.
     pub fn is_complete_response(buffer: &[u8]) -> bool {
-        let rest = skip_interim_responses(buffer);
-        let mut headers = [httparse::EMPTY_HEADER; 64];
-        let mut resp = httparse::Response::new(&mut headers);
-        let Ok(httparse::Status::Complete(n)) = resp.parse(rest) else {
-            return false;
-        };
-        let body = &rest[n..];
-        if let Some(len) = content_length(resp.headers) {
-            return body.len() >= len;
-        }
-        resp.headers
-            .iter()
-            .find(|h| h.name.eq_ignore_ascii_case("Transfer-Encoding"))
-            .is_some_and(|h| byte_utils::contains_pattern(h.value, b"chunked"))
-            && chunked_ended(body)
+        final_head(buffer).is_some_and(|head| head.framing.ended(head.body))
     }
 }
 
-/// The buffer from the final response head on, past any complete 1xx interim responses.
-fn skip_interim_responses(mut buffer: &[u8]) -> &[u8] {
+/// How the end of a response body is found.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Framing {
+    Length(usize),
+    Chunked,
+    UntilClose,
+}
+
+impl Framing {
+    /// Whether the body holds all the framing announces.
+    fn ended(self, body: &[u8]) -> bool {
+        match self {
+            Framing::Length(len) => body.len() >= len,
+            Framing::Chunked => chunked_ended(body),
+            Framing::UntilClose => false,
+        }
+    }
+}
+
+/// The final response head with its framing and SSE flag.
+struct Head<'b> {
+    header_slots: [httparse::Header<'b>; 64],
+    header_count: usize,
+    body: &'b [u8],
+    framing: Framing,
+    is_sse: bool,
+}
+
+impl<'b> Head<'b> {
+    fn headers(&self) -> &[httparse::Header<'b>] {
+        &self.header_slots[..self.header_count]
+    }
+}
+
+/// Parse the final response head once, past any complete 1xx interim responses.
+fn final_head(buffer: &[u8]) -> Option<Head<'_>> {
+    let mut rest = buffer;
     loop {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut resp = httparse::Response::new(&mut headers);
-        match resp.parse(buffer) {
-            Ok(httparse::Status::Complete(n))
-                if resp.code.is_some_and(|c| (100..200).contains(&c)) =>
-            {
-                buffer = &buffer[n..];
-            }
-            _ => return buffer,
+        let Ok(httparse::Status::Complete(n)) = resp.parse(rest) else {
+            return None;
+        };
+        // `100 Continue` (large uploads) and `103 Early Hints` carry none of the final response's framing.
+        if resp.code.is_some_and(|c| (100..200).contains(&c)) {
+            rest = &rest[n..];
+            continue;
         }
+        // Transfer-Encoding overrides Content-Length (RFC 9112 §6.3).
+        let framing = if header_contains(resp.headers, "Transfer-Encoding", b"chunked") {
+            Framing::Chunked
+        } else {
+            content_length(resp.headers).map_or(Framing::UntilClose, Framing::Length)
+        };
+        let is_sse = header_contains(resp.headers, "Content-Type", b"text/event-stream");
+        // httparse fills the array from the front and shrinks `resp.headers` to the parsed ones.
+        let header_count = resp.headers.len();
+        return Some(Head {
+            header_slots: headers,
+            header_count,
+            body: &rest[n..],
+            framing,
+            is_sse,
+        });
     }
+}
+
+fn header_contains(headers: &[httparse::Header], name: &str, pattern: &[u8]) -> bool {
+    headers.iter().any(|h| {
+        h.name.eq_ignore_ascii_case(name) && byte_utils::contains_pattern(h.value, pattern)
+    })
 }
 
 impl ProtocolParser for Http11Parser {
@@ -96,47 +153,27 @@ impl ProtocolParser for Http11Parser {
     }
 
     fn parse_response(&self, buffer: &[u8]) -> Option<UsageInfo> {
-        // `100 Continue` (large uploads) and `103 Early Hints` carry none of the final response's framing.
-        let buffer = skip_interim_responses(buffer);
-        let mut headers = [httparse::EMPTY_HEADER; 64];
-        let mut resp = httparse::Response::new(&mut headers);
+        let head = final_head(buffer)?;
+        let body = head.body;
+        let is_chunked = head.framing == Framing::Chunked;
+        let is_encoded = encoding::is_encoded(head.headers());
 
-        let body_offset = match resp.parse(buffer) {
-            Ok(httparse::Status::Complete(n)) => n,
-            _ => return None,
-        };
-
-        let is_sse = resp.headers.iter().any(|h| {
-            h.name.eq_ignore_ascii_case("Content-Type")
-                && String::from_utf8_lossy(h.value).contains("text/event-stream")
-        });
-        let is_chunked = resp.headers.iter().any(|h| {
-            h.name.eq_ignore_ascii_case("Transfer-Encoding")
-                && String::from_utf8_lossy(h.value).contains("chunked")
-        });
-        let is_encoded = encoding::is_encoded(resp.headers);
-
-        let body = &buffer[body_offset..];
-        let ended = if is_chunked {
-            chunked_ended(body)
-        } else {
-            content_length(resp.headers).is_none_or(|len| body.len() >= len)
-        };
+        // A close-delimited body has no end to wait for, so it is decoded as it stands.
+        let ended = head.framing == Framing::UntilClose || head.framing.ended(body);
         // Parsing re-runs on every read and decoding is not incremental, so wait for the framed end.
         if is_encoded && !ended {
             return None;
         }
 
-        // Decode chunked transfer encoding first
         let dechunked = if is_chunked {
             byte_utils::decode_chunked_body(body)
         } else {
             std::borrow::Cow::Borrowed(body)
         };
-        let decompressed = encoding::decode(dechunked, resp.headers)?;
+        let decompressed = encoding::decode(dechunked, head.headers())?;
 
         // SSE events can straddle chunk boundaries, so they are parsed only after dechunking.
-        if is_sse {
+        if head.is_sse {
             // A truncated read desyncs the chunk framing; once the stream has ended, fall back to raw lines.
             return parse_sse_body(&decompressed).or_else(|| {
                 if is_chunked && !is_encoded && ended {
@@ -251,6 +288,17 @@ mod tests {
     }
 
     #[test]
+    fn responses_compact_is_detected_but_input_tokens_is_not() {
+        let compact = b"POST /v1/responses/compact HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{\"model\":\"gpt-6\",\"input\":\"hi\"}";
+        assert_eq!(
+            Http11Parser.detect_request(compact).as_deref(),
+            Some("/v1/responses/compact")
+        );
+        let count = b"POST /v1/responses/input_tokens HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{\"model\":\"gpt-6\",\"input\":\"hi\"}";
+        assert_eq!(Http11Parser.detect_request(count), None);
+    }
+
+    #[test]
     fn only_post_to_a_generation_path_is_detected() {
         let post = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{}";
         assert!(Http11Parser.detect_request(post).is_some());
@@ -337,6 +385,73 @@ mod tests {
                 let info = Http11Parser.parse_response(resp.as_bytes());
                 assert_eq!(tokens(info), Some((11, 4)), "{resp:?}");
             }
+        }
+    }
+
+    #[test]
+    fn content_length_zero_is_whole_without_usage() {
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        assert!(Http11Parser::is_complete_response(resp));
+        assert_eq!(tokens(Http11Parser.parse_response(resp)), None);
+    }
+
+    #[test]
+    fn transfer_encoding_overrides_content_length() {
+        let json =
+            r#"{"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":4}}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\
+             Transfer-Encoding: chunked\r\n\r\n{:x}\r\n{json}\r\n0\r\n\r\n",
+            json.len()
+        );
+        let before_last_chunk = &resp.as_bytes()[..resp.len() - "0\r\n\r\n".len()];
+        assert!(!Http11Parser::is_complete_response(before_last_chunk));
+        assert!(Http11Parser::is_complete_response(resp.as_bytes()));
+        let info = Http11Parser.parse_response(resp.as_bytes());
+        assert_eq!(tokens(info), Some((11, 4)));
+    }
+
+    #[test]
+    fn chunked_on_a_later_transfer_encoding_line_frames_the_body() {
+        let resp = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    2\r\nok\r\n0\r\n\r\n";
+        assert!(!Http11Parser::is_complete_response(
+            &resp.as_bytes()[..resp.len() - "0\r\n\r\n".len()]
+        ));
+        assert!(Http11Parser::is_complete_response(resp.as_bytes()));
+    }
+
+    #[test]
+    fn content_encoding_as_the_last_header_is_applied() {
+        let json =
+            r#"{"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":4}}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Content-Encoding: compress\r\n\r\n{json}",
+            json.len()
+        );
+        // An unknown coding is refused, so usage here means the last header was cut off.
+        assert_eq!(tokens(Http11Parser.parse_response(resp.as_bytes())), None);
+    }
+
+    #[test]
+    fn interim_only_or_partial_head_is_neither_whole_nor_parsed() {
+        for buf in [
+            "HTTP/1.1 100 Continue\r\n\r\n",
+            "HTTP/1.1 103 Early Hints\r\nLink: </s.css>; rel=preload\r\n\r\nHTTP/1.1 100 Continue\r\n\r\n",
+            "HTTP/1.1 100 Cont",
+            "HTTP/1.1 200 OK\r\nContent-Le",
+            "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n",
+        ] {
+            assert!(
+                !Http11Parser::is_complete_response(buf.as_bytes()),
+                "{buf:?}"
+            );
+            assert_eq!(
+                tokens(Http11Parser.parse_response(buf.as_bytes())),
+                None,
+                "{buf:?}"
+            );
         }
     }
 

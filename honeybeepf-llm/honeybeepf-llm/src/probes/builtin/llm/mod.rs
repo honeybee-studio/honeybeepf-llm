@@ -1,3 +1,4 @@
+mod conn_filter;
 pub mod http;
 pub mod processor;
 
@@ -12,6 +13,7 @@ use aya::{
     Ebpf,
     maps::{MapData, PerCpuArray},
 };
+use conn_filter::{ConnFilter, payload};
 use honeybeepf_llm_common::{LLM_STAT_COUNT, LLM_STAT_NAMES, LlmEvent};
 use honeybeepf_llm_core::types::LlmDirection;
 use log::{info, warn};
@@ -303,16 +305,13 @@ fn route_event(
             _ => Outcome::Pending,
         };
     }
-    let data_len = std::cmp::min(
-        event.len.saturating_sub(event.offset) as usize,
-        honeybeepf_llm_common::MAX_SSL_BUF_SIZE,
-    );
-    if event.buf_filled == 0 || data_len == 0 {
+    let data = payload(event);
+    if data.is_empty() {
         return Outcome::Pending;
     }
     streams.entry(key).or_default().handle_fragment(
         LlmDirection::from(event.rw),
-        &event.buf[..data_len],
+        data,
         event.offset,
         event.len,
         event.truncated != 0,
@@ -363,9 +362,10 @@ impl Probe for LlmProbe {
 
         let state: StreamMap = Arc::new(Mutex::new(HashMap::new()));
         let handler_state = state.clone();
+        let mut conn_filter = ConnFilter::new(bpf)?;
 
         spawn_ringbuf_handler(bpf, "SSL_EVENTS", move |event: LlmEvent| {
-            if event.is_handshake == 1 {
+            if event.is_handshake == 1 || conn_filter.skip_if_foreign(&event, &handler_state) {
                 return;
             }
 
@@ -430,6 +430,7 @@ pub fn find_all_targets() -> Result<HashSet<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use conn_filter::opens_foreign_request;
     use honeybeepf_llm_common::{EventMetadata, MAX_SSL_BUF_SIZE};
 
     const OPENAI_REQUEST: &[u8] = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"gpt-4o\",\"stream\":true,\"messages\":[]}";
@@ -556,6 +557,44 @@ mod tests {
             );
         }
         assert!(streams.is_empty());
+    }
+
+    #[test]
+    fn test_only_a_request_head_to_a_non_provider_host_skips_the_connection() {
+        use LlmDirection::{Read, Write};
+        let noise =
+            b"POST /api/data HTTP/1.1\r\nHost: noise.internal\r\nContent-Length: 2\r\n\r\nxx";
+        assert!(opens_foreign_request(&call(1, OPENAI, Write, noise)));
+        let continued = LlmEvent {
+            offset: MAX_SSL_BUF_SIZE as u32,
+            ..call(1, OPENAI, Write, noise)
+        };
+        for e in [
+            continued,
+            call(1, OPENAI, Write, OPENAI_REQUEST),
+            call(
+                1,
+                OPENAI,
+                Write,
+                b"GET /v1/models HTTP/1.1\r\nHost: api.openai.com\r\n\r\n",
+            ),
+            call(
+                1,
+                OPENAI,
+                Write,
+                b"POST /api/data HTTP/1.1\r\nHost: noise.int",
+            ),
+            call(1, OPENAI, Write, b"POST /api/data HTTP/1.1\r\n\r\n"),
+            call(1, OPENAI, Write, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"),
+            call(
+                1,
+                OPENAI,
+                Read,
+                b"HTTP/1.1 200 OK\r\nHost: noise.internal\r\n\r\n",
+            ),
+        ] {
+            assert!(!opens_foreign_request(&e), "{:?}", payload(&e));
+        }
     }
 
     /// Two paths to one file (like two processes' `/proc/<pid>/root/...`) attach once.
