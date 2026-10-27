@@ -152,7 +152,7 @@ fn test_openai_responses_compact_parse_usage() {
     assert_eq!(usage.completion_tokens, 300);
     assert_eq!(usage.thoughts_tokens, Some(64));
     assert_eq!(usage.cache_read_tokens, Some(1024));
-    assert_eq!(usage.cache_write_tokens, None);
+    assert_eq!(usage.cache_write_tokens, Some(0));
     assert_eq!(usage.model, None);
 }
 
