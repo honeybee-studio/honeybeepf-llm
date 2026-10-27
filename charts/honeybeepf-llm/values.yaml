@@ -73,9 +73,8 @@ securityContext:
     drop:
       - ALL
     add:
-      - BPF
-      - NET_ADMIN
-      - PERFMON
+      - BPF         # load eBPF programs and maps
+      - PERFMON     # uprobe/tracepoint/fentry attach and bpf_probe_read_user
       - SYS_ADMIN   # Ubuntu perf_event_paranoid=4 workaround; not needed on Jammy >=5.15.0-165 / Noble >=6.8.0-91 (https://bugs.launchpad.net/ubuntu/+source/linux/+bug/2131046)
       - SYS_PTRACE  # cross-pod /proc access for libssl discovery (blocked by container LSM profiles + yama on all major K8s distros)
 
