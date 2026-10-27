@@ -153,6 +153,26 @@ impl ProviderRegistry {
         Self::from_json(DEFAULT_PROVIDERS).unwrap_or_default()
     }
 
+    /// Adds `user` providers; a user provider replaces every one here with the same name.
+    pub fn merge(self, user: Self) -> Self {
+        let replaced: Vec<String> = user.providers.iter().map(|u| u.name.clone()).collect();
+        let mut rest = user.providers;
+        let mut providers = Vec::with_capacity(self.providers.len() + rest.len());
+        for provider in self.providers {
+            if !replaced.contains(&provider.name) {
+                providers.push(provider);
+                continue;
+            }
+            // Usage parsing tries providers in order, so replacements take the first replaced one's place.
+            let (same, others): (Vec<_>, Vec<_>) =
+                rest.into_iter().partition(|u| u.name == provider.name);
+            providers.extend(same);
+            rest = others;
+        }
+        providers.extend(rest);
+        Self { providers }
+    }
+
     /// Find matching provider for given host and path
     pub fn find_provider(&self, host: &str, path: &str) -> Option<&ProviderConfig> {
         self.providers.iter().find(|p| {

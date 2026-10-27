@@ -265,6 +265,84 @@ fn test_custom_provider_json() {
     assert_eq!(registry.providers[0].name, "my-llm");
 }
 
+fn names(registry: &ProviderRegistry) -> Vec<&str> {
+    registry.providers.iter().map(|p| p.name.as_str()).collect()
+}
+
+#[test]
+fn test_user_providers_are_added_to_the_defaults() {
+    let user = r#"{"providers": [
+        {"name": "ollama", "hosts": ["ollama.internal"], "paths": ["/api/chat$"]},
+        {"name": "vllm", "hosts": ["vllm.internal"], "paths": ["/v1/chat/completions$"]}
+    ]}"#;
+    let registry =
+        ProviderRegistry::with_defaults().merge(ProviderRegistry::from_json(user).unwrap());
+    assert_eq!(
+        names(&registry),
+        [
+            "openai",
+            "openai",
+            "anthropic",
+            "gemini",
+            "anthropic",
+            "bedrock",
+            "ollama",
+            "vllm"
+        ]
+    );
+    assert_eq!(
+        provider_for(&registry, "api.openai.com/v1/chat/completions").as_deref(),
+        Some("openai")
+    );
+    assert_eq!(
+        provider_for(&registry, "ollama.internal/api/chat").as_deref(),
+        Some("ollama")
+    );
+
+    let empty = ProviderRegistry::from_json(r#"{"providers": []}"#).unwrap();
+    assert_eq!(
+        names(&ProviderRegistry::with_defaults().merge(empty)),
+        names(&ProviderRegistry::with_defaults())
+    );
+}
+
+// Usage parsing tries providers in order, so a replacement keeps the place of the defaults it replaces.
+#[test]
+fn test_user_provider_replaces_defaults_with_its_name_in_their_place() {
+    let user = r#"{"providers": [
+        {"name": "anthropic", "hosts": ["claude.proxy.internal"], "paths": ["/v1/messages$"]},
+        {"name": "ollama", "hosts": ["ollama.internal"]},
+        {"name": "anthropic", "hosts": ["claude.proxy.internal"], "paths": [":rawPredict$"]}
+    ]}"#;
+    let registry =
+        ProviderRegistry::with_defaults().merge(ProviderRegistry::from_json(user).unwrap());
+    assert_eq!(
+        names(&registry),
+        [
+            "openai",
+            "openai",
+            "anthropic",
+            "anthropic",
+            "gemini",
+            "bedrock",
+            "ollama"
+        ]
+    );
+    assert_eq!(registry.providers[3].paths, [":rawPredict$"]);
+    assert_eq!(
+        provider_for(&registry, "api.anthropic.com/v1/messages"),
+        None
+    );
+    assert_eq!(
+        provider_for(&registry, "claude.proxy.internal/v1/messages").as_deref(),
+        Some("anthropic")
+    );
+    assert_eq!(
+        provider_for(&registry, "api.openai.com/v1/responses").as_deref(),
+        Some("openai")
+    );
+}
+
 #[test]
 fn test_may_serve_host() {
     let registry = ProviderRegistry::with_defaults();

@@ -34,7 +34,8 @@ pub(super) static KNOWN_HOSTS: Lazy<Vec<&'static str>> = Lazy::new(|| {
 });
 
 fn load_provider_registry() -> ProviderRegistry {
-    // 1. Try loading from config file
+    let defaults = ProviderRegistry::with_defaults();
+
     // 1. Try loading from config file (supports YAML, JSON, TOML via config crate)
     if let Ok(path) = std::env::var("LLM_PROVIDERS_CONFIG_FILE") {
         if let Ok(settings) = config::Config::builder()
@@ -43,7 +44,7 @@ fn load_provider_registry() -> ProviderRegistry {
             && let Ok(reg) = settings.try_deserialize::<ProviderRegistry>()
         {
             log::info!("Loaded LLM providers from: {}", path);
-            return reg;
+            return defaults.merge(reg);
         }
         log::warn!("Failed to load or parse config file: {}", path);
     }
@@ -53,11 +54,11 @@ fn load_provider_registry() -> ProviderRegistry {
         && !config.is_empty()
         && let Ok(reg) = ProviderRegistry::from_json(&config)
     {
-        return reg;
+        return defaults.merge(reg);
     }
 
     // 3. Use defaults
-    ProviderRegistry::with_defaults()
+    defaults
 }
 
 /// Get cached providers (no allocation per call)
