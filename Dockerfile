@@ -40,20 +40,21 @@ RUN case ${TARGETARCH} in \
     "arm64") rustup target add aarch64-unknown-linux-gnu ;; \
     esac
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/app/honeybeepf-llm/target,sharing=locked \
+# Mounts are per arch so amd64 and arm64 build in parallel. The registry is not shared because
+# cargo's package cache lock lives in CARGO_HOME, outside the mount.
+RUN --mount=type=cache,id=cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=target-${TARGETARCH},target=/app/honeybeepf-llm/target,sharing=locked \
     export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc && \
     TARGET_TRIPLE=$(case ${TARGETARCH} in "amd64") echo "x86_64-unknown-linux-gnu" ;; "arm64") echo "aarch64-unknown-linux-gnu" ;; esac) && \
     cargo chef cook --release --features k8s --recipe-path recipe.json --package honeybeepf-llm --target $TARGET_TRIPLE
 
 COPY . /app
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/app/honeybeepf-llm/target,sharing=locked \
+# build.rs builds the eBPF object into target/ebpf.
+RUN --mount=type=cache,id=cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=target-${TARGETARCH},target=/app/honeybeepf-llm/target,sharing=locked \
     export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc && \
     TARGET_TRIPLE=$(case ${TARGETARCH} in "amd64") echo "x86_64-unknown-linux-gnu" ;; "arm64") echo "aarch64-unknown-linux-gnu" ;; esac) && \
-    # eBPF build, using rust-src to build the target from source
-    cargo build --release --package honeybeepf-llm-ebpf --target=bpfel-unknown-none -Z build-std=core && \
     cargo build --release --features k8s --package honeybeepf-llm --target $TARGET_TRIPLE && \
     cp target/$TARGET_TRIPLE/release/honeybeepf-llm /app/honeybeepf-llm-bin
 
