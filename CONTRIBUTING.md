@@ -68,9 +68,9 @@ Read it only from test code: a `#[cfg(test)]` module, a `#![cfg(test)]` file, or
 CI runs `ci/check-binary-provenance.sh`, which fails when a binary file (git's binary check, any NUL
 byte, or invalid UTF-8) is outside `testdata/`, has no such row or a different sha256, or when a build
 or deploy file (`build.rs`, `Cargo.toml`, Dockerfiles, workflows, charts, ...) or non-test Rust code
-mentions `testdata` or a binary file's name. Only the files listed one by one in the script's `allowlist` (today
-`docs/images/architecture.png`) need no row; add a new documentation image there as its own line. Run
-`bash ci/check-binary-provenance.sh` (bash 4.4+) before you push.
+mentions `testdata` or a binary file's name. Only the files listed one by one in the script's `allowlist`
+(today `docs/images/architecture.png` and `docs/images/grafana.png`) need no row; add a new documentation
+image there as its own line. Run `bash ci/check-binary-provenance.sh` (bash 4.4+) before you push.
 
 ## AI Tooling Policy
 

@@ -179,6 +179,8 @@ kubectl -n monitoring create configmap honeybeepf-dashboards \
 kubectl -n monitoring label configmap honeybeepf-dashboards grafana_dashboard=1
 ```
 
+![LLM Cost Observability dashboard on the demo cluster: requests and tokens per minute and latency percentiles for team-a, team-b and team-c, token share by team, and usage by model](docs/images/grafana.png)
+
 See [`docs/grafana/README.md`](docs/grafana/README.md) for the template variables and other options.
 
 ## Building from source
