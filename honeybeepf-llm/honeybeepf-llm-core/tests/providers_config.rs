@@ -31,6 +31,17 @@ fn test_default_providers() {
 }
 
 #[test]
+fn test_default_providers_json_matches_rust_list() {
+    let json = include_str!("../src/providers/default_providers.json");
+    let from_file = ProviderRegistry::from_json(json).unwrap();
+    let from_rust = ProviderRegistry::with_defaults();
+    assert_eq!(from_file.providers.len(), from_rust.providers.len());
+    for (file, rust) in from_file.providers.iter().zip(&from_rust.providers) {
+        assert_eq!(format!("{file:#?}"), format!("{rust:#?}"), "{}", rust.name);
+    }
+}
+
+#[test]
 fn test_default_provider_hosts() {
     let openai = [
         "api.openai.com",
