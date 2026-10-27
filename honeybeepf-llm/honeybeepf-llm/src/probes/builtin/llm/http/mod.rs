@@ -11,7 +11,7 @@ mod registry;
 mod sse;
 
 // Re-export main types
-pub use h1::Http11Parser;
+pub use h1::{Http11Parser, ResponseProgress};
 pub use h2::Http2Parser;
 
 use honeybeepf_llm_core::types::UsageInfo;
@@ -27,6 +27,15 @@ pub trait ProtocolParser: Send + Sync {
 
     /// Parse response buffer. Returns UsageInfo if complete.
     fn parse_response(&self, buffer: &[u8]) -> Option<UsageInfo>;
+
+    /// Parse a response buffer that only grew since the last call with the same progress.
+    fn parse_response_from(
+        &self,
+        buffer: &[u8],
+        _progress: &mut ResponseProgress,
+    ) -> Option<UsageInfo> {
+        self.parse_response(buffer)
+    }
 
     /// Whether the client writes while a response is still arriving (HTTP/2 flow control, pings).
     fn writes_during_response(&self) -> bool {

@@ -19,29 +19,26 @@ const SSE_END_MARKERS: [&str; 7] = [
 ];
 
 pub(super) fn parse_sse_body(body: &[u8]) -> Option<UsageInfo> {
-    let text = String::from_utf8_lossy(body);
-    // Only complete lines count: a partial last event can show its end marker before its usage.
-    let text = text.rfind('\n').map_or("", |end| &text[..end]);
+    let mut cursor = SseCursor::default();
+    cursor.feed(body);
+    cursor.usage()
+}
 
-    // `[DONE]` counts only as its own line: generated text can quote it unescaped inside a JSON string.
-    let done = text.lines().any(|line| line.trim() == "data: [DONE]");
-    if !done && !SSE_END_MARKERS.iter().any(|m| text.contains(m)) {
-        return None;
-    }
-
-    // Usage-bearing events merged in order: Anthropic sends input tokens in
-    // message_start and only output tokens in message_delta.
-    let mut acc: Option<Value> = None;
-
+fn read_lines(cursor: &mut SseCursor, bytes: &[u8]) {
+    let text = String::from_utf8_lossy(bytes);
     for line in text.lines() {
         let line = line.trim();
-        if !line.starts_with("data: ") {
+        // `[DONE]` counts only as its own line: generated text can quote it unescaped inside a JSON string.
+        if line == "data: [DONE]" {
+            cursor.ended = true;
+            cursor.done = true;
+        } else if !cursor.ended && SSE_END_MARKERS.iter().any(|m| line.contains(m)) {
+            cursor.ended = true;
+        }
+        if cursor.done || !line.starts_with("data: ") {
             continue;
         }
         let data = &line["data: ".len()..];
-        if data == "[DONE]" {
-            break;
-        }
 
         // A failed Responses stream may end without usage; its status still has to finish the call.
         let is_usage_event = serde_json::from_str::<SseChunkDelta>(data).is_ok_and(|chunk| {
@@ -62,13 +59,55 @@ pub(super) fn parse_sse_body(body: &[u8]) -> Option<UsageInfo> {
         } else if is_responses_event(&val) {
             val = val["response"].take();
         }
-        match acc.as_mut() {
+        match cursor.acc.as_mut() {
             Some(prev) => merge_sse_event(prev, val),
-            None => acc = Some(val),
+            None => cursor.acc = Some(val),
         }
     }
+}
 
-    acc.as_ref().and_then(parse_response_json_value)
+/// The complete lines of one SSE body read so far, so each read parses only the lines it completes.
+#[derive(Default)]
+pub(super) struct SseCursor {
+    /// Bytes after the last newline.
+    partial: Vec<u8>,
+    /// An end marker or `[DONE]` was read, so the merged usage is final.
+    ended: bool,
+    /// `[DONE]` was read; nothing after it is merged.
+    done: bool,
+    /// Usage-bearing events merged in order: Anthropic sends input tokens in
+    /// message_start and only output tokens in message_delta.
+    acc: Option<Value>,
+}
+
+impl SseCursor {
+    /// Read the lines these bytes complete.
+    pub(super) fn feed(&mut self, bytes: &[u8]) {
+        // Only complete lines count: a partial last event can show its end marker before its usage.
+        let Some(last) = bytes.iter().rposition(|&b| b == b'\n') else {
+            self.partial.extend_from_slice(bytes);
+            return;
+        };
+        let (complete, rest) = bytes.split_at(last + 1);
+        if self.partial.is_empty() {
+            read_lines(self, complete);
+        } else {
+            let mut joined = std::mem::take(&mut self.partial);
+            joined.extend_from_slice(complete);
+            read_lines(self, &joined);
+            joined.clear();
+            self.partial = joined;
+        }
+        self.partial.extend_from_slice(rest);
+    }
+
+    /// The merged usage once an end marker or `[DONE]` has been read.
+    pub(super) fn usage(&self) -> Option<UsageInfo> {
+        if !self.ended {
+            return None;
+        }
+        self.acc.as_ref().and_then(parse_response_json_value)
+    }
 }
 
 /// Overlay a later SSE event onto the accumulated one, merging nested objects one level deep.

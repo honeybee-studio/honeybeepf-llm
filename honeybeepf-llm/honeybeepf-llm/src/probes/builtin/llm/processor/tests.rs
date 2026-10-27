@@ -470,6 +470,80 @@ fn test_chunk_larger_than_response_buffer_frees_next_request() {
     }
 }
 
+/// A chunked OpenAI chat stream as servers flush it: one event per read, then usage and `[DONE]`.
+fn openai_sse_reads(events: usize) -> Vec<Vec<u8>> {
+    let chunk = |ev: &str| format!("{:x}\r\n{ev}\r\n", ev.len()).into_bytes();
+    let mut reads = vec![
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nTransfer-Encoding: chunked\r\n\r\n"
+            .to_vec(),
+    ];
+    for i in 0..events {
+        reads.push(chunk(&format!(
+            "data: {{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{{\"index\":0,\
+             \"delta\":{{\"content\":\" tok{i}\"}},\"logprobs\":null,\"finish_reason\":null}}],\"usage\":null}}\n\n"
+        )));
+    }
+    reads.push(chunk(
+        "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\
+         \"delta\":{},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":null}\n\n",
+    ));
+    let usage = format!(
+        "data: {{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[],\
+         \"usage\":{{\"prompt_tokens\":11,\"completion_tokens\":{events}}}}}\n\ndata: [DONE]\n\n"
+    );
+    let mut last = chunk(&usage);
+    last.extend_from_slice(b"0\r\n\r\n");
+    reads.push(last);
+    reads
+}
+
+#[test]
+fn test_stream_after_a_lost_fragment_is_parsed_from_its_own_start() {
+    let mut p = StreamProcessor::new();
+    let mut lossy = openai_sse_reads(50);
+    // One event over 4 KB arrives in two fragments; the second is lost after 10 KB were parsed.
+    let event = format!("data: {}\n\n", "x".repeat(6000));
+    lossy[40] = format!("{:x}\r\n{event}\r\n", event.len()).into_bytes();
+    let short = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n";
+    let mut out = outcomes(&mut p, &lossy, Some((40, 1)));
+    out.extend(outcomes(&mut p, &[short.to_vec()], None));
+    assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
+    assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+}
+
+fn fastest(mut run: impl FnMut()) -> std::time::Duration {
+    (0..3)
+        .map(|_| {
+            let start = Instant::now();
+            run();
+            start.elapsed()
+        })
+        .min()
+        .unwrap_or_default()
+}
+
+#[test]
+fn test_long_sse_stream_costs_about_one_parse_of_its_bytes() {
+    // Parsing the whole buffer again on every read would cost ~reads/2 parses of the final buffer.
+    let reads = openai_sse_reads(1000);
+    let whole = reads.concat();
+    let streamed = fastest(|| {
+        let mut p = StreamProcessor::new();
+        for _ in 0..2 {
+            let out = outcomes(&mut p, &reads, None);
+            assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+            assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+        }
+    });
+    let parsed_once = fastest(|| {
+        assert!(http::Http11Parser.parse_response(&whole).is_some());
+    });
+    assert!(
+        streamed < parsed_once * 40,
+        "two streams took {streamed:?}, one parse of the whole response {parsed_once:?}"
+    );
+}
+
 thread_local! {
     static LOGS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
