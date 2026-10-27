@@ -66,6 +66,10 @@ jobs:
           - '6.12-20261013.143814'
           - '6.18-20261013.143814'
           - '7.2-20261013.143814'
+          # RHEL 4.18/5.14 kernels with backported BPF; the rootfs is still Debian, so smoke.sh's apt-get works.
+          - 'rhel8.10-20261013.143814'
+          - 'rhel9.6-20261013.143814'
+          - 'rhel9.7-20261021.083220'
           - 'bpf-next-20261013.143814'
         include:
           - kernel: 'bpf-next-20261013.143814'

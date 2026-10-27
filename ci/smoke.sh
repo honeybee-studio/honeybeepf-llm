@@ -84,7 +84,8 @@ kill "$MOCK_PID" 2>/dev/null || true
 
 cat /tmp/boot.log
 
-if grep -qiE 'panicked|FATAL|verifier|failed to attach|failed to load' /tmp/boot.log; then
+# A working kprobe fallback logs the fentry error it replaced; that line is not a failure.
+if grep -v 'libssl open watch: kprobe' /tmp/boot.log | grep -qiE 'panicked|FATAL|verifier|failed to attach|failed to load'; then
   echo "::error::BPF load/attach failure on $(uname -r)"
   exit 1
 fi
