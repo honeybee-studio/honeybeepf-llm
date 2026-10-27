@@ -151,9 +151,7 @@ impl HoneyBeeMetrics {
                 .build(),
             llm_responses_unparsed_total: meter
                 .u64_counter("llm_responses_unparsed_total")
-                .with_description(
-                    "LLM responses not recorded because bytes were lost in capture or a complete response had no usage",
-                )
+                .with_description("LLM calls not recorded because no usage could be read, by reason")
                 .with_unit("responses")
                 .build(),
             // No unit: the Prometheus exporter would append it to the name.
@@ -240,6 +238,11 @@ impl HoneyBeeMetrics {
             self.llm_tokens_total
                 .add(usage.completion_tokens, &comp_attrs);
         }
+    }
+
+    fn record_unparsed(&self, reason: &'static str, mut attrs: Vec<KeyValue>) {
+        attrs.push(KeyValue::new("reason", reason));
+        self.llm_responses_unparsed_total.add(1, &attrs);
     }
 }
 
@@ -427,8 +430,11 @@ pub fn record_llm_request(
     }
 }
 
-/// Count an LLM response that lost bytes in capture and so has no usage to record.
-pub fn record_llm_unparsed(#[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>) {
+/// Count an LLM call that has no usage to record, by `reason`.
+pub fn record_llm_unparsed(
+    reason: &'static str,
+    #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
+) {
     if let Some(m) = metrics() {
         #[allow(unused_mut)]
         let mut attrs = Vec::new();
@@ -439,7 +445,7 @@ pub fn record_llm_unparsed(#[cfg(feature = "k8s")] pod_info: Option<&std::sync::
             attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
         }
 
-        m.llm_responses_unparsed_total.add(1, &attrs);
+        m.record_unparsed(reason, attrs);
     }
 }
 
@@ -615,6 +621,60 @@ mod tests {
 
         assert_eq!(total("llm_reasoning_tokens_total")?, 4);
         assert_eq!(total("llm_tokens_total")?, 9);
+        Ok(())
+    }
+
+    #[test]
+    fn llm_unparsed_calls_are_counted_by_reason() -> Result<()> {
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"));
+        let pod = || vec![KeyValue::new("target.namespace", "team-a")];
+        metrics.record_unparsed("response_too_large", pod());
+        metrics.record_unparsed("next_request", pod());
+        metrics.record_unparsed("next_request", pod());
+
+        let mut rm = ResourceMetrics {
+            resource: Resource::empty(),
+            scope_metrics: vec![],
+        };
+        reader.collect(&mut rm)?;
+        let sum = rm
+            .scope_metrics
+            .iter()
+            .flat_map(|s| &s.metrics)
+            .find(|m| m.name == "llm_responses_unparsed_total")
+            .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
+            .context("llm_responses_unparsed_total counter not collected")?;
+        let mut points: Vec<(Vec<String>, u64)> = sum
+            .data_points
+            .iter()
+            .map(|p| {
+                let mut kv: Vec<String> = p
+                    .attributes
+                    .iter()
+                    .map(|kv| format!("{}={}", kv.key, kv.value))
+                    .collect();
+                kv.sort();
+                (kv, p.value)
+            })
+            .collect();
+        points.sort();
+        let labels = |reason: &str| {
+            vec![
+                format!("reason={reason}"),
+                "target.namespace=team-a".to_string(),
+            ]
+        };
+        assert_eq!(
+            points,
+            [
+                (labels("next_request"), 2),
+                (labels("response_too_large"), 1)
+            ]
+        );
         Ok(())
     }
 
