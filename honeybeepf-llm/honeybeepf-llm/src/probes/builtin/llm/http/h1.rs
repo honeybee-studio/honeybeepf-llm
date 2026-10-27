@@ -21,6 +21,20 @@ impl Http11Parser {
         matches!(req.parse(buffer), Ok(httparse::Status::Complete(_)))
     }
 
+    /// Whether the buffer starts with a complete request head whose Host no provider serves.
+    pub fn has_foreign_host(buffer: &[u8]) -> bool {
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut req = httparse::Request::new(&mut headers);
+        if !matches!(req.parse(buffer), Ok(httparse::Status::Complete(_))) {
+            return false;
+        }
+        req.headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("Host"))
+            .and_then(|h| std::str::from_utf8(h.value).ok())
+            .is_some_and(|host| !PROVIDER_REGISTRY.may_serve_host(host))
+    }
+
     /// Whether the buffer holds a whole HTTP/1.1 response by its framing, after any 1xx interim responses.
     pub fn is_complete_response(buffer: &[u8]) -> bool {
         final_head(buffer).is_some_and(|head| head.framing.ended(head.body))

@@ -321,6 +321,13 @@ impl ProviderRegistry {
             host_match && path_match
         })
     }
+
+    /// Whether some provider can match `host`; a provider without hosts matches every host.
+    pub fn may_serve_host(&self, host: &str) -> bool {
+        self.providers
+            .iter()
+            .any(|p| p.hosts.is_empty() || p.hosts.iter().any(|h| host_matches(host, h)))
+    }
 }
 
 /// Substring match; a pattern with one `*` must cover the whole host (port ignored), so regional hosts like
