@@ -43,7 +43,7 @@ builtinProbes:
     # Also probe executables with OpenSSL built in (official Node.js builds, node: images).
     executables: true
     # Custom providers config (optional). Built-in: OpenAI, Anthropic, Gemini (also via Azure, Bedrock, Vertex AI)
-    # Add your own providers here (e.g. Ollama, vLLM, private models); a built-in name replaces that built-in.
+    # Add your own providers here (e.g. Ollama, vLLM, private models); a built-in name replaces every built-in entry of that name.
     providers: []
     # Example:
     # providers:
