@@ -104,7 +104,7 @@ every change you submit. The following rules apply:
 ### Prerequisites
 
 - Rust toolchain (see `rust-toolchain.toml`)
-- Linux kernel 5.10+, or RHEL 8.10 / 9.6 / 9.7 (see Kernels in the README)
+- Linux kernel 5.10+, or a RHEL 8.10 / 9.6 / 9.7 kernel (see Kernels in the README)
 - bpf-linker for eBPF compilation
 
 ### Building

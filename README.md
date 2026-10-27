@@ -33,7 +33,7 @@ image; the client pods call a local mock of the provider APIs with fake keys.</s
 
 ## Quickstart
 
-Requires a Kubernetes cluster on Linux 5.10+ or RHEL 8.10 / 9.6 / 9.7 nodes, `kubectl` and Helm 3.
+Requires a Kubernetes cluster whose nodes run a Linux 5.10+ or RHEL 8.10 / 9.6 / 9.7 kernel, `kubectl` and Helm 3.
 
 ```bash
 git clone https://github.com/honeybee-studio/honeybeepf-llm.git
@@ -123,7 +123,7 @@ are seen; a plain-HTTP endpoint (a typical in-cluster Ollama or vLLM) is not.
 **Kernels:** CI loads and attaches the probes and detects an LLM request on 5.10, 5.15, 6.1, 6.6, 6.12, 6.18
 and 7.2, and on the RHEL 8.10 (4.18), 9.6 and 9.7 (5.14) kernels
 ([kernel matrix](.github/workflows/kernel-matrix.yml)); other RHEL minor releases are not tested. Token counts
-are checked only on 7.0 (the tables above).
+are checked on Linux 7.0 (the tables above).
 
 ## How it works
 
