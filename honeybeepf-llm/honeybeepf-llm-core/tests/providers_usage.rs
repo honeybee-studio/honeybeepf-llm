@@ -384,6 +384,44 @@ fn test_custom_provider_cached_tokens_key_still_reads_cache() -> Result<(), serd
     Ok(())
 }
 
+// Every flat key a user config may set, so grouping the fields in Rust keeps the JSON shape.
+#[test]
+fn test_custom_provider_reads_every_flat_field() -> Result<(), serde_json::Error> {
+    let registry = ProviderRegistry::from_json(
+        r#"{"providers":[{"name":"proxy","response":{"usage_path":"meta.usage",
+            "prompt_tokens":"in","completion_tokens":"out","completion_optional":true,
+            "thoughts_tokens":"think","completion_excludes_thoughts":true,"cached_tokens":"hit",
+            "cache_write_tokens":"put","cache_write_long_ttl_tokens":"put_long","prompt_excludes_cache":true,
+            "service_tier_path":"tier","speed":"mode","inference_geo":"geo",
+            "model_path":"served.model","required_field":"marker"}}]}"#,
+    )?;
+    let provider = ConfigurableProvider::new(registry.providers[0].clone());
+    let body = json!({"tier": "flex", "served": {"model": "m-1"}, "meta": {"usage": {
+        "in": 10, "think": 5, "hit": 3, "put": 4, "put_long": 9, "mode": "fast", "geo": "us", "marker": {}}}});
+    let usage = provider.parse_usage(&body).unwrap();
+    let expected = UsageInfo {
+        prompt_tokens: 17,
+        completion_tokens: 5,
+        thoughts_tokens: Some(5),
+        cache_read_tokens: Some(3),
+        cache_write_tokens: Some(4),
+        cache_write_long_ttl_tokens: Some(4),
+        model: Some("m-1".to_string()),
+        service_tier: Some("flex".to_string()),
+        speed: Some("fast".to_string()),
+        inference_geo: Some("us".to_string()),
+    };
+    assert_eq!(format!("{usage:?}"), format!("{expected:?}"));
+
+    let mut no_marker = body;
+    no_marker["meta"]["usage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("marker");
+    assert!(provider.parse_usage(&no_marker).is_none());
+    Ok(())
+}
+
 #[test]
 fn test_responses_config_skips_anthropic_usage() {
     let provider = openai_responses_provider();
