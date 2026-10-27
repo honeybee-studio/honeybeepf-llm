@@ -204,37 +204,7 @@ Kubernetes, see [running the binary](honeybeepf-llm/docs/BINARY_DEPLOYMENT.md).
 
 ## Roadmap
 
-```mermaid
-flowchart LR
-  subgraph shipped["Shipped on main"]
-    direction TB
-    s1["HTTP/1.1 JSON and SSE, gzip / br / zstd"]
-    s2["Input, output, cache and reasoning tokens"]
-    s3["USD cost per pod and namespace"]
-    s4["Official Node.js builds"]
-    s5["Kernel-side drop of non-LLM TLS"]
-  end
-  subgraph v020["v0.2.0: first release"]
-    direction TB
-    a1["Every dropped call counted with a reason (#65)"]
-    a2["Responses over 16 MB (#55)"]
-    a3["Gemini Interactions (#80), embeddings (#79)"]
-    a4["Built-in providers as data (#75)"]
-    a5["Versioned releases (#86)"]
-  end
-  subgraph v030["v0.3.0: protocol coverage"]
-    direction TB
-    b1["HTTP/2 (#87)"]
-    b2["Amazon Bedrock streaming (#88)"]
-    b3["In-cluster model servers over plain HTTP (#89)"]
-    b4["Background calls (#66), image and audio (#54)"]
-  end
-  subgraph backlog["Backlog"]
-    direction TB
-    c1["Go crypto/tls, GnuTLS, NSS, rustls (#19)"]
-  end
-  shipped --> v020 --> v030 --> backlog
-```
+![Roadmap: shipped on main, then v0.2.0 (first release), v0.3.0 (protocol coverage) and the backlog, with the issue for each item](docs/images/roadmap.svg)
 
 Each column is a milestone: [v0.2.0](https://github.com/honeybee-studio/honeybeepf-llm/milestone/1) · [v0.3.0](https://github.com/honeybee-studio/honeybeepf-llm/milestone/2) · [Backlog](https://github.com/honeybee-studio/honeybeepf-llm/milestone/3). The milestones have no dates yet;
 open them for the current progress.
