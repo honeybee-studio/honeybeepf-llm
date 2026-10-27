@@ -79,6 +79,22 @@ fn test_default_providers_json_parses_with_known_keys_only() {
     }
 }
 
+// Claude on Vertex AI returns the Anthropic body, so its copy of the response block must not drift.
+#[test]
+fn test_vertex_claude_reads_usage_like_anthropic() {
+    let registry = ProviderRegistry::with_defaults();
+    let anthropic: Vec<_> = registry
+        .providers
+        .iter()
+        .filter(|p| p.name == "anthropic")
+        .collect();
+    assert_eq!(anthropic.len(), 2);
+    assert_eq!(
+        format!("{:?}", anthropic[0].response),
+        format!("{:?}", anthropic[1].response)
+    );
+}
+
 #[test]
 fn test_default_provider_hosts() {
     let openai = [
