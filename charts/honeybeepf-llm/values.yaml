@@ -56,6 +56,25 @@ builtinProbes:
     #       completion_tokens: "eval_count"    # Field name for output tokens
     #       model_path: "model"
     #     request_extractor: "messages"       # How to extract prompt text (messages, contents, prompt, input)
+    # Price overrides (optional), in the format of honeybeepf-llm-core/src/prices.json, merged per model.
+    # "discount" scales the built-in prices of that provider, not the models listed here.
+    # A rejected file is logged and ignored. Prices are read at startup: restart the DaemonSet.
+    prices: {}
+    # Example (USD per million tokens):
+    # prices:
+    #   version: "acme-2026-10"
+    #   providers:
+    #     - name: "openai"
+    #       source: "our contract"
+    #       checked: "2026-10-01"
+    #       discount: 0.8
+    #       models:
+    #         gpt-5: {input: 1.0, output: 8.0, cache_read: 0.1}
+    #     - name: "vllm"
+    #       source: "internal"
+    #       checked: "2026-10-01"
+    #       models:
+    #         my-vllm-llama: {input: 0.1, output: 0.2}
 
   interval: 1000
 

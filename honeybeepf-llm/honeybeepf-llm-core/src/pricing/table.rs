@@ -150,6 +150,8 @@ pub(super) struct RawProvider {
     /// Model -> inference geography (`us`) -> multiplier, only for models that accept the setting.
     #[serde(default, deserialize_with = "unique_nested_keys")]
     pub(super) geo: HashMap<String, HashMap<String, f64>>,
+    /// In a user file: multiplier on every built-in price of the provider with this name.
+    pub(super) discount: Option<f64>,
 }
 
 impl RawProvider {
@@ -167,7 +169,11 @@ impl RawProvider {
         // A zero factor would turn a priced call into $0.
         let factors = self.speed.values().chain(self.geo.values());
         let in_range = |f: &f64| *f > 0.0 && *f <= MAX_FACTOR;
-        if !factors.flat_map(HashMap::values).all(in_range) {
+        if !factors
+            .flat_map(HashMap::values)
+            .chain(&self.discount)
+            .all(in_range)
+        {
             return Err("multipliers must be above 0 and at most 100".into());
         }
         self.models.iter().try_for_each(|(name, standard)| {

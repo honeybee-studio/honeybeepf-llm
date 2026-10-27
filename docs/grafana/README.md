@@ -55,6 +55,8 @@ Collector, which forwards them to Prometheus.
 
 Cost comes from the built-in price table (`honeybeepf-llm-core/src/prices.json`; every provider entry names its pricing page and the date it was checked). A call the table cannot price is counted in `llm_unpriced_tokens_total`, never as $0, so compare the two before trusting a total. Prices are the providers' first-party list prices: the price is chosen by model name, not by host, so Azure OpenAI, Bedrock, Vertex AI and regional endpoints (such as OpenAI data residency, +10%) are priced as the first-party API. Per-request tool fees (web search) and audio input prices are not included.
 
+To use negotiated or self-hosted prices, set `builtinProbes.llm.prices` in the chart (or point `LLM_PRICES_CONFIG_FILE` at a file) to a table in the same format. Each model listed there replaces the whole built-in entry (list its tiers, speed and geo prices too) or adds a new one. A provider's `discount` (for example `0.8`) scales every built-in price of that provider, not the models the file lists; a discount-only provider still needs `source`, `checked` and `models: {}`. The file goes through the same checks as the built-in table; if it is rejected, the agent logs a warning and keeps the built-in prices. With a user table loaded, `price_table_version` reads `<built-in version>+custom-<hash of the file>`, and the startup log lists the replaced and added models. Prices are read at startup, so run `kubectl rollout restart ds/honeybeepf-llm` after changing them.
+
 ### Security / file-access metrics
 
 | Metric | Type | Labels |
