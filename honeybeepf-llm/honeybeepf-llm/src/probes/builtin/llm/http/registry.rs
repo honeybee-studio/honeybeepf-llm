@@ -100,10 +100,10 @@ mod tests {
     }
 
     #[test]
-    fn configured_providers_keep_the_builtins() {
+    fn configured_providers_keep_the_builtins() -> std::io::Result<()> {
         let ollama = r#"{"providers":[{"name":"ollama","hosts":["ollama.internal"],"paths":["/api/chat$"]}]}"#;
         let path = std::env::temp_dir().join("hb-test-providers-keep-builtins.json");
-        std::fs::write(&path, ollama).unwrap();
+        std::fs::write(&path, ollama)?;
         for registry in [
             registry_from(None, Some(ollama)),
             registry_from(path.to_str(), None),
@@ -119,6 +119,6 @@ mod tests {
                 Some("ollama")
             );
         }
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(path)
     }
 }
