@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 330" width="980" height="330" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">
+  <title>How honeybeepf-llm works: uprobes on SSL_write/SSL_read, a ring buffer, an HTTP parser and OTLP metrics</title>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#57606a"/>
+    </marker>
+  </defs>
+  <rect width="980" height="330" rx="12" fill="#ffffff"/>
+
+  <!-- bands -->
+  <text x="956" y="34" text-anchor="end" font-size="12" font-weight="600" fill="#57606a">YOUR POD (unchanged)</text>
+  <text x="956" y="150" text-anchor="end" font-size="12" font-weight="600" fill="#57606a">KERNEL</text>
+  <text x="956" y="236" text-anchor="end" font-size="12" font-weight="600" fill="#57606a">honeybeepf-llm AGENT (DaemonSet, one per node)</text>
+  <line x1="24" y1="122" x2="956" y2="122" stroke="#d0d7de" stroke-dasharray="4 4"/>
+  <line x1="24" y1="208" x2="956" y2="208" stroke="#d0d7de" stroke-dasharray="4 4"/>
+
+  <!-- app -->
+  <rect x="24" y="46" width="262" height="60" rx="8" fill="#ddf4ff" stroke="#54aeff"/>
+  <text x="40" y="70" font-weight="600" fill="#0a3069">Python / Node.js / curl app</text>
+  <text x="40" y="90" fill="#0a3069">OpenAI, Anthropic, Gemini SDK calls</text>
+  <rect x="322" y="46" width="250" height="60" rx="8" fill="#ddf4ff" stroke="#54aeff"/>
+  <text x="338" y="70" font-weight="600" fill="#0a3069">OpenSSL: SSL_write / SSL_read</text>
+  <text x="338" y="90" fill="#0a3069">plaintext before / after TLS</text>
+  <line x1="286" y1="76" x2="318" y2="76" stroke="#57606a" stroke-width="1.5" marker-end="url(#a)"/>
+  <rect x="608" y="46" width="160" height="60" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="624" y="70" font-weight="600" fill="#24292f">TLS to provider</text>
+  <text x="624" y="90" fill="#57606a">no proxy in the path</text>
+  <line x1="572" y1="76" x2="604" y2="76" stroke="#57606a" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- kernel -->
+  <rect x="322" y="134" width="250" height="60" rx="8" fill="#fff8c5" stroke="#d4a72c"/>
+  <text x="338" y="158" font-weight="600" fill="#4d2d00">eBPF uprobes</text>
+  <text x="338" y="178" fill="#4d2d00">copy the buffer, pid, cgroup id</text>
+  <line x1="447" y1="106" x2="447" y2="130" stroke="#57606a" stroke-width="1.5" marker-end="url(#a)"/>
+  <rect x="608" y="134" width="160" height="60" rx="8" fill="#fff8c5" stroke="#d4a72c"/>
+  <text x="624" y="158" font-weight="600" fill="#4d2d00">ring buffer</text>
+  <text x="624" y="178" fill="#4d2d00">kernel → user space</text>
+  <line x1="572" y1="164" x2="604" y2="164" stroke="#57606a" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- agent -->
+  <rect x="24" y="248" width="196" height="60" rx="8" fill="#dafbe1" stroke="#4ac26b"/>
+  <text x="40" y="272" font-weight="600" fill="#044f1e">HTTP/1.1 + SSE parser</text>
+  <text x="40" y="292" fill="#044f1e">chunked, gzip/br/zstd</text>
+  <rect x="248" y="248" width="208" height="60" rx="8" fill="#dafbe1" stroke="#4ac26b"/>
+  <text x="264" y="272" font-weight="600" fill="#044f1e">provider match</text>
+  <text x="264" y="292" fill="#044f1e">host + path → usage fields</text>
+  <rect x="484" y="248" width="196" height="60" rx="8" fill="#dafbe1" stroke="#4ac26b"/>
+  <text x="500" y="272" font-weight="600" fill="#044f1e">pod lookup</text>
+  <text x="500" y="292" fill="#044f1e">cgroup → namespace/pod</text>
+  <rect x="708" y="248" width="248" height="60" rx="8" fill="#fbefff" stroke="#c297ff"/>
+  <text x="724" y="272" font-weight="600" fill="#3e1f79">OTLP → Collector → Prometheus</text>
+  <text x="724" y="292" fill="#3e1f79">tokens, requests, latency per pod</text>
+  <path d="M688 194 L688 216 L122 216 L122 244" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="220" y1="278" x2="244" y2="278" stroke="#57606a" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="456" y1="278" x2="480" y2="278" stroke="#57606a" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="680" y1="278" x2="704" y2="278" stroke="#57606a" stroke-width="1.5" marker-end="url(#a)"/>
+</svg>

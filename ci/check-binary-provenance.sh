@@ -9,6 +9,7 @@ root=$(git -C "${1:-.}" rev-parse --show-toplevel)
 # Binaries that need no README row: exact paths, one line per file, no patterns.
 allowlist=(
   'docs/images/architecture.png'
+  'docs/images/grafana.png' # README screenshot of docs/grafana/honeybeepf-cost.json; recapture it in Grafana after the Quickstart
 )
 
 # Build and deploy inputs: none of these may mention testdata or any binary file name.
