@@ -82,7 +82,7 @@ kubectl get svc -n monitoring
 For bare-metal servers, VMs, or local development without Kubernetes.
 
 ### Prerequisites
-* Linux Kernel 5.x+ (BTF support required)
+* Linux kernel 5.10+, or RHEL 8.10 / 9.6 / 9.7 (BTF support required)
 * Root privileges (`sudo`)
 * Local or Remote OTel Collector (The agent needs an endpoint to push metrics)
 

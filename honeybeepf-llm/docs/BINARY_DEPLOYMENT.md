@@ -121,7 +121,7 @@ sudo setcap 'cap_sys_admin,cap_bpf,cap_perfmon+ep' /usr/local/bin/honeybeepf-llm
 
 ```bash
 uname -r
-# 5.8+ recommended (CAP_BPF support)
+# 5.10+, or a RHEL 8.10 / 9.6 / 9.7 kernel (see Kernels in the README)
 ```
 
 ## 🔧 Systemd Service Setup
