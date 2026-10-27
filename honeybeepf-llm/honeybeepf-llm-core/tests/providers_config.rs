@@ -30,15 +30,12 @@ fn test_default_providers() {
     assert_eq!(registry.providers.len(), 6);
 }
 
+// `with_defaults` falls back to an empty list, so the embedded file must parse on its own.
 #[test]
-fn test_default_providers_json_matches_rust_list() {
+fn test_default_providers_json_parses() {
     let json = include_str!("../src/providers/default_providers.json");
-    let from_file = ProviderRegistry::from_json(json).unwrap();
-    let from_rust = ProviderRegistry::with_defaults();
-    assert_eq!(from_file.providers.len(), from_rust.providers.len());
-    for (file, rust) in from_file.providers.iter().zip(&from_rust.providers) {
-        assert_eq!(format!("{file:#?}"), format!("{rust:#?}"), "{}", rust.name);
-    }
+    let registry = ProviderRegistry::from_json(json).unwrap();
+    assert_eq!(registry.providers.len(), 6);
 }
 
 #[test]
