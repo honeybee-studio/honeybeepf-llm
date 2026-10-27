@@ -33,7 +33,7 @@ image; the client pods call a local mock of the provider APIs with fake keys.</s
 
 ## Quickstart
 
-Requires a Kubernetes cluster on Linux 5.10+ nodes, `kubectl` and Helm 3.
+Requires a Kubernetes cluster whose nodes run a Linux 5.10+ or RHEL 8.10 / 9.6 / 9.7 kernel, `kubectl` and Helm 3.
 
 ```bash
 git clone https://github.com/honeybee-studio/honeybeepf-llm.git
@@ -120,8 +120,10 @@ are seen; a plain-HTTP endpoint (a typical in-cluster Ollama or vLLM) is not.
 | WebSocket (e.g. OpenAI Realtime) | ❌ |
 | HTTP/3 (QUIC) | ❌ |
 
-**Kernels:** CI loads and attaches the probes on 5.10, 5.15, 6.1, 6.6, 6.12, 6.18 and 7.2
-([kernel matrix](.github/workflows/kernel-matrix.yml)); the token checks above run on 7.0.
+**Kernels:** CI loads and attaches the probes and detects an LLM request on 5.10, 5.15, 6.1, 6.6, 6.12, 6.18
+and 7.2, and on the RHEL 8.10 (4.18), 9.6 and 9.7 (5.14) kernels
+([kernel matrix](.github/workflows/kernel-matrix.yml)); other RHEL minor releases are not tested. Token counts
+are checked on Linux 7.0 (the tables above).
 
 ## How it works
 
