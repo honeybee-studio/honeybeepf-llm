@@ -68,7 +68,7 @@ customProbes:
   tracepoints: []
 
 securityContext:
-  readOnlyRootFilesystem: false
+  readOnlyRootFilesystem: true
   capabilities:
     drop:
       - ALL
