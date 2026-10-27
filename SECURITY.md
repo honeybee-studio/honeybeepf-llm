@@ -1,6 +1,6 @@
 # Security Policy
 
-honeybeepf-llm runs on every node with elevated privileges (eBPF, `CAP_BPF` / `CAP_PERFMON` / `CAP_SYS_ADMIN`) and reads TLS plaintext of LLM API calls, including request bodies and headers that may carry API keys. A security bug here can expose secrets or affect the whole node, so please report it privately.
+honeybeepf-llm runs on every node with elevated privileges (eBPF capabilities, the host PID namespace and a read-only view of the host filesystem; see `securityContext` in `charts/honeybeepf-llm/values.yaml`) and reads TLS plaintext of LLM API calls, including request bodies and headers that may carry API keys. A security bug here can expose secrets or affect the whole node, so please report it privately.
 
 ## Reporting a vulnerability
 
