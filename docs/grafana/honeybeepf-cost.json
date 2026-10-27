@@ -65,7 +65,7 @@
               "mode": "none"
             }
           },
-          "unit": "reqps"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -85,7 +85,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (target_namespace) (rate(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
+          "expr": "sum by (target_namespace) (rate(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
+          "interval": "1m",
           "legendFormat": "{{ target_namespace }}",
           "refId": "A"
         }
@@ -143,7 +144,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (target_namespace) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
+          "expr": "sum by (target_namespace) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
+          "interval": "1m",
           "legendFormat": "{{ target_namespace }}",
           "refId": "A"
         }
@@ -276,7 +278,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (target_namespace, token_type) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
+          "expr": "sum by (target_namespace, token_type) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
+          "interval": "1m",
           "legendFormat": "{{ target_namespace }} ({{ token_type }})",
           "refId": "A"
         }
@@ -351,17 +354,20 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (target_namespace, le) (rate(honeybeepf_llm_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])))",
+          "expr": "histogram_quantile(0.50, sum by (target_namespace, le) (rate(honeybeepf_llm_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])))",
+          "interval": "1m",
           "legendFormat": "{{ target_namespace }} p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (target_namespace, le) (rate(honeybeepf_llm_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])))",
+          "expr": "histogram_quantile(0.95, sum by (target_namespace, le) (rate(honeybeepf_llm_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])))",
+          "interval": "1m",
           "legendFormat": "{{ target_namespace }} p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (target_namespace, le) (rate(honeybeepf_llm_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])))",
+          "expr": "histogram_quantile(0.99, sum by (target_namespace, le) (rate(honeybeepf_llm_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])))",
+          "interval": "1m",
           "legendFormat": "{{ target_namespace }} p99",
           "refId": "C"
         }
@@ -419,7 +425,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (model) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
+          "expr": "sum by (model) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
+          "interval": "1m",
           "legendFormat": "{{ model }}",
           "refId": "A"
         }
@@ -476,7 +483,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (model) (rate(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
+          "expr": "sum by (model) (rate(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
+          "interval": "1m",
           "legendFormat": "{{ model }}",
           "refId": "A"
         }
@@ -691,7 +699,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (target_namespace, target_pod_name) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])) * 60",
+          "expr": "sum by (target_namespace, target_pod_name) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
+          "interval": "1m",
           "legendFormat": "{{ target_namespace }} / {{ target_pod_name }}",
           "refId": "A"
         }
@@ -743,7 +752,8 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (target_namespace, target_pod_name, le) (rate(honeybeepf_llm_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[1m])))",
+          "expr": "histogram_quantile(0.95, sum by (target_namespace, target_pod_name, le) (rate(honeybeepf_llm_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])))",
+          "interval": "1m",
           "legendFormat": "{{ target_namespace }} / {{ target_pod_name }}",
           "refId": "A"
         }

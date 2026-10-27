@@ -120,6 +120,14 @@ The default data source name is `Prometheus`. If your data source has a
 different name, select it from the **Datasource** dropdown at the top of
 the dashboard after import.
 
+Rate panels use `$__rate_interval` with a 1m **Min step**, which matches the
+1m scrape interval of `charts/honeybeepf-llm-prometheus`. Without that step,
+and with no Scrape interval set on the data source, Grafana assumes 15s, the
+window shrinks to 1m and holds fewer than two samples, and the panels show
+No data. The step overrides the data source's Scrape interval, so if your
+Prometheus scrapes less often than 1m, raise it to match; if more often, you
+can lower it.
+
 ## Updating the dashboards
 
 If you modify a dashboard inside Grafana and want to save the changes back:
