@@ -15,6 +15,10 @@ latency per Kubernetes namespace and pod over OpenTelemetry.
 <sub>Real output from a single-node k3s cluster with the charts from this repository and a locally built agent
 image; the client pods call a local mock of the provider APIs with fake keys.</sub>
 
+### Architecture
+
+![High Level Architecture](docs/images/architecture.png)
+
 ## Why
 
 - **No code changes.** Applications keep their SDKs and their real provider hostnames. Nothing to import, wrap or
