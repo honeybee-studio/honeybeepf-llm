@@ -75,8 +75,6 @@ spec:
                 name: {{ include "honeybeepf-llm.fullname" . }}
 
           volumeMounts:
-            - mountPath: /sys/fs/bpf
-              name: bpf-fs
             - mountPath: /sys/kernel/tracing
               name: tracefs
               readOnly: false
@@ -92,10 +90,6 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
       volumes:
-        - name: bpf-fs
-          hostPath:
-            path: /sys/fs/bpf
-            type: Directory
         - name: tracefs
           hostPath:
             path: /sys/kernel/tracing
