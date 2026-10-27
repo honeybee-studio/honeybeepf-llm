@@ -92,6 +92,7 @@ pub struct IdentityConfig {
 }
 
 // Not `#[serde(flatten)]`: it skips the config crate's conversions (`yes` or `1` as a boolean).
+// Field order is part of the format: serde also reads `response` as an array in this order.
 #[derive(Deserialize)]
 struct FlatResponseConfig {
     #[serde(default = "default_usage_path")]
@@ -109,14 +110,14 @@ struct FlatResponseConfig {
     cache_read_tokens: Option<String>,
     cache_write_tokens: Option<String>,
     cache_write_long_ttl_tokens: Option<String>,
-    #[serde(default)]
-    prompt_excludes_cache: bool,
-    service_tier_path: Option<String>,
     speed: Option<String>,
     inference_geo: Option<String>,
+    #[serde(default)]
+    prompt_excludes_cache: bool,
+    required_field: Option<String>,
     #[serde(default = "default_model_path")]
     model_path: String,
-    required_field: Option<String>,
+    service_tier_path: Option<String>,
 }
 
 impl From<FlatResponseConfig> for ResponseConfig {
