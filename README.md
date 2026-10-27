@@ -125,6 +125,8 @@ and 7.2, and on the RHEL 8.10 (4.18), 9.6 and 9.7 (5.14) kernels
 ([kernel matrix](.github/workflows/kernel-matrix.yml)); other RHEL minor releases are not tested. Token counts
 are checked on Linux 7.0 (the tables above).
 
+**Overhead:** CPU, memory, latency and accuracy under load are measured in [docs/benchmark.md](docs/benchmark.md).
+
 ## How it works
 
 ![uprobes on SSL_write/SSL_read copy plaintext into a ring buffer; the agent parses HTTP, matches the provider, maps the cgroup to a pod and exports OTLP metrics](docs/images/how-it-works.svg)
