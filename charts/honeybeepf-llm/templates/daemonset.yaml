@@ -75,9 +75,11 @@ spec:
                 name: {{ include "honeybeepf-llm.fullname" . }}
 
           volumeMounts:
+            # tracefs for the exec-watch tracepoint; with neither tracefs path the agent records nothing
             - mountPath: /sys/kernel/tracing
               name: tracefs
-              readOnly: false
+              readOnly: true
+            # tracefs fallback (debug/tracing) for hosts whose systemd does not mount /sys/kernel/tracing
             - mountPath: /sys/kernel/debug
               name: debugfs
               readOnly: false
