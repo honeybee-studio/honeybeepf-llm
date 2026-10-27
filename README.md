@@ -147,6 +147,27 @@ are checked on Linux 7.0 (the tables above).
 | `honeybeepf_llm_llm_cache_write_tokens_total` | counter | same as requests (subset of prompt tokens) |
 | `honeybeepf_llm_llm_reasoning_tokens_total` | counter | same as requests (subset of completion tokens) |
 | `honeybeepf_llm_llm_latency_seconds` | histogram | same as requests |
+| `honeybeepf_llm_llm_responses_unparsed_total` | counter | `reason`, `target_namespace`, `target_pod_name` |
+
+`llm_responses_unparsed_total` counts LLM calls the agent saw but could not record, so a drop in recorded calls
+can be told apart from a drop in traffic. `reason` is one of:
+
+| `reason` | The call was given up because |
+|---|---|
+| `capture_lost` | part of a response read was lost in capture (ring buffer full after its first 4 KB, or one read over 16 KB) |
+| `next_request` | a complete HTTP/1.1 response had no usage when the next request started |
+| `connection_closed` | the connection closed before usage was found |
+| `request_too_large` | the captured request bytes (the first 4 KB of each write) passed the 8 MB buffer limit |
+| `response_too_large` | the response passed the 16 MB buffer limit |
+
+Not counted here: a read lost whole because the ring buffer was full (see `llm_events_total{stage="reserve_fail"}`),
+and a connection left idle for 300 s without being closed (for example a killed process).
+
+Unparsed calls per minute by reason, for an alert on `> 0`:
+
+```promql
+sum by (target_namespace, reason) (rate(honeybeepf_llm_llm_responses_unparsed_total[5m])) * 60
+```
 
 The collector and Prometheus add more labels, such as `k8s_pod_name`, `k8s_node_name` and `namespace`; those name
 the agent's pod and node and the collector's namespace. `target_namespace` and `target_pod_name` name the pod

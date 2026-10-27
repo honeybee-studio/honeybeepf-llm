@@ -86,8 +86,11 @@ fn test_lost_fragment_counts_response_as_unparsed() {
     for lost in [1, 3] {
         let mut p = StreamProcessor::new();
         let out = outcomes(&mut p, &h1_response(20200), Some((1, lost)));
-        let unparsed = out.iter().filter(|o| **o == Outcome::Unparsed).count();
-        assert_eq!(unparsed, 1, "fragment {lost}: {out:?}");
+        assert_eq!(
+            unparsed(&out),
+            [UnparsedReason::CaptureLost],
+            "fragment {lost}: {out:?}"
+        );
         assert!(
             !out.contains(&Outcome::Recorded),
             "fragment {lost}: {out:?}"
@@ -106,7 +109,7 @@ fn test_read_over_capture_limit_is_unparsed() {
     let joined = reads.drain(1..).flatten().collect::<Vec<u8>>();
     reads.push(joined);
     let out = outcomes(&mut p, &reads, None);
-    assert!(out.contains(&Outcome::Unparsed), "{out:?}");
+    assert_eq!(unparsed(&out), [UnparsedReason::CaptureLost], "{out:?}");
     assert!(!out.contains(&Outcome::Recorded), "{out:?}");
 }
 
@@ -153,6 +156,15 @@ fn count(out: &[Outcome], want: Outcome) -> usize {
     out.iter().filter(|o| **o == want).count()
 }
 
+fn unparsed(out: &[Outcome]) -> Vec<UnparsedReason> {
+    out.iter()
+        .filter_map(|o| match o {
+            Outcome::Unparsed(reason) => Some(*reason),
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn test_messages_after_count_tokens_is_recorded() {
     let mut p = StreamProcessor::new();
@@ -168,7 +180,7 @@ fn test_messages_after_count_tokens_is_recorded() {
         &h1("application/json", MESSAGES_RESPONSE),
     ));
     assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
-    assert_eq!(count(&out, Outcome::Unparsed), 0, "{out:?}");
+    assert!(unparsed(&out).is_empty(), "{out:?}");
 }
 
 #[test]
@@ -193,7 +205,7 @@ fn test_responses_compact_after_input_tokens_is_recorded() {
     out.extend(send(&mut p, LlmDirection::Write, compact, None));
     out.extend(send(&mut p, LlmDirection::Read, &compacted, None));
     assert_eq!(count(&out, Outcome::Recorded), 2, "{out:?}");
-    assert_eq!(count(&out, Outcome::Unparsed), 0, "{out:?}");
+    assert!(unparsed(&out).is_empty(), "{out:?}");
 }
 
 #[test]
@@ -274,11 +286,7 @@ fn test_calls_after_upload_are_recorded() {
             2,
             "{expect_continue}: {out:?}"
         );
-        assert_eq!(
-            count(&out, Outcome::Unparsed),
-            0,
-            "{expect_continue}: {out:?}"
-        );
+        assert!(unparsed(&out).is_empty(), "{expect_continue}: {out:?}");
     }
 }
 
@@ -303,7 +311,7 @@ fn test_response_without_usage_is_unparsed_when_next_request_starts() {
         MESSAGES_REQUEST,
         &h1("application/json", MESSAGES_RESPONSE),
     ));
-    assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
+    assert_eq!(unparsed(&out), [UnparsedReason::NextRequest], "{out:?}");
     assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
 }
@@ -323,7 +331,7 @@ fn test_body_after_100_continue_is_recorded() {
     for r in &h1_response(3000) {
         out.extend(send(&mut p, LlmDirection::Read, r, None));
     }
-    assert_eq!(count(&out, Outcome::Unparsed), 0, "{out:?}");
+    assert!(unparsed(&out).is_empty(), "{out:?}");
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
 }
 
@@ -342,7 +350,7 @@ fn test_write_before_whole_response_keeps_streaming_response() {
                  data: {\"model\":\"gpt-4o\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\n\
                  data: [DONE]\n\n";
     out.extend(send(&mut p, LlmDirection::Read, tail, None));
-    assert_eq!(count(&out, Outcome::Unparsed), 0, "{out:?}");
+    assert!(unparsed(&out).is_empty(), "{out:?}");
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
 }
 
@@ -372,7 +380,7 @@ fn test_unparsed_response_after_100_continue_frees_next_request() {
         MESSAGES_REQUEST,
         &h1("application/json", MESSAGES_RESPONSE),
     ));
-    assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
+    assert_eq!(unparsed(&out), [UnparsedReason::NextRequest], "{out:?}");
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
 }
 
@@ -396,7 +404,7 @@ fn test_streamed_response_after_100_continue_is_recorded() {
     ] {
         out.extend(send(&mut p, LlmDirection::Read, r, None));
     }
-    assert_eq!(count(&out, Outcome::Unparsed), 0, "{out:?}");
+    assert!(unparsed(&out).is_empty(), "{out:?}");
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
 }
 
@@ -447,7 +455,7 @@ fn test_chunked_response_with_trailers_frees_next_request() {
         MESSAGES_REQUEST,
         &h1("application/json", MESSAGES_RESPONSE),
     ));
-    assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
+    assert_eq!(unparsed(&out), [UnparsedReason::NextRequest], "{out:?}");
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
 }
 
@@ -465,8 +473,71 @@ fn test_chunk_larger_than_response_buffer_frees_next_request() {
             MESSAGES_REQUEST,
             &h1("application/json", MESSAGES_RESPONSE),
         ));
-        assert_eq!(count(&out, Outcome::Unparsed), 1, "{size}: {out:?}");
+        assert_eq!(
+            unparsed(&out),
+            [UnparsedReason::NextRequest],
+            "{size}: {out:?}"
+        );
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{size}: {out:?}");
+    }
+}
+
+/// `h1_response` grown or shrunk to exactly `total` bytes.
+fn h1_response_of_size(total: usize) -> Vec<Vec<u8>> {
+    let mut body_len = total;
+    loop {
+        let reads = h1_response(body_len);
+        let len: usize = reads.iter().map(Vec::len).sum();
+        if len == total {
+            return reads;
+        }
+        body_len = body_len + total - len;
+    }
+}
+
+#[test]
+fn test_response_over_buffer_limit_is_unparsed() {
+    let too_large = [UnparsedReason::ResponseTooLarge];
+    for (total, want) in [
+        (MAX_RESPONSE_BUFFER_SIZE, &[][..]),
+        (MAX_RESPONSE_BUFFER_SIZE + 1, &too_large),
+        (MAX_RESPONSE_BUFFER_SIZE + 100_000, &too_large),
+    ] {
+        let mut p = StreamProcessor::new();
+        let out = outcomes(&mut p, &h1_response_of_size(total), None);
+        assert_eq!(unparsed(&out), want, "{total}");
+        assert_eq!(count(&out, Outcome::Recorded), 1 - want.len(), "{total}");
+
+        let next = outcomes(&mut p, &h1_response(3000), None);
+        assert_eq!(next.last(), Some(&Outcome::Recorded), "{total}: {next:?}");
+    }
+}
+
+#[test]
+fn test_request_over_buffer_limit_is_unparsed() {
+    let chunk = [b' '; MAX_SSL_BUF_SIZE];
+    let too_large = [UnparsedReason::RequestTooLarge];
+    for (body, want) in [
+        (MAX_REQUEST_BUFFER_SIZE - REQUEST.len(), &[][..]),
+        (MAX_REQUEST_BUFFER_SIZE - REQUEST.len() + 1, &too_large),
+        (MAX_REQUEST_BUFFER_SIZE + 100_000, &too_large),
+    ] {
+        let mut p = StreamProcessor::new();
+        let mut out = send(&mut p, LlmDirection::Write, REQUEST, None);
+        let mut left = body;
+        while left > 0 {
+            let n = left.min(chunk.len());
+            out.extend(send(&mut p, LlmDirection::Write, &chunk[..n], None));
+            left -= n;
+        }
+        for r in &h1_response(3000) {
+            out.extend(send(&mut p, LlmDirection::Read, r, None));
+        }
+        assert_eq!(unparsed(&out), want, "{body}");
+        assert_eq!(count(&out, Outcome::Recorded), 1 - want.len(), "{body}");
+
+        let next = outcomes(&mut p, &h1_response(3000), None);
+        assert_eq!(next.last(), Some(&Outcome::Recorded), "{body}: {next:?}");
     }
 }
 
@@ -507,7 +578,7 @@ fn test_stream_after_a_lost_fragment_is_parsed_from_its_own_start() {
     let short = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n";
     let mut out = outcomes(&mut p, &lossy, Some((40, 1)));
     out.extend(outcomes(&mut p, &[short.to_vec()], None));
-    assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
+    assert_eq!(unparsed(&out), [UnparsedReason::CaptureLost], "{out:?}");
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
 }
 
