@@ -122,12 +122,12 @@ mod tests {
         std::fs::remove_file(path)
     }
 
-    // LLM_PROVIDERS_CONFIG_FILE goes through the config crate, not serde_json.
+    // LLM_PROVIDERS_CONFIG_FILE goes through the config crate, which also turns `yes` and `1` into booleans.
     #[test]
     fn config_file_reads_flat_response_fields() -> Result<(), config::ConfigError> {
         let yaml = "providers:\n  - name: proxy\n    response:\n      usage_path: meta.usage\n      \
-                    prompt_tokens: in\n      cached_tokens: hit\n      prompt_excludes_cache: true\n      \
-                    completion_optional: true\n      model_path: served.model\n      speed: mode\n";
+                    prompt_tokens: in\n      cached_tokens: hit\n      prompt_excludes_cache: yes\n      \
+                    completion_optional: 1\n      model_path: served.model\n      speed: mode\n";
         let registry = config::Config::builder()
             .add_source(config::File::from_str(yaml, config::FileFormat::Yaml))
             .build()
