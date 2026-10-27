@@ -34,12 +34,19 @@ pub(super) static KNOWN_HOSTS: Lazy<Vec<&'static str>> = Lazy::new(|| {
 });
 
 fn load_provider_registry() -> ProviderRegistry {
+    let file = std::env::var("LLM_PROVIDERS_CONFIG_FILE").ok();
+    let inline = std::env::var("LLM_PROVIDERS_CONFIG").ok();
+    registry_from(file.as_deref(), inline.as_deref())
+}
+
+/// Built-in providers plus the configured ones, from the file if it loads, else from the inline JSON.
+fn registry_from(file: Option<&str>, inline: Option<&str>) -> ProviderRegistry {
     let defaults = ProviderRegistry::with_defaults();
 
     // 1. Try loading from config file (supports YAML, JSON, TOML via config crate)
-    if let Ok(path) = std::env::var("LLM_PROVIDERS_CONFIG_FILE") {
+    if let Some(path) = file {
         if let Ok(settings) = config::Config::builder()
-            .add_source(config::File::with_name(&path))
+            .add_source(config::File::with_name(path))
             .build()
             && let Ok(reg) = settings.try_deserialize::<ProviderRegistry>()
         {
@@ -50,9 +57,9 @@ fn load_provider_registry() -> ProviderRegistry {
     }
 
     // 2. Try inline JSON (for Kubernetes ConfigMap)
-    if let Ok(config) = std::env::var("LLM_PROVIDERS_CONFIG")
+    if let Some(config) = inline
         && !config.is_empty()
-        && let Ok(reg) = ProviderRegistry::from_json(&config)
+        && let Ok(reg) = ProviderRegistry::from_json(config)
     {
         return defaults.merge(reg);
     }
@@ -90,5 +97,28 @@ mod tests {
         // Wildcard hosts are pre-checked by their literal part.
         assert!(hosts.contains(&"bedrock-mantle.") && !hosts.contains(&".rep.googleapis.com"));
         assert!(hosts.iter().all(|h| !h.contains('*') && !h.is_empty()));
+    }
+
+    #[test]
+    fn configured_providers_keep_the_builtins() {
+        let ollama = r#"{"providers":[{"name":"ollama","hosts":["ollama.internal"],"paths":["/api/chat$"]}]}"#;
+        let path = std::env::temp_dir().join("hb-test-providers-keep-builtins.json");
+        std::fs::write(&path, ollama).unwrap();
+        for registry in [
+            registry_from(None, Some(ollama)),
+            registry_from(path.to_str(), None),
+        ] {
+            let found =
+                |host: &str, url: &str| registry.find_provider(host, url).map(|p| p.name.clone());
+            assert_eq!(
+                found("api.openai.com", "/v1/chat/completions").as_deref(),
+                Some("openai")
+            );
+            assert_eq!(
+                found("ollama.internal", "/api/chat").as_deref(),
+                Some("ollama")
+            );
+        }
+        std::fs::remove_file(path).unwrap();
     }
 }
