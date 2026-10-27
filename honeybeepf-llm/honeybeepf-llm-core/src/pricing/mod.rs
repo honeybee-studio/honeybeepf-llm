@@ -4,7 +4,6 @@ mod model_name;
 mod table;
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,7 +11,7 @@ use serde::de::Error as _;
 
 use crate::types::UsageInfo;
 use model_name::without_date;
-use table::{Rates, RawTable, Unique};
+use table::{Rates, RawTable};
 
 struct ModelPrices {
     standard: Rates,
@@ -82,26 +81,22 @@ impl PriceTable {
         let mut sources = Vec::new();
         for p in raw.providers {
             p.check().map_err(|why| invalid(&p.name, why))?;
-            let (Unique(tiers), Unique(speed), Unique(geo)) = (p.tiers, p.speed, p.geo);
-            for (name, standard) in p.models.0 {
-                let tiers = tiers
+            for (name, standard) in p.models {
+                let tiers = p
+                    .tiers
                     .iter()
-                    .filter_map(|(tier, m)| Some((tier.clone(), m.0.get(&name)?.clone())))
+                    .filter_map(|(tier, m)| Some((tier.clone(), m.get(&name)?.clone())))
                     .collect();
                 let prices = ModelPrices {
                     standard,
                     tiers,
-                    speed: speed.get(&name).map(|m| m.0.clone()).unwrap_or_default(),
-                    geo: geo.get(&name).map(|m| m.0.clone()).unwrap_or_default(),
+                    speed: p.speed.get(&name).cloned().unwrap_or_default(),
+                    geo: p.geo.get(&name).cloned().unwrap_or_default(),
                 };
-                match models.entry(name) {
-                    Entry::Occupied(e) => {
-                        return Err(invalid(&p.name, format!("{} is listed twice", e.key())));
-                    }
-                    Entry::Vacant(e) => {
-                        e.insert(prices);
-                    }
+                if models.contains_key(&name) {
+                    return Err(invalid(&p.name, format!("{name} is listed twice")));
                 }
+                models.insert(name, prices);
             }
             sources.push(PriceSource {
                 provider: p.name,

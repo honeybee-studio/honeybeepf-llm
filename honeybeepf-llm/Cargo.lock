@@ -1110,6 +1110,7 @@ dependencies = [
 name = "honeybeepf-llm-core"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "honeybeepf-llm-common",
  "serde",
  "serde_json",

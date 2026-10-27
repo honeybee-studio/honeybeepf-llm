@@ -294,7 +294,17 @@ fn test_bad_tables_are_rejected() {
         (model(r#"{"until": "2026-13-01"}"#), date),
         (model(r#"{"until": "26-11-30"}"#), date),
         (model(r#"{"until": "1969-12-31"}"#), date),
+        (model(r#"{"until": "2026-02-30"}"#), date),
+        // chrono alone would accept these.
+        (model(r#"{"until": "2026-1-30"}"#), date),
+        (model(r#"{"until": " 2026-11-30"}"#), date),
+        (model(r#"{"until": "+2026-11-30"}"#), date),
+        (model(r#"{"until": "2026-11-30T00:00"}"#), date),
         (model("{}").replace("2026-10-26", "today"), "checked is not"),
+        (
+            model("{}").replace("2026-10-26", "2026-04-31"),
+            "checked is not",
+        ),
         (with(r#", "tiers": {"flex": {"x": {}}}"#), unknown),
         (with(r#", "speed": {"x": {"fast": 2}}"#), unknown),
         (with(r#", "geo": {"x": {"us": 1.1}}"#), unknown),
@@ -310,6 +320,14 @@ fn test_bad_tables_are_rejected() {
         (
             with(r#", "tiers": {"flex": {}, "flex": {}}"#),
             "flex is listed twice",
+        ),
+        (
+            with(r#", "speed": {"m": {}, "m": {}}"#),
+            "m is listed twice",
+        ),
+        (
+            with(r#", "speed": {"m": {"fast": 2, "fast": 3}}"#),
+            "fast is listed twice",
         ),
         (
             with(r#", "geo": {"m": {"us": 1.1, "us": 1.2}}"#),
