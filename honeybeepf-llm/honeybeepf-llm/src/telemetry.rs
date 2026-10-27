@@ -518,9 +518,7 @@ mod tests {
             prompt_tokens: 5,
             completion_tokens: 4,
             thoughts_tokens: Some(4),
-            cache_read_tokens: None,
-            cache_write_tokens: None,
-            model: None,
+            ..UsageInfo::default()
         };
         metrics.record_llm(&usage, 1.0, false, vec![]);
         metrics.record_llm(&usage, 1.0, true, vec![]);

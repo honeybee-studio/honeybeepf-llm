@@ -164,6 +164,20 @@ mod tests {
     }
 
     #[test]
+    fn h2_responses_sse_reads_served_tier_and_cache_writes() {
+        let body = "data: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-6.1-sol\",\"service_tier\":\"auto\",\"usage\":null}}\n\n\
+             data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-6.1-sol\",\"service_tier\":\"default\",\"status\":\"completed\",\
+             \"error\":null,\"usage\":{\"input_tokens\":12000,\"output_tokens\":500,\"input_tokens_details\":{\"cached_tokens\":4000,\
+             \"cache_write_tokens\":7000,\"cache_write_tokens_details\":{\"ttl_12h_tokens\":4000}}}}}\n\n";
+        let info = Http2Parser.parse_response(body.as_bytes()).expect("usage");
+        assert_eq!(
+            (info.cache_write_tokens, info.cache_write_long_ttl_tokens),
+            (Some(7000), Some(4000))
+        );
+        assert_eq!(info.service_tier.as_deref(), Some("default"));
+    }
+
+    #[test]
     fn only_http2_writes_during_response() {
         assert!(Http2Parser.writes_during_response());
         assert!(!Http11Parser.writes_during_response());

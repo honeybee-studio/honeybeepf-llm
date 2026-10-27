@@ -49,6 +49,7 @@ fn openai_chat() -> ProviderConfig {
             thoughts_tokens: Some("completion_tokens_details.reasoning_tokens".to_string()),
             cache_read_tokens: Some("prompt_tokens_details.cached_tokens".to_string()),
             model_path: "model".to_string(),
+            service_tier_path: Some("service_tier".to_string()),
             ..ResponseConfig::default()
         },
         request_extractor: RequestExtractorType::Messages,
@@ -77,8 +78,14 @@ fn openai_responses() -> ProviderConfig {
             completion_tokens: "output_tokens".to_string(),
             thoughts_tokens: Some("output_tokens_details.reasoning_tokens".to_string()),
             cache_read_tokens: Some("input_tokens_details.cached_tokens".to_string()),
+            // `cached_tokens` leaves writes out and `input_tokens` counts both, so no adding back.
+            cache_write_tokens: Some("input_tokens_details.cache_write_tokens".to_string()),
+            cache_write_long_ttl_tokens: Some(
+                "input_tokens_details.cache_write_tokens_details.ttl_12h_tokens".to_string(),
+            ),
             required_field: Some("input_tokens_details".to_string()),
             model_path: "model".to_string(),
+            service_tier_path: Some("service_tier".to_string()),
             ..ResponseConfig::default()
         },
         request_extractor: RequestExtractorType::Input,
@@ -92,8 +99,12 @@ fn anthropic_response() -> ResponseConfig {
         completion_tokens: "output_tokens".to_string(),
         cache_read_tokens: Some("cache_read_input_tokens".to_string()),
         cache_write_tokens: Some("cache_creation_input_tokens".to_string()),
+        cache_write_long_ttl_tokens: Some("cache_creation.ephemeral_1h_input_tokens".to_string()),
         prompt_excludes_cache: true,
         model_path: "model".to_string(),
+        // Streaming carries these only in message_start; message_delta usage has no such fields.
+        speed: Some("speed".to_string()),
+        inference_geo: Some("inference_geo".to_string()),
         ..ResponseConfig::default()
     }
 }
@@ -220,6 +231,15 @@ pub struct ResponseConfig {
     /// Optional: field name for prompt tokens written to the provider cache
     pub cache_write_tokens: Option<String>,
 
+    /// Optional: field name for the cache writes with the longer, pricier lifetime
+    pub cache_write_long_ttl_tokens: Option<String>,
+
+    /// Optional: field name for the speed mode within the usage object
+    pub speed: Option<String>,
+
+    /// Optional: field name for the inference geography within the usage object
+    pub inference_geo: Option<String>,
+
     /// Whether `prompt_tokens` leaves out cache tokens (Anthropic), so the input total adds them back
     #[serde(default)]
     pub prompt_excludes_cache: bool,
@@ -230,6 +250,9 @@ pub struct ResponseConfig {
     /// JSON path to model name (from root, e.g., "model" or "modelVersion")
     #[serde(default = "default_model_path")]
     pub model_path: String,
+
+    /// Optional: JSON path to the served service tier (from root, e.g., "service_tier")
+    pub service_tier_path: Option<String>,
 }
 
 fn default_usage_path() -> String {
@@ -256,9 +279,13 @@ impl Default for ResponseConfig {
             completion_excludes_thoughts: false,
             cache_read_tokens: None,
             cache_write_tokens: None,
+            cache_write_long_ttl_tokens: None,
+            speed: None,
+            inference_geo: None,
             prompt_excludes_cache: false,
             required_field: None,
             model_path: default_model_path(),
+            service_tier_path: None,
         }
     }
 }
