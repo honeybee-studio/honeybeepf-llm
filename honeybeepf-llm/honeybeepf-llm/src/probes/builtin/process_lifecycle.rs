@@ -1,3 +1,6 @@
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+
 use anyhow::{Context, Result};
 use aya::Ebpf;
 use aya::programs::KProbe;
@@ -87,6 +90,21 @@ impl Probe for ProcessLifecycleProbe {
     }
 }
 
+/// The kernel hook this probe needs that the running kernel lacks, if any.
+pub fn missing_kernel_hook() -> Option<&'static str> {
+    // An unreadable kallsyms proves nothing; attach then reports the real error.
+    let kallsyms = File::open("/proc/kallsyms").ok()?;
+    missing_hook(BufReader::new(kallsyms))
+}
+
+fn missing_hook(kallsyms: impl BufRead) -> Option<&'static str> {
+    let has_acct_collect = kallsyms
+        .lines()
+        .map_while(std::io::Result::ok)
+        .any(|line| line.split_whitespace().nth(2) == Some("acct_collect"));
+    (!has_acct_collect).then_some("acct_collect (CONFIG_BSD_PROCESS_ACCT)")
+}
+
 /// Lifetime in seconds from the exec and exit timestamps (ns); 0 when the exec was not seen.
 fn lifetime_secs(start_ns: u64, exit_ns: u64) -> f64 {
     if start_ns == 0 {
@@ -110,5 +128,23 @@ mod tests {
     fn lifetime_is_zero_without_a_start_time_or_with_a_backwards_clock() {
         assert_eq!(lifetime_secs(0, 7_000_000_000), 0.0);
         assert_eq!(lifetime_secs(9_000_000_000, 7_000_000_000), 0.0);
+    }
+
+    #[test]
+    fn a_kernel_without_acct_collect_is_reported_missing() {
+        let kallsyms = "0000000000000000 T do_group_exit\n\
+                        0000000000000000 t acct_collect.cold\n\
+                        0000000000000000 t acct_collect_x [some_mod]\n";
+        assert_eq!(
+            missing_hook(kallsyms.as_bytes()),
+            Some("acct_collect (CONFIG_BSD_PROCESS_ACCT)")
+        );
+    }
+
+    #[test]
+    fn a_kernel_with_acct_collect_has_nothing_missing() {
+        let kallsyms = "0000000000000000 T do_group_exit\n\
+                        0000000000000000 T acct_collect\n";
+        assert_eq!(missing_hook(kallsyms.as_bytes()), None);
     }
 }
