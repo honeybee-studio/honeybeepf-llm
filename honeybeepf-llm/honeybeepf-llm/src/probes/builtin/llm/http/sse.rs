@@ -222,6 +222,63 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_sse_keeps_message_start_speed_geo_and_1h_writes() {
+        // message_delta usage has no speed, inference_geo or cache_creation; null must not erase them.
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":50,",
+            "\"cache_creation_input_tokens\":2000,\"cache_read_input_tokens\":0,\"cache_creation\":{\"ephemeral_5m_input_tokens\":500,",
+            "\"ephemeral_1h_input_tokens\":1500},\"output_tokens\":1,\"speed\":\"fast\",\"inference_geo\":\"us\"}}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":50,",
+            "\"cache_creation_input_tokens\":2000,\"cache_read_input_tokens\":0,\"output_tokens\":300,\"speed\":null}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        let info = Http11Parser
+            .parse_response(&http11_sse(body))
+            .expect("usage");
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (2050, 300));
+        assert_eq!(info.cache_write_long_ttl_tokens, Some(1500));
+        assert_eq!(
+            (info.speed.as_deref(), info.inference_geo.as_deref()),
+            (Some("fast"), Some("us"))
+        );
+    }
+
+    #[test]
+    fn responses_sse_reads_served_tier_and_cache_writes_from_response_completed() {
+        let body = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-6.1-sol\",\"service_tier\":\"auto\",",
+            "\"status\":\"in_progress\",\"error\":null,\"usage\":null}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-6.1-sol\",\"service_tier\":\"default\",",
+            "\"status\":\"completed\",\"error\":null,\"usage\":{\"input_tokens\":12000,\"output_tokens\":500,",
+            "\"input_tokens_details\":{\"cached_tokens\":4000,\"cache_write_tokens\":7000,",
+            "\"cache_write_tokens_details\":{\"ttl_30m_tokens\":3000,\"ttl_12h_tokens\":4000}}}}}\n\n",
+        );
+        let info = Http11Parser
+            .parse_response(&http11_sse(body))
+            .expect("usage");
+        assert_eq!(cache(&info), (Some(4000), Some(7000)));
+        assert_eq!(info.cache_write_long_ttl_tokens, Some(4000));
+        assert_eq!(info.service_tier.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn openai_chat_sse_reads_service_tier_from_the_usage_chunk() {
+        let body = concat!(
+            "data: {\"model\":\"gpt-6.1-sol\",\"service_tier\":\"flex\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n",
+            "data: {\"model\":\"gpt-6.1-sol\",\"service_tier\":\"flex\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let info = Http11Parser
+            .parse_response(&http11_sse(body))
+            .expect("usage");
+        assert_eq!(info.service_tier.as_deref(), Some("flex"));
+    }
+
+    #[test]
     fn openai_chat_sse_cached_tokens_stay_inside_prompt() {
         let body = concat!(
             "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",

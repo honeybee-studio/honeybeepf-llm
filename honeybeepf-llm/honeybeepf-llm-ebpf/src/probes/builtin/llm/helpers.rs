@@ -72,11 +72,11 @@ pub fn current_metadata() -> EventMetadata {
 
 /// One finished SSL call, read once and stamped on each fragment it is sent in.
 pub struct SslCall {
-    metadata: EventMetadata,
+    pub(super) metadata: EventMetadata,
     latency_ns: u64,
     comm: [u8; 16],
-    buf_addr: u64,
-    ssl: u64,
+    pub(super) buf_addr: u64,
+    pub(super) ssl: u64,
     pub len: u32,
     closed: u8,
 }

@@ -72,6 +72,16 @@ impl ConfigurableProvider {
         let thoughts = optional(&response_config.thoughts_tokens);
         let cache_read = optional(&response_config.cache_read_tokens);
         let cache_write = optional(&response_config.cache_write_tokens);
+        // The breakdown and the total can come from different SSE events; keep it inside the total.
+        let cache_write_long_ttl = optional(&response_config.cache_write_long_ttl_tokens)
+            .zip(cache_write)
+            .map(|(long, all)| long.min(all));
+        let text = |root: &Value, path: &Option<String>| {
+            path.as_ref()
+                .and_then(|path| get_nested_value(root, path))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        };
 
         let prompt = if response_config.prompt_excludes_cache {
             prompt
@@ -97,7 +107,11 @@ impl ConfigurableProvider {
             thoughts_tokens: thoughts,
             cache_read_tokens: cache_read,
             cache_write_tokens: cache_write,
+            cache_write_long_ttl_tokens: cache_write_long_ttl,
             model,
+            service_tier: text(json, &response_config.service_tier_path),
+            speed: text(usage, &response_config.speed),
+            inference_geo: text(usage, &response_config.inference_geo),
         })
     }
 }

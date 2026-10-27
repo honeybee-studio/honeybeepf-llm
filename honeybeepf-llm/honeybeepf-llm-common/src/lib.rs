@@ -14,7 +14,8 @@ pub const LLM_STAT_EMPTY: u32 = 4; // submitted without payload (buf_filled = 0)
 pub const LLM_STAT_TRUNCATED: u32 = 5; // call sent with bytes missing (> capture_limit, or no room later)
 pub const LLM_STAT_HANDSHAKE: u32 = 6; // handshake events submitted
 pub const LLM_STAT_FRAGMENT: u32 = 7; // fragments after the first (offset > 0), subset of submit
-pub const LLM_STAT_COUNT: usize = 8;
+pub const LLM_STAT_FILTERED: u32 = 8; // calls dropped before reserving because SSL_CLASS skips them
+pub const LLM_STAT_COUNT: usize = 9;
 pub const LLM_STAT_NAMES: [&str; LLM_STAT_COUNT] = [
     "enter",
     "submit",
@@ -24,7 +25,10 @@ pub const LLM_STAT_NAMES: [&str; LLM_STAT_COUNT] = [
     "truncated",
     "handshake",
     "fragment",
+    "filtered",
 ];
+
+pub mod ssl_class;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]

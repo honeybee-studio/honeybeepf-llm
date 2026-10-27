@@ -80,7 +80,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (target_namespace, target_pod_name, filename) (rate(honeybeepf_llm_file_access_events_total{process=~\"$process\"}[1m])) * 60",
+          "expr": "sum by (target_namespace, target_pod_name, filename) (rate(honeybeepf_llm_file_access_events_total{process=~\"$process\"}[$__rate_interval])) * 60",
+          "interval": "1m",
           "legendFormat": "{{ target_namespace }}/{{ target_pod_name }} — {{ filename }}",
           "refId": "A"
         }
@@ -321,12 +322,14 @@
       },
       "targets": [
         {
-          "expr": "sum by (target_namespace) (rate(honeybeepf_llm_llm_requests_total[1m])) * 60",
+          "expr": "sum by (target_namespace) (rate(honeybeepf_llm_llm_requests_total[$__rate_interval])) * 60",
+          "interval": "1m",
           "legendFormat": "{{ target_namespace }} (LLM calls)",
           "refId": "A"
         },
         {
-          "expr": "sum by (target_namespace) (rate(honeybeepf_llm_file_access_events_total[1m])) * 60",
+          "expr": "sum by (target_namespace) (rate(honeybeepf_llm_file_access_events_total[$__rate_interval])) * 60",
+          "interval": "1m",
           "legendFormat": "{{ target_namespace }} (File access)",
           "refId": "B"
         }

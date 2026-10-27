@@ -49,7 +49,11 @@ Collector, which forwards them to Prometheus.
 | `honeybeepf_llm_llm_cache_read_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
 | `honeybeepf_llm_llm_cache_write_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
 | `honeybeepf_llm_llm_reasoning_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of completion tokens) |
+| `honeybeepf_llm_llm_cost_usd_total` | Counter (USD) | `model`, `status`, `cost_type` (input / cache_read / cache_write / output), `price_table_version`, `target_namespace`, `target_pod_name` |
+| `honeybeepf_llm_llm_unpriced_tokens_total` | Counter | `model`, `status`, `reason` (unknown_model / missing_price / unsupported_modifier / inconsistent_usage), `price_table_version`, `target_namespace`, `target_pod_name` |
 | `honeybeepf_llm_llm_latency_seconds_bucket` | Histogram | `model`, `status`, `target_namespace`, `target_pod_name` |
+
+Cost comes from the built-in price table (`honeybeepf-llm-core/src/prices.json`; every provider entry names its pricing page and the date it was checked). A call the table cannot price is counted in `llm_unpriced_tokens_total`, never as $0, so compare the two before trusting a total. Prices are the providers' first-party list prices: the price is chosen by model name, not by host, so Azure OpenAI, Bedrock, Vertex AI and regional endpoints (such as OpenAI data residency, +10%) are priced as the first-party API. Per-request tool fees (web search) and audio input prices are not included.
 
 ### Security / file-access metrics
 
@@ -119,6 +123,14 @@ Prometheus-compatible backend:
 The default data source name is `Prometheus`. If your data source has a
 different name, select it from the **Datasource** dropdown at the top of
 the dashboard after import.
+
+Rate panels use `$__rate_interval` with a 1m **Min step**, which matches the
+1m scrape interval of `charts/honeybeepf-llm-prometheus`. Without that step,
+and with no Scrape interval set on the data source, Grafana assumes 15s, the
+window shrinks to 1m and holds fewer than two samples, and the panels show
+No data. The step overrides the data source's Scrape interval, so if your
+Prometheus scrapes less often than 1m, raise it to match; if more often, you
+can lower it.
 
 ## Updating the dashboards
 

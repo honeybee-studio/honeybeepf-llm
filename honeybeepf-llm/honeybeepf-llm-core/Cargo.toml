@@ -11,5 +11,8 @@ honeybeepf-llm-common = { path = "../honeybeepf-llm-common" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+[dev-dependencies]
+toml = "0.8"
+
 [lib]
 path = "src/lib.rs"

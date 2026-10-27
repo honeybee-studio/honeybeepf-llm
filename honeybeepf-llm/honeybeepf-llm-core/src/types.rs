@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 /// Parsed usage info from an LLM response
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct UsageInfo {
     /// All input tokens, cache reads and writes included (OTel `gen_ai.usage.input_tokens`).
     pub prompt_tokens: u64,
@@ -13,7 +13,15 @@ pub struct UsageInfo {
     pub thoughts_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
     pub cache_write_tokens: Option<u64>,
+    /// Cache writes with the longer, pricier lifetime (Anthropic 1h, OpenAI 12h), a subset of `cache_write_tokens`.
+    pub cache_write_long_ttl_tokens: Option<u64>,
     pub model: Option<String>,
+    /// Tier that served the call as the response reports it (OpenAI `default`, `flex`, `priority`).
+    pub service_tier: Option<String>,
+    /// Speed mode that served the call (Anthropic `standard`, `fast`).
+    pub speed: Option<String>,
+    /// Where inference ran (Anthropic `global`, `us`).
+    pub inference_geo: Option<String>,
 }
 
 /// Lightweight struct for SSE chunk detection (only checks if usage field exists)
