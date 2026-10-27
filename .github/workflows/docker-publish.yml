@@ -123,11 +123,18 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      # PRs build arm64 only with the arm64 label; reviewers pull pr-N on amd64.
+      BUILD_ARM64: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'arm64') }}
+      # Fork PRs get a read-only GITHUB_TOKEN and cannot push to ghcr.
+      PUSH_IMAGE: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      BUILD_CACHE: type=registry,ref=ghcr.io/honeybee-studio/honeybeepf-llm:buildcache
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up QEMU (multi-arch)
+        if: env.BUILD_ARM64 == 'true'
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
       - name: Set up Docker Buildx
@@ -159,15 +166,17 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
+          platforms: ${{ env.BUILD_ARM64 == 'true' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          push: ${{ env.PUSH_IMAGE == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: ${{ env.BUILD_CACHE }}
+          # Only main writes the cache, so a PR cannot poison the layers main builds from.
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('{0},mode=max', env.BUILD_CACHE) || '' }}
           provenance: false
 
       - name: Summary
+        if: env.PUSH_IMAGE == 'true'
         run: |
           echo "Images pushed:" >> $GITHUB_STEP_SUMMARY
           echo "${{ steps.meta.outputs.tags }}" | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY
