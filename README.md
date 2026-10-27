@@ -158,7 +158,7 @@ can be told apart from a drop in traffic. `reason` is one of:
 | `next_request` | a complete HTTP/1.1 response had no usage when the next request started |
 | `connection_closed` | the connection closed before usage was found |
 | `request_too_large` | the captured request bytes (the first 4 KB of each write) passed the 8 MB buffer limit |
-| `response_too_large` | the response passed the 16 MB buffer limit |
+| `response_too_large` | the response passed the 16 MB buffer limit and is not an uncompressed HTTP/1.1 JSON body with usage in its first or last 64 KB (SSE, compressed and HTTP/2 responses always count here) |
 
 Not counted here: a read lost whole because the ring buffer was full (see `llm_events_total{stage="reserve_fail"}`),
 and a connection left idle for 300 s without being closed (for example a killed process).
