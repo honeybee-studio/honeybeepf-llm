@@ -10,7 +10,7 @@ const TABLE: &str = r#"{"version": "test-1", "providers": [
      "claude-haiku-5-5": {"input": 0.1, "output": 0.5, "cache_read": 0.01, "above_tokens": 100000,
        "above": {"input": 0.5, "output": 2.5, "cache_read": 0.05}}},
    "speed": {"claude-opus-5-5": {"fast": 2}},
-   "geo": {"us": 1.1}},
+   "geo": {"claude-opus-5-5": {"us": 1.1}}},
   {"name": "openai", "source": "https://developers.openai.com/api/docs/pricing", "checked": "2026-10-26",
    "models": {
      "gpt-6.1-sol": {"input": 2, "output": 10, "cache_read": 0.1, "cache_write": 2.5, "cache_write_long": 5,
@@ -169,6 +169,8 @@ fn test_speed_and_geo_multiply_every_price() {
     assert_eq!(call(opus, Some("fast"), Some("us")), Ok(0.17644));
     let unsupported = Err(Unpriced::UnsupportedModifier);
     assert_eq!(call("claude-sonnet-4-5", Some("fast"), None), unsupported);
+    // Models before 4.6 reject inference_geo, so the table gives them no geo price.
+    assert_eq!(call("claude-sonnet-4-5", None, Some("us")), unsupported);
     assert_eq!(call(opus, None, Some("eu")), unsupported);
     assert_eq!(call("gpt-5", None, Some("us")), unsupported);
 }
@@ -228,7 +230,7 @@ fn test_dated_prices_switch_after_their_last_day() {
 fn test_caps_keep_the_largest_cost_finite() {
     let json = one_provider(
         r#"{"m": {"input": 1e6, "output": 1e6}}"#,
-        r#", "speed": {"m": {"fast": 100}}, "geo": {"us": 100}"#,
+        r#", "speed": {"m": {"fast": 100}}, "geo": {"m": {"us": 100}}"#,
     );
     let table = PriceTable::from_json(&json).expect("table at the caps loads");
     let huge = UsageInfo {
@@ -295,13 +297,14 @@ fn test_bad_tables_are_rejected() {
         (model("{}").replace("2026-10-26", "today"), "checked is not"),
         (with(r#", "tiers": {"flex": {"x": {}}}"#), unknown),
         (with(r#", "speed": {"x": {"fast": 2}}"#), unknown),
+        (with(r#", "geo": {"x": {"us": 1.1}}"#), unknown),
         (with(r#", "tiers": {"default": {"m": {}}}"#), dead),
         (with(r#", "tiers": {"fast": {"m": {}}}"#), dead),
         (with(r#", "speed": {"m": {"standard": 2}}"#), dead),
-        (with(r#", "geo": {"global": 2}"#), dead),
+        (with(r#", "geo": {"m": {"global": 2}}"#), dead),
         (with(r#", "speed": {"m": {"fast": 0}}"#), factor),
-        (with(r#", "geo": {"us": -1}"#), factor),
-        (with(r#", "geo": {"us": 1000}"#), factor),
+        (with(r#", "geo": {"m": {"us": -1}}"#), factor),
+        (with(r#", "geo": {"m": {"us": 1000}}"#), factor),
         (model(r#"{}, "m": {}"#), "m is listed twice"),
         (flex(r#"{}, "m": {}"#), "m is listed twice"),
         (
@@ -309,7 +312,7 @@ fn test_bad_tables_are_rejected() {
             "flex is listed twice",
         ),
         (
-            with(r#", "geo": {"us": 1.1, "us": 1.2}"#),
+            with(r#", "geo": {"m": {"us": 1.1, "us": 1.2}}"#),
             "us is listed twice",
         ),
         (

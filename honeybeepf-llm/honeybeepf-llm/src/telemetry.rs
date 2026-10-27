@@ -10,6 +10,7 @@
 //! 2. Direct environment variable configuration
 
 use anyhow::{Context, Result};
+use honeybeepf_llm_core::pricing::PriceTable;
 use honeybeepf_llm_core::types::UsageInfo;
 use log::info;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
@@ -18,7 +19,7 @@ use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 #[cfg(feature = "k8s")]
@@ -63,6 +64,10 @@ pub struct HoneyBeeMetrics {
     pub llm_reasoning_tokens_total: Counter<u64>,
     pub llm_latency_seconds: Histogram<f64>,
     pub llm_responses_unparsed_total: Counter<u64>,
+    pub llm_cost_usd_total: Counter<f64>,
+    pub llm_unpriced_tokens_total: Counter<u64>,
+    /// Built-in price table and its `price_table_version` label, built once.
+    prices: Option<(PriceTable, KeyValue)>,
 }
 
 impl HoneyBeeMetrics {
@@ -151,7 +156,52 @@ impl HoneyBeeMetrics {
                 )
                 .with_unit("responses")
                 .build(),
+            // No unit: the Prometheus exporter would append it to the name.
+            llm_cost_usd_total: meter
+                .f64_counter("llm_cost_usd_total")
+                .with_description("Cost of LLM calls in USD from the price table, by cost_type")
+                .build(),
+            llm_unpriced_tokens_total: meter
+                .u64_counter("llm_unpriced_tokens_total")
+                .with_description(
+                    "Tokens of LLM calls the price table could not price, by reason; never counted as $0",
+                )
+                .with_unit("tokens")
+                .build(),
+            prices: load_prices(),
         }
+    }
+
+    /// Record a call's cost by category, or its tokens as unpriced with the reason.
+    fn record_cost(&self, usage: &UsageInfo, labels: &mut Vec<KeyValue>) {
+        let Some((table, version)) = &self.prices else {
+            return;
+        };
+        let base = labels.len();
+        labels.push(version.clone());
+        match table.cost(usage) {
+            Ok(cost) => {
+                let parts = [
+                    ("input", cost.input),
+                    ("cache_read", cost.cache_read),
+                    ("cache_write", cost.cache_write),
+                    ("output", cost.output),
+                ];
+                for (cost_type, usd) in parts {
+                    if usd > 0.0 {
+                        labels.push(KeyValue::new("cost_type", cost_type));
+                        self.llm_cost_usd_total.add(usd, labels);
+                        labels.pop();
+                    }
+                }
+            }
+            Err(why) => {
+                labels.push(KeyValue::new("reason", why.as_str()));
+                let tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
+                self.llm_unpriced_tokens_total.add(tokens, labels);
+            }
+        }
+        labels.truncate(base);
     }
 
     fn record_llm(
@@ -159,7 +209,7 @@ impl HoneyBeeMetrics {
         usage: &UsageInfo,
         latency_secs: f64,
         is_error: bool,
-        attrs: Vec<KeyValue>,
+        mut attrs: Vec<KeyValue>,
     ) {
         // 1. total requests
         self.llm_requests_total.add(1, &attrs);
@@ -178,6 +228,7 @@ impl HoneyBeeMetrics {
             if let Some(n) = usage.thoughts_tokens {
                 self.llm_reasoning_tokens_total.add(n, &attrs);
             }
+            self.record_cost(usage, &mut attrs);
 
             let mut prompt_attrs = attrs.clone();
             prompt_attrs.push(KeyValue::new("token_type", "prompt"));
@@ -188,6 +239,29 @@ impl HoneyBeeMetrics {
             comp_attrs.push(KeyValue::new("token_type", "completion"));
             self.llm_tokens_total
                 .add(usage.completion_tokens, &comp_attrs);
+        }
+    }
+}
+
+/// Load the built-in price table; if it is rejected the agent runs on without cost metrics.
+fn load_prices() -> Option<(PriceTable, KeyValue)> {
+    match PriceTable::builtin() {
+        Ok(table) => {
+            for s in table.sources() {
+                info!(
+                    "Price table {}: {} prices from {} (checked {})",
+                    table.version(),
+                    s.provider,
+                    s.url,
+                    s.checked
+                );
+            }
+            let version = KeyValue::new("price_table_version", Arc::<str>::from(table.version()));
+            Some((table, version))
+        }
+        Err(e) => {
+            log::warn!("Built-in price table rejected, LLM cost not recorded: {e}");
+            None
         }
     }
 }
@@ -541,6 +615,87 @@ mod tests {
 
         assert_eq!(total("llm_reasoning_tokens_total")?, 4);
         assert_eq!(total("llm_tokens_total")?, 9);
+        Ok(())
+    }
+
+    #[test]
+    fn llm_cost_is_priced_per_call_and_unknown_models_stay_unpriced() -> Result<()> {
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"));
+        let priced = UsageInfo {
+            prompt_tokens: 1200,
+            completion_tokens: 800,
+            cache_read_tokens: Some(1000),
+            thoughts_tokens: Some(600),
+            model: Some("gpt-5".to_string()),
+            ..UsageInfo::default()
+        };
+        let unknown = UsageInfo {
+            prompt_tokens: 30,
+            completion_tokens: 12,
+            model: Some("my-vllm-llama".to_string()),
+            ..UsageInfo::default()
+        };
+        metrics.record_llm(&priced, 1.0, false, vec![]);
+        metrics.record_llm(&priced, 1.0, true, vec![]);
+        metrics.record_llm(&unknown, 1.0, false, vec![]);
+
+        let mut rm = ResourceMetrics {
+            resource: Resource::empty(),
+            scope_metrics: vec![],
+        };
+        reader.collect(&mut rm)?;
+        let find = |name: &str| {
+            rm.scope_metrics
+                .iter()
+                .flat_map(|s| &s.metrics)
+                .find(|m| m.name == name)
+                .with_context(|| format!("{name} not collected"))
+        };
+        let label = |attrs: &[KeyValue], key: &str| {
+            attrs
+                .iter()
+                .find(|kv| kv.key.as_str() == key)
+                .map(|kv| kv.value.to_string())
+        };
+        let cost = find("llm_cost_usd_total")?
+            .data
+            .as_any()
+            .downcast_ref::<data::Sum<f64>>()
+            .context("llm_cost_usd_total is not an f64 sum")?;
+        // gpt-5, error call not billed: 200×$1.25 + 1000×$0.125 + 800×$10 per million.
+        let mut parts: Vec<(Option<String>, f64)> = cost
+            .data_points
+            .iter()
+            .map(|p| (label(&p.attributes, "cost_type"), (p.value * 1e9).round()))
+            .collect();
+        parts.sort_by(|a, b| a.0.cmp(&b.0));
+        let kind = |s: &str| Some(s.to_string());
+        assert_eq!(
+            parts,
+            [
+                (kind("cache_read"), 125_000.0),
+                (kind("input"), 250_000.0),
+                (kind("output"), 8_000_000.0)
+            ]
+        );
+        assert!(cost.data_points.iter().all(|p| {
+            label(&p.attributes, "price_table_version").as_deref() == Some("2026-10-26")
+        }));
+        let unpriced = find("llm_unpriced_tokens_total")?
+            .data
+            .as_any()
+            .downcast_ref::<data::Sum<u64>>()
+            .context("llm_unpriced_tokens_total is not a u64 sum")?;
+        let points: Vec<_> = unpriced
+            .data_points
+            .iter()
+            .map(|p| (label(&p.attributes, "reason"), p.value))
+            .collect();
+        assert_eq!(points, [(kind("unknown_model"), 42)]);
         Ok(())
     }
 }
