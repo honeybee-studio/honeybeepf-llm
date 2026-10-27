@@ -24,10 +24,8 @@ spec:
       {{- end }}
       
       serviceAccountName: {{ include "honeybeepf-llm.serviceAccountName" . }}
-      hostPID: true 
-      hostNetwork: true
-      # Required for cluster DNS resolution with hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
+      # /proc/<pid> of other pods: libssl discovery and pod attribution
+      hostPID: true
 
       {{- with .Values.nodeSelector }}
       nodeSelector:
