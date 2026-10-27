@@ -1,0 +1,21 @@
+# Groups the generated release notes by PR label.
+changelog:
+  exclude:
+    labels:
+      - question
+  categories:
+    - title: Features
+      labels:
+        - enhancement
+    - title: Fixes
+      labels:
+        - bug
+    - title: Documentation
+      labels:
+        - documentation
+    - title: Dependencies
+      labels:
+        - dependencies
+    - title: Other changes
+      labels:
+        - "*"
