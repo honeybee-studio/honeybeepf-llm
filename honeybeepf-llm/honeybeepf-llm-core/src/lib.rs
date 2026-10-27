@@ -5,5 +5,6 @@
 //! built and tested on any platform without an eBPF toolchain.
 
 pub mod byte_utils;
+pub mod pricing;
 pub mod providers;
 pub mod types;
