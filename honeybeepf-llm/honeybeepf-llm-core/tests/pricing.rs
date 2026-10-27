@@ -188,3 +188,148 @@ fn test_huge_and_inconsistent_counts_stay_finite() {
     };
     assert_eq!(usd(&odd), Err(Unpriced::InconsistentUsage));
 }
+
+fn one_provider(models: &str, extra: &str) -> String {
+    format!(
+        r#"{{"version": "v", "providers": [{{"name": "p", "source": "s", "checked": "2026-10-26", "models": {models}{extra}}}]}}"#
+    )
+}
+
+#[test]
+fn test_dated_prices_switch_after_their_last_day() {
+    // Gemini pricing page: input $2 -> $4 and output $10 -> $20 after 2026-11-30.
+    let json = one_provider(
+        r#"{"gemini-4-argon": {"input": 2, "output": 10, "until": "2026-11-30", "then": {"input": 4, "output": 20}},
+            "promo": {"input": 1, "until": "2026-11-30"},
+            "old": {"input": 9, "until": "2000-01-01", "then": {"input": 1}}}"#,
+        r#", "tiers": {"flex": {"promo": {"input": 0.5, "above_tokens": 10, "above": {"input": 1}}}}"#,
+    );
+    let table = PriceTable::from_json(&json).expect("dated table loads");
+    let on = |model: &str, day: u32| {
+        let total = |c: Cost| c.input + c.cache_read + c.cache_write + c.output;
+        table.cost_on(&usage(model, 1_000_000, 0), day).map(total)
+    };
+    let nov_30 = 20_787; // 2026-11-30
+    assert_eq!(on("gemini-4-argon", nov_30), Ok(2.0));
+    assert_eq!(on("gemini-4-argon", nov_30 + 1), Ok(4.0));
+    assert_eq!(on("promo", nov_30), Ok(1.0));
+    assert_eq!(on("promo", nov_30 + 1), Err(Unpriced::MissingPrice));
+    // A tier with its own threshold does not need the expired standard prices.
+    let flex = UsageInfo {
+        service_tier: Some("flex".to_string()),
+        ..usage("promo", 1_000_000, 0)
+    };
+    assert_eq!(table.cost_on(&flex, nov_30 + 1).map(|c| c.input), Ok(1.0));
+    let today = table.cost(&usage("old", 1_000_000, 0)).map(|c| c.input);
+    assert_eq!(today, Ok(1.0));
+}
+
+#[test]
+fn test_caps_keep_the_largest_cost_finite() {
+    let json = one_provider(
+        r#"{"m": {"input": 1e6, "output": 1e6}}"#,
+        r#", "speed": {"m": {"fast": 100}}, "geo": {"us": 100}"#,
+    );
+    let table = PriceTable::from_json(&json).expect("table at the caps loads");
+    let huge = UsageInfo {
+        speed: Some("fast".to_string()),
+        inference_geo: Some("us".to_string()),
+        ..usage("m", u64::MAX, u64::MAX)
+    };
+    let total = table.cost(&huge).map(|c| c.input + c.output);
+    assert!(total.is_ok_and(f64::is_finite));
+}
+
+#[test]
+fn test_bad_tables_are_rejected() {
+    let model = |rates: &str| one_provider(&format!(r#"{{"m": {rates}}}"#), "");
+    let with = |extra: &str| one_provider(r#"{"m": {"input": 1, "above_tokens": 10}}"#, extra);
+    let flex = |rates: &str| with(&format!(r#", "tiers": {{"flex": {{"m": {rates}}}}}"#));
+    let deep = model(&format!(
+        "{}{{}}{}",
+        r#"{"until": "2026-01-01", "then": "#.repeat(200),
+        "}".repeat(200)
+    ));
+    let (range, date, nested, factor) = ("0 and 1e6", "1970 on", "its own", "multipliers");
+    let (above, unknown, dead) = (
+        "needs above_tokens",
+        "no standard prices",
+        "never looked up",
+    );
+    for (json, why) in [
+        (model(r#"{"input": -1}"#), range),
+        (model(r#"{"input": -0.0}"#), range),
+        (model(r#"{"input": 1e7}"#), range),
+        (model(r#"{"input": 1e400}"#), "number out of range"),
+        (
+            model(r#"{"above_tokens": 5, "above": {"input": -2}}"#),
+            range,
+        ),
+        (
+            model(r#"{"until": "2026-11-30", "then": {"input": -2}}"#),
+            range,
+        ),
+        (model(r#"{"input": 1, "above": {"input": 2}}"#), above),
+        (flex(r#"{"input": 1, "above": {"input": 2}}"#), above),
+        (
+            model(r#"{"above_tokens": 5, "above": {"above_tokens": 9}}"#),
+            nested,
+        ),
+        (
+            model(r#"{"above_tokens": 5, "above": {"then": {}}}"#),
+            nested,
+        ),
+        (
+            model(r#"{"input": 1, "then": {"input": 2}}"#),
+            "then needs until",
+        ),
+        (
+            model(r#"{"until": "2026-11-30", "then": {"until": "2026-11-01"}}"#),
+            "increase",
+        ),
+        (model(r#"{"until": "2026-02-29"}"#), date),
+        (model(r#"{"until": "2100-02-29"}"#), date),
+        (model(r#"{"until": "2026-13-01"}"#), date),
+        (model(r#"{"until": "26-11-30"}"#), date),
+        (model(r#"{"until": "1969-12-31"}"#), date),
+        (model("{}").replace("2026-10-26", "today"), "checked is not"),
+        (with(r#", "tiers": {"flex": {"x": {}}}"#), unknown),
+        (with(r#", "speed": {"x": {"fast": 2}}"#), unknown),
+        (with(r#", "tiers": {"default": {"m": {}}}"#), dead),
+        (with(r#", "tiers": {"fast": {"m": {}}}"#), dead),
+        (with(r#", "speed": {"m": {"standard": 2}}"#), dead),
+        (with(r#", "geo": {"global": 2}"#), dead),
+        (with(r#", "speed": {"m": {"fast": 0}}"#), factor),
+        (with(r#", "geo": {"us": -1}"#), factor),
+        (with(r#", "geo": {"us": 1000}"#), factor),
+        (model(r#"{}, "m": {}"#), "m is listed twice"),
+        (flex(r#"{}, "m": {}"#), "m is listed twice"),
+        (
+            with(r#", "tiers": {"flex": {}, "flex": {}}"#),
+            "flex is listed twice",
+        ),
+        (
+            with(r#", "geo": {"us": 1.1, "us": 1.2}"#),
+            "us is listed twice",
+        ),
+        (
+            TABLE.replace("gpt-5.5-pro", "claude-opus-5-5"),
+            "opus-5-5 is listed twice",
+        ),
+        (deep, "recursion limit exceeded"),
+    ] {
+        let err = PriceTable::from_json(&json).err().map(|e| e.to_string());
+        assert!(
+            err.as_ref().is_some_and(|e| e.contains(why)),
+            "{why}: {err:?}"
+        );
+    }
+    for rates in [
+        r#"{"until": "2028-02-29"}"#,
+        r#"{"until": "2000-02-29"}"#,
+        r#"{"until": null}"#,
+    ] {
+        assert!(PriceTable::from_json(&model(rates)).is_ok(), "{rates}");
+    }
+    assert!(PriceTable::from_json(&flex(r#"{"above_tokens": 5, "above": {}}"#)).is_ok());
+}
