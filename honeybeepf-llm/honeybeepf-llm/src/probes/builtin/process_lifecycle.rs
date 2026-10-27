@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader};
 
 use anyhow::{Context, Result};
 use aya::Ebpf;
-use aya::programs::KProbe;
+use aya::programs::{KProbe, TracePoint};
 use honeybeepf_llm_common::ProcessExitEvent;
 use log::{info, warn};
 
@@ -31,13 +31,13 @@ impl Probe for ProcessLifecycleProbe {
             .attach("acct_collect", 0)
             .context("attach to acct_collect (needs CONFIG_BSD_PROCESS_ACCT)")?;
 
-        // 2. Attach to oom_kill_process to flag kernel-level OOM events
-        let oom_prog: &mut KProbe = bpf
-            .program_mut("honeybeepf_llm_oom_kill_process")
-            .context("BPF program honeybeepf-llm_oom_kill_process not found")?
+        // 2. oom:mark_victim flags OOM victims; its pid field needs no kernel struct layout
+        let oom_prog: &mut TracePoint = bpf
+            .program_mut("honeybeepf_llm_oom_mark_victim")
+            .context("BPF program honeybeepf-llm_oom_mark_victim not found")?
             .try_into()?;
         oom_prog.load()?;
-        oom_prog.attach("oom_kill_process", 0)?;
+        oom_prog.attach("oom", "mark_victim")?;
 
         spawn_ringbuf_handler(
             bpf,
@@ -146,5 +146,29 @@ mod tests {
         let kallsyms = "0000000000000000 T do_group_exit\n\
                         0000000000000000 T acct_collect\n";
         assert_eq!(missing_hook(kallsyms.as_bytes()), None);
+    }
+
+    /// OOM victims must come from a tracepoint field, not a kprobe reading hand-written struct offsets.
+    #[test]
+    fn oom_victims_are_marked_by_the_mark_victim_tracepoint() -> Result<()> {
+        use object::{Object, ObjectSection, ObjectSymbol, SymbolKind};
+
+        let data = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/honeybeepf-llm"));
+        let obj = object::File::parse(data)?;
+        let mut oom_programs = Vec::new();
+        for sym in obj.symbols().filter(|s| s.kind() == SymbolKind::Text) {
+            let name = sym.name()?;
+            let Some(index) = sym.section_index() else {
+                continue;
+            };
+            if name.contains("oom") {
+                oom_programs.push((obj.section_by_index(index)?.name()?, name));
+            }
+        }
+        assert_eq!(
+            oom_programs,
+            [("tracepoint", "honeybeepf_llm_oom_mark_victim")]
+        );
+        Ok(())
     }
 }
