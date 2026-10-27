@@ -30,12 +30,53 @@ fn test_default_providers() {
     assert_eq!(registry.providers.len(), 6);
 }
 
-// `with_defaults` falls back to an empty list, so the embedded file must parse on its own.
+// `with_defaults` falls back to an empty list and serde skips unknown keys, so a typo would go unnoticed.
 #[test]
-fn test_default_providers_json_parses() {
+fn test_default_providers_json_parses_with_known_keys_only() {
     let json = include_str!("../src/providers/default_providers.json");
-    let registry = ProviderRegistry::from_json(json).unwrap();
-    assert_eq!(registry.providers.len(), 6);
+    assert_eq!(
+        ProviderRegistry::from_json(json).unwrap().providers.len(),
+        6
+    );
+
+    let provider_keys = [
+        "name",
+        "note",
+        "hosts",
+        "paths",
+        "response",
+        "request_extractor",
+    ];
+    let response_keys = [
+        "usage_path",
+        "prompt_tokens",
+        "completion_tokens",
+        "completion_optional",
+        "thoughts_tokens",
+        "completion_excludes_thoughts",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "cache_write_long_ttl_tokens",
+        "speed",
+        "inference_geo",
+        "prompt_excludes_cache",
+        "required_field",
+        "model_path",
+        "service_tier_path",
+    ];
+    let file: serde_json::Value = serde_json::from_str(json).unwrap();
+    for provider in file["providers"].as_array().unwrap() {
+        let name = &provider["name"];
+        for key in provider.as_object().unwrap().keys() {
+            assert!(provider_keys.contains(&key.as_str()), "{name}: {key}");
+        }
+        for key in provider["response"].as_object().unwrap().keys() {
+            assert!(
+                response_keys.contains(&key.as_str()),
+                "{name}: response.{key}"
+            );
+        }
+    }
 }
 
 #[test]
