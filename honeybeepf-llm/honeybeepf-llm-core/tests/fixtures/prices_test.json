@@ -1,0 +1,21 @@
+{"version": "test-1", "providers": [
+  {"name": "anthropic", "source": "https://platform.claude.com/docs/en/about-claude/pricing", "checked": "2026-10-26",
+   "models": {
+     "claude-opus-5-5": {"input": 4, "output": 20, "cache_read": 0.2, "cache_write": 5, "cache_write_long": 8},
+     "claude-sonnet-4-5": {"input": 3, "output": 15, "cache_read": 0.3, "cache_write": 3.75, "cache_write_long": 6},
+     "claude-haiku-5-5": {"input": 0.1, "output": 0.5, "cache_read": 0.01, "above_tokens": 100000,
+       "above": {"input": 0.5, "output": 2.5, "cache_read": 0.05}}},
+   "speed": {"claude-opus-5-5": {"fast": 2}},
+   "geo": {"claude-opus-5-5": {"us": 1.1}}},
+  {"name": "openai", "source": "https://developers.openai.com/api/docs/pricing", "checked": "2026-10-26",
+   "models": {
+     "gpt-6.1-sol": {"input": 2, "output": 10, "cache_read": 0.1, "cache_write": 2.5, "cache_write_long": 5,
+       "above_tokens": 272000, "above": {"input": 4, "output": 15}},
+     "gpt-5.5-pro": {"input": 30, "output": 180},
+     "gpt-5": {"input": 1.25, "output": 10, "cache_read": 0.125},
+     "gpt-4o": {"input": 2.5, "output": 10},
+     "gpt-4o-2024-05-13": {"input": 5, "output": 15}},
+   "tiers": {
+     "flex": {"gpt-6.1-sol": {"input": 1, "output": 5}},
+     "priority": {"gpt-6.1-sol": {"input": 4, "output": 20}}}}
+]}
