@@ -1,5 +1,6 @@
 use honeybeepf_llm_core::providers::{
-    ConfigurableProvider, ProviderConfig, ProviderRegistry, RequestExtractorType, ResponseConfig,
+    ConfigurableProvider, IdentityConfig, ProviderConfig, ProviderRegistry, RequestExtractorType,
+    ResponseConfig, TokenConfig,
 };
 use honeybeepf_llm_core::types::UsageInfo;
 use serde_json::json;
@@ -9,14 +10,7 @@ fn openai_config() -> ProviderConfig {
         name: "openai".to_string(),
         hosts: vec!["api.openai.com".to_string()],
         paths: vec!["/chat/completions".to_string()],
-        response: ResponseConfig {
-            usage_path: "usage".to_string(),
-            prompt_tokens: "prompt_tokens".to_string(),
-            completion_tokens: "completion_tokens".to_string(),
-            thoughts_tokens: None,
-            model_path: "model".to_string(),
-            ..ResponseConfig::default()
-        },
+        response: ResponseConfig::default(),
         request_extractor: RequestExtractorType::Messages,
     }
 }
@@ -27,11 +21,17 @@ fn gemini_config() -> ProviderConfig {
         hosts: vec!["generativelanguage.googleapis.com".to_string()],
         paths: vec!["generateContent".to_string()],
         response: ResponseConfig {
-            usage_path: "usageMetadata".to_string(),
-            prompt_tokens: "promptTokenCount".to_string(),
-            completion_tokens: "candidatesTokenCount".to_string(),
-            thoughts_tokens: Some("thoughtsTokenCount".to_string()),
-            model_path: "modelVersion".to_string(),
+            tokens: TokenConfig {
+                usage_path: "usageMetadata".to_string(),
+                prompt_tokens: "promptTokenCount".to_string(),
+                completion_tokens: "candidatesTokenCount".to_string(),
+                thoughts_tokens: Some("thoughtsTokenCount".to_string()),
+                ..TokenConfig::default()
+            },
+            identity: IdentityConfig {
+                model_path: "modelVersion".to_string(),
+                required_field: None,
+            },
             ..ResponseConfig::default()
         },
         request_extractor: RequestExtractorType::Contents,

@@ -20,9 +20,25 @@ pub enum RequestExtractorType {
     None,
 }
 
-/// Configuration for parsing usage from response JSON
-#[derive(Debug, Clone, Deserialize)]
+/// Configuration for parsing usage from response JSON; the groups are flattened, so config keys stay flat
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct ResponseConfig {
+    #[serde(flatten)]
+    pub tokens: TokenConfig,
+
+    #[serde(flatten)]
+    pub cache: CacheConfig,
+
+    #[serde(flatten)]
+    pub pricing: PricingConfig,
+
+    #[serde(flatten)]
+    pub identity: IdentityConfig,
+}
+
+/// Where the prompt, completion and reasoning counts are, and how they add up
+#[derive(Debug, Clone, Deserialize)]
+pub struct TokenConfig {
     /// JSON path to the usage object (e.g., "usage" or "usageMetadata")
     #[serde(default = "default_usage_path")]
     pub usage_path: String,
@@ -45,7 +61,11 @@ pub struct ResponseConfig {
     /// Whether `completion_tokens` leaves out thinking tokens (Gemini), so the output total adds them back
     #[serde(default)]
     pub completion_excludes_thoughts: bool,
+}
 
+/// Where the prompt tokens read from and written to the provider cache are
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CacheConfig {
     /// Optional: field name for prompt tokens read from the provider cache
     #[serde(alias = "cached_tokens")]
     pub cache_read_tokens: Option<String>,
@@ -56,25 +76,33 @@ pub struct ResponseConfig {
     /// Optional: field name for the cache writes with the longer, pricier lifetime
     pub cache_write_long_ttl_tokens: Option<String>,
 
+    /// Whether `prompt_tokens` leaves out cache tokens (Anthropic), so the input total adds them back
+    #[serde(default)]
+    pub prompt_excludes_cache: bool,
+}
+
+/// Fields that only feed the price modifiers
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct PricingConfig {
+    /// Optional: JSON path to the served service tier (from root, e.g., "service_tier")
+    pub service_tier_path: Option<String>,
+
     /// Optional: field name for the speed mode within the usage object
     pub speed: Option<String>,
 
     /// Optional: field name for the inference geography within the usage object
     pub inference_geo: Option<String>,
+}
 
-    /// Whether `prompt_tokens` leaves out cache tokens (Anthropic), so the input total adds them back
-    #[serde(default)]
-    pub prompt_excludes_cache: bool,
-
-    /// Optional: usage field that must be present, to tell apart providers sharing token keys
-    pub required_field: Option<String>,
-
+/// Which usage belongs to this provider and which model served it
+#[derive(Debug, Clone, Deserialize)]
+pub struct IdentityConfig {
     /// JSON path to model name (from root, e.g., "model" or "modelVersion")
     #[serde(default = "default_model_path")]
     pub model_path: String,
 
-    /// Optional: JSON path to the served service tier (from root, e.g., "service_tier")
-    pub service_tier_path: Option<String>,
+    /// Optional: usage field that must be present, to tell apart providers sharing token keys
+    pub required_field: Option<String>,
 }
 
 fn default_usage_path() -> String {
@@ -90,7 +118,7 @@ fn default_model_path() -> String {
     "model".to_string()
 }
 
-impl Default for ResponseConfig {
+impl Default for TokenConfig {
     fn default() -> Self {
         Self {
             usage_path: default_usage_path(),
@@ -99,15 +127,15 @@ impl Default for ResponseConfig {
             completion_optional: false,
             thoughts_tokens: None,
             completion_excludes_thoughts: false,
-            cache_read_tokens: None,
-            cache_write_tokens: None,
-            cache_write_long_ttl_tokens: None,
-            speed: None,
-            inference_geo: None,
-            prompt_excludes_cache: false,
-            required_field: None,
+        }
+    }
+}
+
+impl Default for IdentityConfig {
+    fn default() -> Self {
+        Self {
             model_path: default_model_path(),
-            service_tier_path: None,
+            required_field: None,
         }
     }
 }

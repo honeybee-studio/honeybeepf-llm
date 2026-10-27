@@ -1,6 +1,8 @@
 use serde_json::Value;
 
-use super::config::{ProviderConfig, host_matches, path_matches};
+use super::config::{
+    CacheConfig, IdentityConfig, ProviderConfig, TokenConfig, host_matches, path_matches,
+};
 use super::request::{RequestExtractor, get_extractor};
 use crate::byte_utils::get_nested_value;
 use crate::types::UsageInfo;
@@ -44,74 +46,104 @@ impl ConfigurableProvider {
 
     /// Parse usage from response JSON using configured paths
     pub fn parse_usage(&self, json: &Value) -> Option<UsageInfo> {
-        let response_config = &self.config.response;
-
-        // Get usage object using configured path
-        let usage = get_nested_value(json, &response_config.usage_path)?;
-        if let Some(field) = &response_config.required_field
-            && get_nested_value(usage, field).is_none()
-        {
+        let response = &self.config.response;
+        let usage = get_nested_value(json, &response.tokens.usage_path)?;
+        if !is_own_usage(&response.identity, usage) {
             return None;
         }
 
-        // Extract token counts
-        let prompt =
-            get_nested_value(usage, &response_config.prompt_tokens).and_then(|v| v.as_u64())?;
-        let completion = match get_nested_value(usage, &response_config.completion_tokens) {
-            Some(v) => v.as_u64()?,
-            None if response_config.completion_optional => 0,
-            None => return None,
-        };
-
-        // Optional: thoughts/reasoning and cache tokens
-        let optional = |path: &Option<String>| {
-            path.as_ref()
-                .and_then(|path| get_nested_value(usage, path))
-                .and_then(|v| v.as_u64())
-        };
-        let thoughts = optional(&response_config.thoughts_tokens);
-        let cache_read = optional(&response_config.cache_read_tokens);
-        let cache_write = optional(&response_config.cache_write_tokens);
-        // The breakdown and the total can come from different SSE events; keep it inside the total.
-        let cache_write_long_ttl = optional(&response_config.cache_write_long_ttl_tokens)
-            .zip(cache_write)
-            .map(|(long, all)| long.min(all));
-        let text = |root: &Value, path: &Option<String>| {
-            path.as_ref()
-                .and_then(|path| get_nested_value(root, path))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        };
-
-        let prompt = if response_config.prompt_excludes_cache {
-            prompt
-                .saturating_add(cache_read.unwrap_or(0))
-                .saturating_add(cache_write.unwrap_or(0))
+        let tokens = read_tokens(&response.tokens, usage)?;
+        let cache = read_cache(&response.cache, usage);
+        let prompt = if response.cache.prompt_excludes_cache {
+            tokens
+                .prompt
+                .saturating_add(cache.read.unwrap_or(0))
+                .saturating_add(cache.write.unwrap_or(0))
         } else {
-            prompt
+            tokens.prompt
         };
-        let completion = if response_config.completion_excludes_thoughts {
-            completion.saturating_add(thoughts.unwrap_or(0))
-        } else {
-            completion
-        };
-
-        // Model name from root
-        let model = get_nested_value(json, &response_config.model_path)
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let pricing = &response.pricing;
 
         Some(UsageInfo {
             prompt_tokens: prompt,
-            completion_tokens: completion,
-            thoughts_tokens: thoughts,
-            cache_read_tokens: cache_read,
-            cache_write_tokens: cache_write,
-            cache_write_long_ttl_tokens: cache_write_long_ttl,
-            model,
-            service_tier: text(json, &response_config.service_tier_path),
-            speed: text(usage, &response_config.speed),
-            inference_geo: text(usage, &response_config.inference_geo),
+            completion_tokens: tokens.completion,
+            thoughts_tokens: tokens.thoughts,
+            cache_read_tokens: cache.read,
+            cache_write_tokens: cache.write,
+            cache_write_long_ttl_tokens: cache.write_long_ttl,
+            model: text(json, &response.identity.model_path),
+            service_tier: optional_text(json, &pricing.service_tier_path),
+            speed: optional_text(usage, &pricing.speed),
+            inference_geo: optional_text(usage, &pricing.inference_geo),
         })
     }
+}
+
+struct Tokens {
+    prompt: u64,
+    completion: u64,
+    thoughts: Option<u64>,
+}
+
+struct Cache {
+    read: Option<u64>,
+    write: Option<u64>,
+    write_long_ttl: Option<u64>,
+}
+
+fn is_own_usage(config: &IdentityConfig, usage: &Value) -> bool {
+    config
+        .required_field
+        .as_ref()
+        .is_none_or(|field| get_nested_value(usage, field).is_some())
+}
+
+/// Prompt, completion and reasoning counts; `None` when a required count is missing.
+fn read_tokens(config: &TokenConfig, usage: &Value) -> Option<Tokens> {
+    let prompt = get_nested_value(usage, &config.prompt_tokens).and_then(|v| v.as_u64())?;
+    let completion = match get_nested_value(usage, &config.completion_tokens) {
+        Some(v) => v.as_u64()?,
+        None if config.completion_optional => 0,
+        None => return None,
+    };
+    let thoughts = optional_count(usage, &config.thoughts_tokens);
+    let completion = if config.completion_excludes_thoughts {
+        completion.saturating_add(thoughts.unwrap_or(0))
+    } else {
+        completion
+    };
+    Some(Tokens {
+        prompt,
+        completion,
+        thoughts,
+    })
+}
+
+fn read_cache(config: &CacheConfig, usage: &Value) -> Cache {
+    let write = optional_count(usage, &config.cache_write_tokens);
+    // The breakdown and the total can come from different SSE events; keep it inside the total.
+    let write_long_ttl = optional_count(usage, &config.cache_write_long_ttl_tokens)
+        .zip(write)
+        .map(|(long, all)| long.min(all));
+    Cache {
+        read: optional_count(usage, &config.cache_read_tokens),
+        write,
+        write_long_ttl,
+    }
+}
+
+fn optional_count(root: &Value, path: &Option<String>) -> Option<u64> {
+    path.as_ref()
+        .and_then(|path| get_nested_value(root, path))
+        .and_then(|v| v.as_u64())
+}
+
+fn text(root: &Value, path: &str) -> Option<String> {
+    get_nested_value(root, path)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn optional_text(root: &Value, path: &Option<String>) -> Option<String> {
+    path.as_ref().and_then(|path| text(root, path))
 }
