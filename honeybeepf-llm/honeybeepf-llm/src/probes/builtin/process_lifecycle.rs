@@ -7,7 +7,7 @@ use aya::programs::{KProbe, TracePoint};
 use honeybeepf_llm_common::ProcessExitEvent;
 use log::{info, warn};
 
-use crate::probes::{IdentityResolver, Probe, spawn_ringbuf_handler};
+use crate::probes::{IdentityResolver, Probe, spawn_ringbuf_handler, tracepoint_exists};
 use crate::telemetry;
 
 pub struct ProcessLifecycleProbe;
@@ -93,15 +93,20 @@ impl Probe for ProcessLifecycleProbe {
 /// The kernel hook this probe needs that the running kernel lacks, if any.
 pub fn missing_kernel_hook() -> Option<&'static str> {
     // An unreadable kallsyms proves nothing; attach then reports the real error.
-    let kallsyms = File::open("/proc/kallsyms").ok()?;
-    missing_hook(BufReader::new(kallsyms))
+    let kallsyms = File::open("/proc/kallsyms").ok().map(BufReader::new);
+    missing_hook(kallsyms, tracepoint_exists("oom", "mark_victim"))
 }
 
-fn missing_hook(kallsyms: impl BufRead) -> Option<&'static str> {
-    let has_acct_collect = kallsyms
-        .lines()
-        .map_while(std::io::Result::ok)
-        .any(|line| line.split_whitespace().nth(2) == Some("acct_collect"));
+fn missing_hook(kallsyms: Option<impl BufRead>, has_mark_victim: bool) -> Option<&'static str> {
+    if !has_mark_victim {
+        return Some("oom:mark_victim tracepoint in tracefs");
+    }
+    let has_acct_collect = kallsyms.is_none_or(|kallsyms| {
+        kallsyms
+            .lines()
+            .map_while(std::io::Result::ok)
+            .any(|line| line.split_whitespace().nth(2) == Some("acct_collect"))
+    });
     (!has_acct_collect).then_some("acct_collect (CONFIG_BSD_PROCESS_ACCT)")
 }
 
@@ -136,7 +141,7 @@ mod tests {
                         0000000000000000 t acct_collect.cold\n\
                         0000000000000000 t acct_collect_x [some_mod]\n";
         assert_eq!(
-            missing_hook(kallsyms.as_bytes()),
+            missing_hook(Some(kallsyms.as_bytes()), true),
             Some("acct_collect (CONFIG_BSD_PROCESS_ACCT)")
         );
     }
@@ -145,7 +150,21 @@ mod tests {
     fn a_kernel_with_acct_collect_has_nothing_missing() {
         let kallsyms = "0000000000000000 T do_group_exit\n\
                         0000000000000000 T acct_collect\n";
-        assert_eq!(missing_hook(kallsyms.as_bytes()), None);
+        assert_eq!(missing_hook(Some(kallsyms.as_bytes()), true), None);
+    }
+
+    #[test]
+    fn a_missing_mark_victim_tracepoint_is_reported_missing() {
+        let kallsyms = "0000000000000000 T acct_collect\n";
+        assert_eq!(
+            missing_hook(Some(kallsyms.as_bytes()), false),
+            Some("oom:mark_victim tracepoint in tracefs")
+        );
+    }
+
+    #[test]
+    fn an_unreadable_kallsyms_does_not_skip_the_probe() {
+        assert_eq!(missing_hook(None::<&[u8]>, true), None);
     }
 
     /// OOM victims must come from a tracepoint field, not a kprobe reading hand-written struct offsets.
