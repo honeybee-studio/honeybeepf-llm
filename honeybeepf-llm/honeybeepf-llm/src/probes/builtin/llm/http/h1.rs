@@ -7,8 +7,91 @@ use super::ProtocolParser;
 use super::body::{extract_text_from_json, parse_response_json};
 use super::encoding;
 use super::registry::PROVIDER_REGISTRY;
-use super::sse::parse_sse_body;
+use super::sse::{SseCursor, parse_sse_body};
 use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
+
+/// What earlier reads of one response already decoded, so each read costs only its new bytes.
+#[derive(Default)]
+pub struct ResponseProgress {
+    chunks: Dechunker,
+    sse: SseCursor,
+}
+
+/// Chunk decoding resumed across reads; passes on the bytes `byte_utils::decode_chunked_body` would return.
+#[derive(Default)]
+struct Dechunker {
+    /// Body offset of the next size line or data byte.
+    pos: usize,
+    state: Dechunk,
+    decoded_any: bool,
+}
+
+#[derive(Default, Clone, Copy)]
+enum Dechunk {
+    #[default]
+    Size,
+    Data(usize),
+    /// Not chunked, or stopped before any data, which decode_chunked_body returns unchanged.
+    Raw,
+    Stopped,
+}
+
+impl Dechunker {
+    fn advance(&mut self, body: &[u8], chunked: bool, mut sink: impl FnMut(&[u8])) {
+        if !chunked {
+            self.state = Dechunk::Raw;
+        }
+        loop {
+            let rest = body.get(self.pos..).unwrap_or_default();
+            match self.state {
+                Dechunk::Stopped => return,
+                Dechunk::Raw => {
+                    sink(rest);
+                    self.pos = body.len();
+                    return;
+                }
+                Dechunk::Data(_) if rest.is_empty() => return,
+                Dechunk::Data(left) => {
+                    let n = left.min(rest.len());
+                    sink(&rest[..n]);
+                    self.decoded_any = true;
+                    self.pos += n;
+                    self.state = if n < left {
+                        Dechunk::Data(left - n)
+                    } else {
+                        // The CRLF after the data is skipped unchecked, as decode_chunked_body does.
+                        self.pos += 2;
+                        Dechunk::Size
+                    };
+                }
+                Dechunk::Size => {
+                    let Some(line_end) = byte_utils::find_pattern(rest, b"\r\n") else {
+                        return;
+                    };
+                    let size = std::str::from_utf8(&rest[..line_end])
+                        .ok()
+                        .and_then(|s| usize::from_str_radix(s.trim(), 16).ok());
+                    self.state = match size {
+                        Some(0) | None if !self.decoded_any => {
+                            self.pos = 0;
+                            Dechunk::Raw
+                        }
+                        Some(0) | None => Dechunk::Stopped,
+                        Some(n) => {
+                            self.pos += line_end + 2;
+                            Dechunk::Data(n)
+                        }
+                    };
+                }
+            }
+        }
+    }
+
+    /// Whether no further size line will be read, so only the full walk can tell if the body ended.
+    fn stopped(&self) -> bool {
+        matches!(self.state, Dechunk::Stopped | Dechunk::Raw)
+    }
+}
 
 #[derive(Clone)]
 pub struct Http11Parser;
@@ -153,15 +236,51 @@ impl ProtocolParser for Http11Parser {
     }
 
     fn parse_response(&self, buffer: &[u8]) -> Option<UsageInfo> {
+        self.parse_response_from(buffer, &mut ResponseProgress::default())
+    }
+
+    fn parse_response_from(
+        &self,
+        buffer: &[u8],
+        progress: &mut ResponseProgress,
+    ) -> Option<UsageInfo> {
         let head = final_head(buffer)?;
         let body = head.body;
         let is_chunked = head.framing == Framing::Chunked;
         let is_encoded = encoding::is_encoded(head.headers());
 
+        // SSE events can straddle chunk boundaries, so they are read only after dechunking.
+        // JSON bodies are walked too: where the walk stops tells `ended` when the full check is worth it.
+        let ResponseProgress { chunks, sse } = progress;
+        let feed_sse = head.is_sse && !is_encoded;
+        chunks.advance(body, is_chunked, |data| {
+            if feed_sse {
+                sse.feed(data);
+            }
+        });
+
         // A close-delimited body has no end to wait for, so it is decoded as it stands.
-        let ended = head.framing == Framing::UntilClose || head.framing.ended(body);
-        // Parsing re-runs on every read and decoding is not incremental, so wait for the framed end.
-        if is_encoded && !ended {
+        // A chunked body can only have ended once the walk stopped or it ends in the terminator.
+        let ended = || match head.framing {
+            Framing::Chunked => {
+                (chunks.stopped() || body.ends_with(b"0\r\n\r\n")) && chunked_ended(body)
+            }
+            framing => framing == Framing::UntilClose || framing.ended(body),
+        };
+
+        if feed_sse {
+            // A truncated read desyncs the chunk framing; once the stream has ended, fall back to raw lines.
+            return sse.usage().or_else(|| {
+                if is_chunked && ended() {
+                    parse_sse_body(body)
+                } else {
+                    None
+                }
+            });
+        }
+
+        // Decoding is not incremental, so wait for the framed end.
+        if is_encoded && !ended() {
             return None;
         }
 
@@ -172,16 +291,8 @@ impl ProtocolParser for Http11Parser {
         };
         let decompressed = encoding::decode(dechunked, head.headers())?;
 
-        // SSE events can straddle chunk boundaries, so they are parsed only after dechunking.
         if head.is_sse {
-            // A truncated read desyncs the chunk framing; once the stream has ended, fall back to raw lines.
-            return parse_sse_body(&decompressed).or_else(|| {
-                if is_chunked && !is_encoded && ended {
-                    parse_sse_body(body)
-                } else {
-                    None
-                }
-            });
+            return parse_sse_body(&decompressed);
         }
 
         let trimmed = byte_utils::trim_trailing_whitespace(&decompressed);
@@ -507,6 +618,96 @@ mod tests {
             "myres.openai.azure.com/openai/deployments/d1/completions?api-version=2024-10-21"
         ));
         assert!(!detect("ec2.us-west-2.api.aws/v1/messages"));
+    }
+
+    fn chunked(head: &str, chunks: &[&str]) -> Vec<u8> {
+        let mut resp = head.as_bytes().to_vec();
+        for c in chunks {
+            resp.extend_from_slice(format!("{:x}\r\n{c}\r\n", c.len()).as_bytes());
+        }
+        resp.extend_from_slice(b"0\r\n\r\n");
+        resp
+    }
+
+    /// Responses whose resumed parse has to match a fresh one: framings, desyncs, protocol-looking text, non-UTF-8.
+    fn resumable_responses() -> Vec<Vec<u8>> {
+        let sse = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let finish = "data: {\"choices\":[{\"delta\":{\"content\":\"quote data: [DONE] and \\\"finishReason\\\"\"},\"finish_reason\":null}]}\n\n";
+        let usage = "data: {\"model\":\"gpt-4o\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n";
+        let tail = format!("\r\n{finish}\r\n{:x}\r\n{usage}\r\n0\r\n\r\n", usage.len());
+        // The first size line claims 40 bytes that never arrived, as after a truncated SSL_read.
+        let lost = format!("{sse}{:x}{tail}", finish.len() + 40);
+        let ext = format!("{sse}{:x};x=1{tail}", finish.len());
+        let mut gemini = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n".to_vec();
+        gemini.extend_from_slice("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"h\u{e9} \u{1f41d}\"}]}}],\"usageMetadata\":{\"promptTokenCount\":7}}\r\n\r\n".as_bytes());
+        gemini.extend_from_slice(b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"\xff\xfe\"}]},\"finishReason\":\"STOP\"}],");
+        gemini.extend_from_slice(
+            b"\"usageMetadata\":{\"promptTokenCount\":7,\"candidatesTokenCount\":3}}\r\n\r\n",
+        );
+        let anthropic = concat!(
+            "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n",
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":15}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        let json =
+            r#"{"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":4}}"#;
+        let json_head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n";
+        vec![
+            chunked(sse, &[finish, &usage[..30], &usage[30..]]),
+            lost.into_bytes(),
+            ext.into_bytes(),
+            gemini,
+            anthropic.as_bytes().to_vec(),
+            chunked(json_head, &[&json[..20], &json[20..]]),
+        ]
+    }
+
+    #[test]
+    fn resumed_parse_matches_a_fresh_parse_at_every_read_boundary() {
+        for resp in resumable_responses() {
+            let fresh = |end: usize| Http11Parser.parse_response(&resp[..end]);
+            let text = String::from_utf8_lossy(&resp);
+            assert!(fresh(resp.len()).is_some(), "{text}");
+            let mut byte_reads = ResponseProgress::default();
+            for end in 1..=resp.len() {
+                let resumed = Http11Parser.parse_response_from(&resp[..end], &mut byte_reads);
+                assert_eq!(resumed, fresh(end), "byte reads, at {end}: {text}");
+                let mut two_reads = ResponseProgress::default();
+                Http11Parser.parse_response_from(&resp[..end], &mut two_reads);
+                let whole = Http11Parser.parse_response_from(&resp, &mut two_reads);
+                assert_eq!(whole, fresh(resp.len()), "split at {end}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn dechunker_passes_on_what_decode_chunked_body_returns() {
+        let bodies: [&[u8]; 6] = [
+            b"5\r\nhello\r\n3\r\n, w\r\n0\r\n\r\n",
+            b"9\r\nhello\r\n3\r\n, w\r\n0\r\n\r\n",
+            b"5;x=1\r\nhello\r\n0\r\n\r\n",
+            b"5\r\nhello\r\n3;x=1\r\n, w\r\n0\r\n\r\n",
+            b"zz\r\ndata: {}\n\n",
+            b"ffffffffffffffff\r\n{}\r\n0\r\n\r\n",
+        ];
+        for body in bodies {
+            for end in 1..=body.len() {
+                let prefix = &body[..end];
+                let mut got = Vec::new();
+                let mut dechunker = Dechunker::default();
+                for read in 1..=end {
+                    dechunker.advance(&prefix[..read], true, |d| got.extend_from_slice(d));
+                }
+                match byte_utils::decode_chunked_body(prefix) {
+                    std::borrow::Cow::Owned(want) => assert_eq!(got, want, "{prefix:?}"),
+                    // Unchanged: no CRLF yet, nothing decoded yet, or read as is.
+                    std::borrow::Cow::Borrowed(_) => {
+                        assert!(got.is_empty() || got == prefix, "{prefix:?}: {got:?}")
+                    }
+                }
+            }
+        }
     }
 
     #[test]

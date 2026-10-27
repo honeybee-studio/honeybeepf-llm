@@ -50,6 +50,8 @@ pub struct StreamProcessor {
     state: ProcessorState,
     write_buf: Vec<u8>,
     read_buf: Vec<u8>,
+    /// What parsing already read of `read_buf`; cleared with it.
+    read_progress: http::ResponseProgress,
     last_activity: Instant,
     /// Offset the next fragment of the SSL call in progress must have; 0 between calls.
     frag_next: u32,
@@ -69,6 +71,7 @@ impl StreamProcessor {
             // One per connection: most never carry an LLM call, so allocate on first use.
             write_buf: Vec::new(),
             read_buf: Vec::new(),
+            read_progress: http::ResponseProgress::default(),
             last_activity: Instant::now(),
             frag_next: 0,
             frag_dir: LlmDirection::Unknown,
@@ -232,7 +235,10 @@ impl StreamProcessor {
             ProcessorState::ProcessingRequest { start_time, parser }
             | ProcessorState::ProcessingResponse { start_time, parser } => {
                 // Parse once the SSL call's last fragment is in, not on a partial record
-                if complete && let Some(usage) = parser.parse_response(&self.read_buf) {
+                if complete
+                    && let Some(usage) =
+                        parser.parse_response_from(&self.read_buf, &mut self.read_progress)
+                {
                     record_usage(
                         &usage,
                         start_time,
@@ -336,6 +342,7 @@ impl StreamProcessor {
         self.state = ProcessorState::Detecting;
         self.write_buf.clear();
         self.read_buf.clear();
+        self.read_progress = http::ResponseProgress::default();
     }
 }
 
