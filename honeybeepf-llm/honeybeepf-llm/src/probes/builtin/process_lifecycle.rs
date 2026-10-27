@@ -11,13 +11,22 @@ pub struct ProcessLifecycleProbe;
 
 impl Probe for ProcessLifecycleProbe {
     fn attach(&self, bpf: &mut Ebpf, _resolver: IdentityResolver) -> Result<()> {
-        // 1. Attach to do_group_exit to capture the exit code reliably
+        // 1. do_group_exit marks user-space groups; acct_collect reports each one at its last thread
+        let group_prog: &mut KProbe = bpf
+            .program_mut("honeybeepf_llm_group_exit")
+            .context("BPF program honeybeepf-llm_group_exit not found")?
+            .try_into()?;
+        group_prog.load()?;
+        group_prog.attach("do_group_exit", 0)?;
+
         let exit_prog: &mut KProbe = bpf
             .program_mut("honeybeepf_llm_process_exit")
             .context("BPF program honeybeepf-llm_process_exit not found")?
             .try_into()?;
         exit_prog.load()?;
-        exit_prog.attach("do_group_exit", 0)?;
+        exit_prog
+            .attach("acct_collect", 0)
+            .context("attach to acct_collect (needs CONFIG_BSD_PROCESS_ACCT)")?;
 
         // 2. Attach to oom_kill_process to flag kernel-level OOM events
         let oom_prog: &mut KProbe = bpf
@@ -35,11 +44,7 @@ impl Probe for ProcessLifecycleProbe {
                     .unwrap_or("<invalid>")
                     .trim_matches(char::from(0));
 
-                let lifetime_ms = if event.start_time > 0 {
-                    (event.exit_time - event.start_time) / 1_000_000
-                } else {
-                    0
-                };
+                let lifetime = lifetime_secs(event.start_time, event.exit_time);
 
                 let signal = event.exit_code & 0x7f;
                 let status = (event.exit_code >> 8) & 0xff;
@@ -64,20 +69,46 @@ impl Probe for ProcessLifecycleProbe {
 
                 if signal != 0 {
                     warn!(
-                        "PROCESS_TERMINATED cause={} pid={} comm={} signal={} duration={}ms cgroup={}",
-                        cause, event.pid, comm, signal, lifetime_ms, event.cgroup_id
+                        "PROCESS_TERMINATED cause={} pid={} comm={} signal={} duration={:.3}s cgroup={}",
+                        cause, event.pid, comm, signal, lifetime, event.cgroup_id
                     );
                 } else {
                     info!(
-                        "PROCESS_EXIT cause=NORMAL pid={} comm={} status={} duration={}ms cgroup={}",
-                        event.pid, comm, status, lifetime_ms, event.cgroup_id
+                        "PROCESS_EXIT cause=NORMAL pid={} comm={} status={} duration={:.3}s cgroup={}",
+                        event.pid, comm, status, lifetime, event.cgroup_id
                     );
                 }
 
-                telemetry::record_process_exit(cause, status as u32, lifetime_ms, event.cgroup_id);
+                telemetry::record_process_exit(cause, status as u32, lifetime, event.cgroup_id);
             },
         )?;
 
         Ok(())
+    }
+}
+
+/// Lifetime in seconds from the exec and exit timestamps (ns); 0 when the exec was not seen.
+fn lifetime_secs(start_ns: u64, exit_ns: u64) -> f64 {
+    if start_ns == 0 {
+        return 0.0;
+    }
+    exit_ns.saturating_sub(start_ns) as f64 / 1e9
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lifetime_is_reported_in_seconds() {
+        let start_ns = 5_000_000_000;
+        assert_eq!(lifetime_secs(start_ns, start_ns + 1_500_000_000), 1.5);
+        assert_eq!(lifetime_secs(start_ns, start_ns + 250_000_000), 0.25);
+    }
+
+    #[test]
+    fn lifetime_is_zero_without_a_start_time_or_with_a_backwards_clock() {
+        assert_eq!(lifetime_secs(0, 7_000_000_000), 0.0);
+        assert_eq!(lifetime_secs(9_000_000_000, 7_000_000_000), 0.0);
     }
 }
