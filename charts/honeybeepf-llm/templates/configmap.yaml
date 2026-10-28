@@ -31,6 +31,9 @@ data:
   {{- if .Values.builtinProbes.llm.providers }}
   LLM_PROVIDERS_CONFIG: {{ dict "providers" .Values.builtinProbes.llm.providers | toJson | quote }}
   {{- end }}
+  {{- if .Values.builtinProbes.llm.prices }}
+  LLM_PRICES_CONFIG: {{ .Values.builtinProbes.llm.prices | toJson | quote }}
+  {{- end }}
 
   # === Collection Interval ===
   # === Process Lifecycle Probes ===
