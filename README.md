@@ -146,13 +146,13 @@ are checked on Linux 7.0 (the tables above).
 
 | Metric (as stored by the bundled Prometheus) | Type | Labels |
 |---|---|---|
-| `honeybeepf_llm_llm_requests_total` | counter | `model`, `status`, `target_namespace`, `target_pod_name` |
+| `honeybeepf_llm_llm_requests_total` | counter | `model`, `status`, `target_namespace`, `target_pod_name`, `target_workload_kind`, `target_workload_name` |
 | `honeybeepf_llm_llm_tokens_total` | counter | same, plus `token_type` (`prompt` / `completion`) |
 | `honeybeepf_llm_llm_cache_read_tokens_total` | counter | same as requests (subset of prompt tokens) |
 | `honeybeepf_llm_llm_cache_write_tokens_total` | counter | same as requests (subset of prompt tokens) |
 | `honeybeepf_llm_llm_reasoning_tokens_total` | counter | same as requests (subset of completion tokens) |
 | `honeybeepf_llm_llm_latency_seconds` | histogram | same as requests |
-| `honeybeepf_llm_llm_responses_unparsed_total` | counter | `reason`, `target_namespace`, `target_pod_name` |
+| `honeybeepf_llm_llm_responses_unparsed_total` | counter | `reason`, `target_namespace`, `target_pod_name`, `target_workload_kind`, `target_workload_name` |
 
 `llm_responses_unparsed_total` counts LLM calls the agent saw but could not record, so a drop in recorded calls
 can be told apart from a drop in traffic. `reason` is one of:
@@ -176,7 +176,9 @@ sum by (target_namespace, reason) (rate(honeybeepf_llm_llm_responses_unparsed_to
 
 The collector and Prometheus add more labels, such as `k8s_pod_name`, `k8s_node_name` and `namespace`; those name
 the agent's pod and node and the collector's namespace. `target_namespace` and `target_pod_name` name the pod
-that made the call.
+that made the call. `target_workload_kind` and `target_workload_name` name its owner: a Deployment (through its
+ReplicaSet), a CronJob (through its Job, which needs the chart's `jobs get` permission), a StatefulSet or
+DaemonSet, or `Pod` and the pod name for a pod without an owner; `unattributed` if the owner cannot be named.
 
 The Quickstart's Prometheus is the `honeybeepf-llm-prometheus-server` service (port 80) in the `honeybeepf`
 namespace. Tokens per minute by namespace:
