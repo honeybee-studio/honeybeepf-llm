@@ -4,6 +4,8 @@
 //! LLM request/response data.
 
 mod body;
+#[cfg(test)]
+mod chunk_cases;
 mod encoding;
 mod h1;
 mod h2;

@@ -359,6 +359,7 @@ fn content_length(headers: &[httparse::Header]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::chunk_cases;
     use super::super::test_support::tokens;
     use super::*;
 
@@ -712,6 +713,28 @@ mod tests {
                         assert!(got.is_empty() || got == prefix, "{prefix:?}: {got:?}")
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_walkers_in_h1_keep_their_answers() {
+        for case in chunk_cases::chunk_cases() {
+            let text = String::from_utf8_lossy(case.body);
+            let decoded = byte_utils::decode_chunked_body(case.body);
+            assert_eq!(&*decoded, case.or_body(case.decoded), "decode {text:?}");
+            assert_eq!(chunked_ended(case.body), case.ended, "ended {text:?}");
+            let (want, stopped) = case.dechunked;
+            for split in 0..=case.body.len() {
+                let (mut dechunker, mut got) = (Dechunker::default(), Vec::new());
+                dechunker.advance(&case.body[..split], true, |d| got.extend_from_slice(d));
+                dechunker.advance(case.body, true, |d| got.extend_from_slice(d));
+                let at = format!("dechunk split {split} {text:?}");
+                assert_eq!(
+                    (&got[..], dechunker.stopped()),
+                    (case.or_body(want), stopped),
+                    "{at}"
+                );
             }
         }
     }
