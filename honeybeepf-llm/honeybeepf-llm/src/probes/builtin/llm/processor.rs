@@ -226,12 +226,17 @@ impl StreamProcessor {
         match (&self.state, direction) {
             // A short first read may carry only part of the status line.
             (ProcessorState::ProcessingRequest { parser, .. }, LlmDirection::Read) => {
+                let head = skip_empty_lines(data);
                 !parser.writes_during_response()
-                    && !STATUS.starts_with(&data[..data.len().min(STATUS.len())])
+                    && !STATUS.starts_with(&head[..head.len().min(STATUS.len())])
+            }
+            // The next request before any response byte: the whole response was lost.
+            (ProcessorState::ProcessingRequest { parser, .. }, LlmDirection::Write) => {
+                !parser.writes_during_response() && http::Http11Parser::is_request_head(data)
             }
             (ProcessorState::ProcessingResponse { parser, .. }, LlmDirection::Write) => {
                 !parser.writes_during_response()
-                    && !self.read_buf.starts_with(STATUS)
+                    && !skip_empty_lines(&self.read_buf).starts_with(STATUS)
                     && http::Http11Parser::is_request_head(data)
             }
             _ => false,
@@ -427,6 +432,15 @@ impl StreamProcessor {
         self.read_progress = http::ResponseProgress::default();
         self.json_ends = None;
     }
+}
+
+/// The bytes after any empty lines, which httparse skips before a status line.
+fn skip_empty_lines(buf: &[u8]) -> &[u8] {
+    let start = buf
+        .iter()
+        .position(|b| !matches!(b, b'\r' | b'\n'))
+        .unwrap_or(buf.len());
+    &buf[start..]
 }
 
 /// Export one finished call's usage and log it.

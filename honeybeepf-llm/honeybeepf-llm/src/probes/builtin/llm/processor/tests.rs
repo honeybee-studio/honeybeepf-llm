@@ -665,6 +665,7 @@ fn test_call_after_a_lost_response_head_read_is_recorded() {
         (h1_response(3000), 0),
         (h1_response(40000), 0),
         (openai_sse_reads(5), 0),
+        (vec![h1("application/json", MESSAGES_RESPONSE)], 0),
         // `HTTP/` alone passes as a status line; the request head after it shows the loss.
         (short_first_read, 1),
     ]
@@ -696,6 +697,27 @@ fn test_first_read_of_partial_status_line_is_recorded() {
         let out = outcomes(&mut p, &reads, None);
         assert!(unparsed(&out).is_empty(), "{split}: {out:?}");
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{split}: {out:?}");
+    }
+}
+
+#[test]
+fn test_response_after_empty_lines_is_recorded() {
+    let ok = h1("application/json", MESSAGES_RESPONSE);
+    for lead in [&b"\r\n"[..], b"\n", b"\r\n\r\n"] {
+        let mut p = StreamProcessor::new();
+        let mut out = send(&mut p, LlmDirection::Write, MESSAGES_REQUEST, None);
+        out.extend(send(
+            &mut p,
+            LlmDirection::Read,
+            &[lead, &ok].concat(),
+            None,
+        ));
+        // The empty line in a read of its own, as a server that ends the previous response with it.
+        out.extend(send(&mut p, LlmDirection::Write, MESSAGES_REQUEST, None));
+        out.extend(send(&mut p, LlmDirection::Read, lead, None));
+        out.extend(send(&mut p, LlmDirection::Read, &ok, None));
+        assert!(unparsed(&out).is_empty(), "{lead:?}: {out:?}");
+        assert_eq!(count(&out, Outcome::Recorded), 2, "{lead:?}: {out:?}");
     }
 }
 
