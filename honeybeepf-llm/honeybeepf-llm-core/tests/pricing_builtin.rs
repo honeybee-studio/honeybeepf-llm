@@ -71,6 +71,14 @@ fn test_builtin_prices_match_the_pricing_pages() {
         (NOV_30, call("gpt-5.5", 300_000, 0).tier("priority"), MISSING),
         (NOV_30, call("gpt-5", 1000, 0).write(100), MISSING),
         (NOV_30, call("claude-3-opus-20240229", 1000, 10), UNKNOWN),
+        (NOV_30, call("gpt-4-turbo-2024-04-09", 10000, 1000), Ok(0.13)),
+        (NOV_30, call("gpt-4-0613", 1000, 1000), Ok(0.09)),
+        (NOV_30, million("gpt-3.5-turbo-0125"), Ok(0.5)),
+        // A four-digit suffix is not a date, so an unlisted snapshot stays unknown.
+        (NOV_30, million("gpt-3.5-turbo-1106"), UNKNOWN),
+        // These models have no cached-input price and no Flex tier.
+        (NOV_30, call("gpt-3.5-turbo", 1000, 0).read(500), MISSING),
+        (NOV_30, million("gpt-4-0613").tier("flex"), UNSUPPORTED),
     ];
     for (day, call, want) in cases {
         assert_eq!(table.cost_on(&call, day).map(total), want, "{call:?}");
