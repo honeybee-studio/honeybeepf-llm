@@ -30,6 +30,46 @@ fn test_default_providers() {
     assert_eq!(registry.providers.len(), 6);
 }
 
+// `with_defaults` falls back to an empty list and serde skips unknown keys, so a typo would go unnoticed.
+#[test]
+fn test_default_providers_json_parses_with_known_keys_only() {
+    let json = include_str!("../src/providers/default_providers.json");
+    ProviderRegistry::from_json(json).unwrap();
+
+    let provider_keys = "name note hosts paths response request_extractor";
+    let response_keys = "usage_path prompt_tokens completion_tokens completion_optional thoughts_tokens \
+        completion_excludes_thoughts cache_read_tokens cache_write_tokens cache_write_long_ttl_tokens \
+        speed inference_geo prompt_excludes_cache required_field model_path service_tier_path";
+    let file: serde_json::Value = serde_json::from_str(json).unwrap();
+    for provider in file["providers"].as_array().unwrap() {
+        let name = &provider["name"];
+        for key in provider.as_object().unwrap().keys() {
+            let known = provider_keys.split_whitespace().any(|k| k == key);
+            assert!(known, "{name}: {key}");
+        }
+        for key in provider["response"].as_object().unwrap().keys() {
+            let known = response_keys.split_whitespace().any(|k| k == key);
+            assert!(known, "{name}: response.{key}");
+        }
+    }
+}
+
+// Claude on Vertex AI returns the Anthropic body, so its copy of the response block must not drift.
+#[test]
+fn test_vertex_claude_reads_usage_like_anthropic() {
+    let registry = ProviderRegistry::with_defaults();
+    let anthropic: Vec<_> = registry
+        .providers
+        .iter()
+        .filter(|p| p.name == "anthropic")
+        .collect();
+    assert_eq!(anthropic.len(), 2);
+    assert_eq!(
+        format!("{:?}", anthropic[0].response),
+        format!("{:?}", anthropic[1].response)
+    );
+}
+
 #[test]
 fn test_default_provider_hosts() {
     let openai = [
