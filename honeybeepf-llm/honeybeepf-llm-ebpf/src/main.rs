@@ -2,7 +2,6 @@
 #![no_main]
 
 mod probes;
-mod vmlinux;
 
 #[cfg(not(test))]
 #[panic_handler]
