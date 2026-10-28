@@ -392,6 +392,23 @@ mod tests {
     }
 
     #[test]
+    fn gemini_tool_use_prompt_tokens_are_recorded_on_every_path() {
+        let first = "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"\\\"toolUsePromptTokenCount\\\":1\"}]}}],\
+            \"usageMetadata\":{\"promptTokenCount\":27},\"modelVersion\":\"gemini-test\"}";
+        let last = "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"i\"}]},\"finishReason\":\"STOP\"}],\
+            \"usageMetadata\":{\"promptTokenCount\":27,\"candidatesTokenCount\":120,\
+            \"toolUsePromptTokenCount\":10309,\"totalTokenCount\":10456},\"modelVersion\":\"gemini-test\"}";
+        let json = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{last}");
+        let sse = http11_sse(&format!("data: {first}\r\n\r\ndata: {last}\r\n\r\n"));
+        let h2 = format!("data: {first}\r\n\r\ndata: {last}\r\n\r\n");
+
+        let want = Some((10_336, 120));
+        assert_eq!(tokens(Http11Parser.parse_response(json.as_bytes())), want);
+        assert_eq!(tokens(Http11Parser.parse_response(&sse)), want);
+        assert_eq!(tokens(Http2Parser.parse_response(h2.as_bytes())), want);
+    }
+
+    #[test]
     fn gemini_sse_partial_last_event_is_incomplete() {
         let body = concat!(
             "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"h\"}]}}],\"usageMetadata\":{\"promptTokenCount\":7,\"candidatesTokenCount\":2}}\r\n\r\n",

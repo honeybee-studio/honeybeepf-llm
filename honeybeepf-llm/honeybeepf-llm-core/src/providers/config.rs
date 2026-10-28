@@ -39,6 +39,9 @@ pub struct ResponseConfig {
     #[serde(default)]
     pub completion_optional: bool,
 
+    /// Optional: field name for input tokens counted outside `prompt_tokens`, added to the input total
+    pub extra_prompt_tokens: Option<String>,
+
     /// Optional: field name for thinking/reasoning tokens
     pub thoughts_tokens: Option<String>,
 
@@ -97,6 +100,7 @@ impl Default for ResponseConfig {
             prompt_tokens: default_prompt_tokens(),
             completion_tokens: default_completion_tokens(),
             completion_optional: false,
+            extra_prompt_tokens: None,
             thoughts_tokens: None,
             completion_excludes_thoughts: false,
             cache_read_tokens: None,

@@ -90,6 +90,8 @@ impl ConfigurableProvider {
         } else {
             prompt
         };
+        let prompt =
+            prompt.saturating_add(optional(&response_config.extra_prompt_tokens).unwrap_or(0));
         let completion = if response_config.completion_excludes_thoughts {
             completion.saturating_add(thoughts.unwrap_or(0))
         } else {
