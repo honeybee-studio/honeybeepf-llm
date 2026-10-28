@@ -676,7 +676,11 @@ fn test_call_after_a_lost_response_head_read_is_recorded() {
         let mut out = outcomes(&mut p, &h1_response(3000), None);
         out.extend(outcomes(&mut p, &reads, None));
         out.extend(outcomes(&mut p, &h1_response(3000), None));
-        assert_eq!(unparsed(&out), [UnparsedReason::CaptureLost], "{n}: {out:?}");
+        assert_eq!(
+            unparsed(&out),
+            [UnparsedReason::CaptureLost],
+            "{n}: {out:?}"
+        );
         assert_eq!(count(&out, Outcome::Recorded), 2, "{n}: {out:?}");
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{n}: {out:?}");
     }
