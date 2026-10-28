@@ -20,23 +20,29 @@ pub enum RequestExtractorType {
     None,
 }
 
-/// Configuration for parsing usage from response JSON
-#[derive(Debug, Clone, Deserialize)]
+/// Configuration for parsing usage from response JSON, read from flat keys
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(from = "FlatResponseConfig")]
 pub struct ResponseConfig {
+    pub tokens: TokenConfig,
+    pub cache: CacheConfig,
+    pub pricing: PricingConfig,
+    pub identity: IdentityConfig,
+}
+
+/// Where the prompt, completion and reasoning counts are, and how they add up
+#[derive(Debug, Clone)]
+pub struct TokenConfig {
     /// JSON path to the usage object (e.g., "usage" or "usageMetadata")
-    #[serde(default = "default_usage_path")]
     pub usage_path: String,
 
     /// Field name for prompt/input tokens within usage object
-    #[serde(default = "default_prompt_tokens")]
     pub prompt_tokens: String,
 
     /// Field name for completion/output tokens within usage object
-    #[serde(default = "default_completion_tokens")]
     pub completion_tokens: String,
 
     /// Whether a missing `completion_tokens` field means 0 (Gemini leaves it out when nothing was generated)
-    #[serde(default)]
     pub completion_optional: bool,
 
     /// Optional: field name for input tokens counted outside `prompt_tokens`, added to the input total
@@ -46,11 +52,13 @@ pub struct ResponseConfig {
     pub thoughts_tokens: Option<String>,
 
     /// Whether `completion_tokens` leaves out thinking tokens (Gemini), so the output total adds them back
-    #[serde(default)]
     pub completion_excludes_thoughts: bool,
+}
 
+/// Where the prompt tokens read from and written to the provider cache are
+#[derive(Debug, Clone, Default)]
+pub struct CacheConfig {
     /// Optional: field name for prompt tokens read from the provider cache
-    #[serde(alias = "cached_tokens")]
     pub cache_read_tokens: Option<String>,
 
     /// Optional: field name for prompt tokens written to the provider cache
@@ -59,25 +67,92 @@ pub struct ResponseConfig {
     /// Optional: field name for the cache writes with the longer, pricier lifetime
     pub cache_write_long_ttl_tokens: Option<String>,
 
+    /// Whether `prompt_tokens` leaves out cache tokens (Anthropic), so the input total adds them back
+    pub prompt_excludes_cache: bool,
+}
+
+/// Fields that only feed the price modifiers
+#[derive(Debug, Clone, Default)]
+pub struct PricingConfig {
+    /// Optional: JSON path to the served service tier (from root, e.g., "service_tier")
+    pub service_tier_path: Option<String>,
+
     /// Optional: field name for the speed mode within the usage object
     pub speed: Option<String>,
 
     /// Optional: field name for the inference geography within the usage object
     pub inference_geo: Option<String>,
+}
 
-    /// Whether `prompt_tokens` leaves out cache tokens (Anthropic), so the input total adds them back
-    #[serde(default)]
-    pub prompt_excludes_cache: bool,
+/// Which usage belongs to this provider and which model served it
+#[derive(Debug, Clone)]
+pub struct IdentityConfig {
+    /// JSON path to model name (from root, e.g., "model" or "modelVersion")
+    pub model_path: String,
 
     /// Optional: usage field that must be present, to tell apart providers sharing token keys
     pub required_field: Option<String>,
+}
 
-    /// JSON path to model name (from root, e.g., "model" or "modelVersion")
+// Not `#[serde(flatten)]`: it skips the config crate's conversions (`yes` or `1` as a boolean).
+// Field order is part of the format: serde also reads `response` as an array in this order.
+#[derive(Deserialize)]
+struct FlatResponseConfig {
+    #[serde(default = "default_usage_path")]
+    usage_path: String,
+    #[serde(default = "default_prompt_tokens")]
+    prompt_tokens: String,
+    #[serde(default = "default_completion_tokens")]
+    completion_tokens: String,
+    #[serde(default)]
+    completion_optional: bool,
+    extra_prompt_tokens: Option<String>,
+    thoughts_tokens: Option<String>,
+    #[serde(default)]
+    completion_excludes_thoughts: bool,
+    #[serde(alias = "cached_tokens")]
+    cache_read_tokens: Option<String>,
+    cache_write_tokens: Option<String>,
+    cache_write_long_ttl_tokens: Option<String>,
+    speed: Option<String>,
+    inference_geo: Option<String>,
+    #[serde(default)]
+    prompt_excludes_cache: bool,
+    required_field: Option<String>,
     #[serde(default = "default_model_path")]
-    pub model_path: String,
+    model_path: String,
+    service_tier_path: Option<String>,
+}
 
-    /// Optional: JSON path to the served service tier (from root, e.g., "service_tier")
-    pub service_tier_path: Option<String>,
+impl From<FlatResponseConfig> for ResponseConfig {
+    fn from(flat: FlatResponseConfig) -> Self {
+        Self {
+            tokens: TokenConfig {
+                usage_path: flat.usage_path,
+                prompt_tokens: flat.prompt_tokens,
+                completion_tokens: flat.completion_tokens,
+                completion_optional: flat.completion_optional,
+                extra_prompt_tokens: flat.extra_prompt_tokens,
+                thoughts_tokens: flat.thoughts_tokens,
+                completion_excludes_thoughts: flat.completion_excludes_thoughts,
+            },
+            cache: CacheConfig {
+                cache_read_tokens: flat.cache_read_tokens,
+                cache_write_tokens: flat.cache_write_tokens,
+                cache_write_long_ttl_tokens: flat.cache_write_long_ttl_tokens,
+                prompt_excludes_cache: flat.prompt_excludes_cache,
+            },
+            pricing: PricingConfig {
+                service_tier_path: flat.service_tier_path,
+                speed: flat.speed,
+                inference_geo: flat.inference_geo,
+            },
+            identity: IdentityConfig {
+                model_path: flat.model_path,
+                required_field: flat.required_field,
+            },
+        }
+    }
 }
 
 fn default_usage_path() -> String {
@@ -93,7 +168,7 @@ fn default_model_path() -> String {
     "model".to_string()
 }
 
-impl Default for ResponseConfig {
+impl Default for TokenConfig {
     fn default() -> Self {
         Self {
             usage_path: default_usage_path(),
@@ -103,15 +178,15 @@ impl Default for ResponseConfig {
             extra_prompt_tokens: None,
             thoughts_tokens: None,
             completion_excludes_thoughts: false,
-            cache_read_tokens: None,
-            cache_write_tokens: None,
-            cache_write_long_ttl_tokens: None,
-            speed: None,
-            inference_geo: None,
-            prompt_excludes_cache: false,
-            required_field: None,
+        }
+    }
+}
+
+impl Default for IdentityConfig {
+    fn default() -> Self {
+        Self {
             model_path: default_model_path(),
-            service_tier_path: None,
+            required_field: None,
         }
     }
 }

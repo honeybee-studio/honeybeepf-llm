@@ -199,11 +199,11 @@ fn test_find_provider_foundry_host_split_by_path() {
     let anthropic = registry
         .find_provider("myres.services.ai.azure.com", "/anthropic/v1/messages")
         .unwrap();
-    assert!(anthropic.response.prompt_excludes_cache);
+    assert!(anthropic.response.cache.prompt_excludes_cache);
     let openai = registry
         .find_provider("myres.services.ai.azure.com", "/openai/v1/chat/completions")
         .unwrap();
-    assert!(!openai.response.prompt_excludes_cache);
+    assert!(!openai.response.cache.prompt_excludes_cache);
 }
 
 #[test]
