@@ -9,10 +9,20 @@ const NOV_30: u32 = 20_787; // 2026-11-30
 #[test]
 fn test_builtin_prices_match_the_pricing_pages() {
     let table = PriceTable::builtin().expect("built-in table loads");
-    assert_eq!(table.version(), "2026-10-26");
-    let providers: Vec<_> = table.sources().iter().map(|s| &s.provider).collect();
-    assert_eq!(providers, ["anthropic", "openai", "gemini"]);
-    assert!(table.sources().iter().all(|s| s.checked == "2026-10-26"));
+    assert_eq!(table.version(), "2026-10-28");
+    let sources: Vec<_> = table
+        .sources()
+        .iter()
+        .map(|s| (s.provider.as_str(), s.checked.as_str()))
+        .collect();
+    assert_eq!(
+        sources,
+        [
+            ("anthropic", "2026-10-26"),
+            ("openai", "2026-10-28"),
+            ("gemini", "2026-10-26")
+        ]
+    );
     // Opus 5.5 fast in the US: (10000×$4 + 500×$5 + 1500×$8 + 2000×$20) × 2 × 1.1.
     let opus = call("claude-opus-5-5", 12000, 2000).write(2000).long(1500);
     let million = |model: &str| call(model, 1_000_000, 0);
@@ -45,6 +55,14 @@ fn test_builtin_prices_match_the_pricing_pages() {
         (NOV_30, call("gpt-5.5", 300_000, 0).tier("priority"), MISSING),
         (NOV_30, call("gpt-5", 1000, 0).write(100), MISSING),
         (NOV_30, call("claude-3-opus-20240229", 1000, 10), UNKNOWN),
+        (NOV_30, call("gpt-4-turbo-2024-04-09", 10000, 1000), Ok(0.13)),
+        (NOV_30, call("gpt-4-0613", 1000, 1000), Ok(0.09)),
+        (NOV_30, million("gpt-3.5-turbo-0125"), Ok(0.5)),
+        // A four-digit suffix is not a date, so an unlisted snapshot stays unknown.
+        (NOV_30, million("gpt-3.5-turbo-1106"), UNKNOWN),
+        // These models have no cached-input price and no Flex tier.
+        (NOV_30, call("gpt-3.5-turbo", 1000, 0).read(500), MISSING),
+        (NOV_30, million("gpt-4-0613").tier("flex"), UNSUPPORTED),
     ];
     for (day, call, want) in cases {
         assert_eq!(table.cost_on(&call, day).map(total), want, "{call:?}");

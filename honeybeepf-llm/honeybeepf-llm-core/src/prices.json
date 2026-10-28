@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-26",
+  "version": "2026-10-28",
   "providers": [
     {
       "name": "anthropic",
@@ -44,7 +44,7 @@
     {
       "name": "openai",
       "source": "https://developers.openai.com/api/docs/pricing",
-      "checked": "2026-10-26",
+      "checked": "2026-10-28",
       "models": {
         "gpt-6-astra": {"input": 10, "output": 50, "cache_read": 1, "cache_write": 12.5, "cache_write_long": 25,
           "above_tokens": 272000, "above": {"input": 20, "output": 75, "cache_read": 2, "cache_write": 25, "cache_write_long": 50}},
@@ -87,7 +87,11 @@
         "o3-pro": {"input": 20, "output": 80},
         "o3": {"input": 2, "output": 8, "cache_read": 0.5},
         "o4-mini": {"input": 1.1, "output": 4.4, "cache_read": 0.275},
-        "o3-mini": {"input": 1.1, "output": 4.4, "cache_read": 0.55}
+        "o3-mini": {"input": 1.1, "output": 4.4, "cache_read": 0.55},
+        "gpt-4-turbo-2024-04-09": {"input": 10, "output": 30},
+        "gpt-4-0613": {"input": 30, "output": 60},
+        "gpt-3.5-turbo": {"input": 0.5, "output": 1.5},
+        "gpt-3.5-turbo-0125": {"input": 0.5, "output": 1.5}
       },
       "tiers": {
         "flex": {
