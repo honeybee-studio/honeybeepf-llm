@@ -55,7 +55,7 @@ pub struct HoneyBeeMetrics {
     pub network_latency_ns: Histogram<u64>,
     pub gpu_open_events: Counter<u64>,
     pub process_exit_total: Counter<u64>,
-    pub process_lifetime_seconds: Histogram<u64>,
+    pub process_lifetime_seconds: Histogram<f64>,
     pub file_access_events: Counter<u64>,
     pub llm_requests_total: Counter<u64>,
     pub llm_tokens_total: Counter<u64>,
@@ -103,7 +103,7 @@ impl HoneyBeeMetrics {
                 .with_description("Total number of process exits")
                 .build(),
             process_lifetime_seconds: meter
-                .u64_histogram("process_lifetime_seconds")
+                .f64_histogram("process_lifetime_seconds")
                 .with_description("Process lifetime in seconds")
                 .with_unit("s")
                 .build(),
@@ -476,7 +476,7 @@ pub fn shutdown_metrics() {
     }
 }
 
-pub fn record_process_exit(cause: &str, exit_code: u32, lifetime_secs: u64, cgroup_id: u64) {
+pub fn record_process_exit(cause: &str, exit_code: u32, lifetime_secs: f64, cgroup_id: u64) {
     if let Some(m) = metrics() {
         let attrs = [
             KeyValue::new("cause", cause.to_string()),

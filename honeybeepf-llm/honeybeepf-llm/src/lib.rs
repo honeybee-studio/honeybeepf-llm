@@ -28,7 +28,7 @@ use crate::probes::{
             ExecNotify, ExecPidQueue, LibOpenQueue, LlmProbe, setup_exec_watch,
             setup_lib_open_watch,
         },
-        process_lifecycle::ProcessLifecycleProbe,
+        process_lifecycle::{self, ProcessLifecycleProbe},
     },
     discovery::resolve_in_root,
     request_shutdown, shutdown_flag,
@@ -259,9 +259,13 @@ impl HoneyBeeEngine {
             .process_lifecycle
             .unwrap_or(false)
         {
-            ProcessLifecycleProbe.attach(&mut self.bpf, self.resolver.clone())?;
-            telemetry::record_active_probe("process_lifecycle", 1);
-            info!("Process lifecycle probe attached");
+            if let Some(hook) = process_lifecycle::missing_kernel_hook() {
+                warn!("Process lifecycle probe skipped: kernel has no {hook}");
+            } else {
+                ProcessLifecycleProbe.attach(&mut self.bpf, self.resolver.clone())?;
+                telemetry::record_active_probe("process_lifecycle", 1);
+                info!("Process lifecycle probe attached");
+            }
         }
         Ok(())
     }

@@ -5,7 +5,7 @@ use aya_ebpf::{
         bpf_ktime_get_ns, bpf_probe_read_kernel,
     },
     macros::{kprobe, map},
-    maps::{HashMap, RingBuf},
+    maps::{HashMap, LruHashMap, RingBuf},
     programs::ProbeContext,
 };
 use honeybeepf_llm_common::ProcessExitEvent;
@@ -18,6 +18,11 @@ pub static OOM_VICTIMS: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0);
 
 #[map]
 pub static PROCESS_EXIT_EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 1024, 0);
+
+/// Tgids that entered do_group_exit; kernel threads never do, so they are not reported.
+/// LRU because an exec from a multi-threaded process marks a group that does not exit yet.
+#[map]
+pub static GROUP_EXITING: LruHashMap<u32, u8> = LruHashMap::with_max_entries(10240, 0);
 
 #[kprobe]
 pub fn honeybeepf_llm_oom_kill_process(ctx: ProbeContext) -> u32 {
@@ -54,7 +59,25 @@ pub fn honeybeepf_llm_oom_kill_process(ctx: ProbeContext) -> u32 {
 }
 
 #[kprobe]
+pub fn honeybeepf_llm_group_exit(_ctx: ProbeContext) -> u32 {
+    let tgid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    let _ = GROUP_EXITING.insert(&tgid, &1, 0);
+    0
+}
+
+#[kprobe]
 pub fn honeybeepf_llm_process_exit(ctx: ProbeContext) -> u32 {
+    // acct_collect(long exitcode, int group_dead) runs for every thread; only the
+    // group's last thread has group_dead set, and its exitcode is the group's code.
+    if ctx.arg::<i32>(1).unwrap_or(0) == 0 {
+        return 0;
+    }
+    let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    if GROUP_EXITING.get_ptr(&pid).is_none() {
+        return 0;
+    }
+    let _ = GROUP_EXITING.remove(&pid);
+
     if let Some(mut slot) = PROCESS_EXIT_EVENTS.reserve::<ProcessExitEvent>(0) {
         let event = unsafe {
             let ptr = slot.as_mut_ptr();
@@ -62,10 +85,9 @@ pub fn honeybeepf_llm_process_exit(ctx: ProbeContext) -> u32 {
             core::ptr::write_bytes(ptr as *mut u8, 0, core::mem::size_of::<ProcessExitEvent>());
             &mut *ptr
         };
-        let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
 
         event.pid = pid;
-        event.exit_code = ctx.arg::<i32>(0).unwrap_or(0);
+        event.exit_code = ctx.arg::<i64>(0).unwrap_or(0) as i32;
         let signal = event.exit_code & 0x7f;
 
         // Check for OOM flag set by oom_kill_process probe
