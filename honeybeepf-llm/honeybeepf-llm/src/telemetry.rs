@@ -23,7 +23,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 #[cfg(feature = "k8s")]
-use crate::k8s::PodInfo;
+use crate::k8s::{PodInfo, UNATTRIBUTED};
 
 /// Metric export interval in seconds
 const METRIC_EXPORT_INTERVAL_SECS: u64 = 30;
@@ -443,10 +443,7 @@ pub fn record_llm_request(
 
         // Only add pod info if k8s feature is enabled
         #[cfg(feature = "k8s")]
-        if let Some(pod) = pod_info {
-            attrs.push(KeyValue::new("target.namespace", pod.namespace.clone()));
-            attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
-        }
+        push_pod_attrs(&mut attrs, pod_info);
 
         m.record_llm(usage, latency_secs, is_error, attrs);
     }
@@ -462,13 +459,30 @@ pub fn record_llm_unparsed(
         let mut attrs = Vec::new();
 
         #[cfg(feature = "k8s")]
-        if let Some(pod) = pod_info {
-            attrs.push(KeyValue::new("target.namespace", pod.namespace.clone()));
-            attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
-        }
+        push_pod_attrs(&mut attrs, pod_info);
 
         m.record_unparsed(reason, attrs);
     }
+}
+
+/// Target labels of an LLM call; the workload is a function of the pod, so it adds no series.
+#[cfg(feature = "k8s")]
+fn push_pod_attrs(attrs: &mut Vec<KeyValue>, pod_info: Option<&std::sync::Arc<PodInfo>>) {
+    let Some(pod) = pod_info else { return };
+    let or_unattributed = |v: &Option<String>| {
+        let v = v.as_deref().filter(|s| !s.is_empty());
+        v.unwrap_or(UNATTRIBUTED).to_string()
+    };
+    attrs.push(KeyValue::new("target.namespace", pod.namespace.clone()));
+    attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
+    attrs.push(KeyValue::new(
+        "target.workload.kind",
+        or_unattributed(&pod.workload_kind),
+    ));
+    attrs.push(KeyValue::new(
+        "target.workload.name",
+        or_unattributed(&pod.workload_name),
+    ));
 }
 
 /// Shutdown OpenTelemetry (graceful shutdown)
@@ -506,6 +520,39 @@ mod tests {
         InstrumentKind, ManualReader, MetricResult, Pipeline, Temporality,
     };
     use serial_test::serial;
+
+    #[cfg(feature = "k8s")]
+    #[test]
+    fn test_pod_attrs_never_leave_workload_empty() {
+        let un = Some(UNATTRIBUTED);
+        for (kind, name, want) in [
+            (Some("CronJob"), Some("r"), [Some("CronJob"), Some("r")]),
+            (None, None, [un, un]),
+            (Some(""), Some(""), [un, un]),
+        ] {
+            let pod = Arc::new(PodInfo {
+                pod_name: "p-1".to_string(),
+                namespace: "team-a".to_string(),
+                workload_kind: kind.map(str::to_string),
+                workload_name: name.map(str::to_string),
+            });
+            let mut attrs = Vec::new();
+            push_pod_attrs(&mut attrs, Some(&pod));
+            let labels: Vec<_> = attrs.iter().map(|kv| kv.value.to_string()).collect();
+            assert_eq!(labels[..2], ["team-a", "p-1"]);
+            assert_eq!(
+                labels[2..]
+                    .iter()
+                    .map(|v| Some(v.as_str()))
+                    .collect::<Vec<_>>(),
+                want
+            );
+        }
+
+        let mut attrs = Vec::new();
+        push_pod_attrs(&mut attrs, None);
+        assert!(attrs.is_empty());
+    }
 
     #[test]
     #[serial]

@@ -9,4 +9,8 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  # Pods only reference their Job; the agent reads the Job to find its CronJob.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get"]
 {{- end }}
