@@ -23,7 +23,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 #[cfg(feature = "k8s")]
-use crate::k8s::PodInfo;
+use crate::k8s::{PodInfo, UNATTRIBUTED};
 
 /// Metric export interval in seconds
 const METRIC_EXPORT_INTERVAL_SECS: u64 = 30;
@@ -151,9 +151,7 @@ impl HoneyBeeMetrics {
                 .build(),
             llm_responses_unparsed_total: meter
                 .u64_counter("llm_responses_unparsed_total")
-                .with_description(
-                    "LLM responses not recorded because bytes were lost in capture or a complete response had no usage",
-                )
+                .with_description("LLM calls not recorded because no usage could be read, by reason")
                 .with_unit("responses")
                 .build(),
             // No unit: the Prometheus exporter would append it to the name.
@@ -240,6 +238,11 @@ impl HoneyBeeMetrics {
             self.llm_tokens_total
                 .add(usage.completion_tokens, &comp_attrs);
         }
+    }
+
+    fn record_unparsed(&self, reason: &'static str, mut attrs: Vec<KeyValue>) {
+        attrs.push(KeyValue::new("reason", reason));
+        self.llm_responses_unparsed_total.add(1, &attrs);
     }
 }
 
@@ -418,29 +421,46 @@ pub fn record_llm_request(
 
         // Only add pod info if k8s feature is enabled
         #[cfg(feature = "k8s")]
-        if let Some(pod) = pod_info {
-            attrs.push(KeyValue::new("target.namespace", pod.namespace.clone()));
-            attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
-        }
+        push_pod_attrs(&mut attrs, pod_info);
 
         m.record_llm(usage, latency_secs, is_error, attrs);
     }
 }
 
-/// Count an LLM response that lost bytes in capture and so has no usage to record.
-pub fn record_llm_unparsed(#[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>) {
+/// Count an LLM call that has no usage to record, by `reason`.
+pub fn record_llm_unparsed(
+    reason: &'static str,
+    #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
+) {
     if let Some(m) = metrics() {
         #[allow(unused_mut)]
         let mut attrs = Vec::new();
 
         #[cfg(feature = "k8s")]
-        if let Some(pod) = pod_info {
-            attrs.push(KeyValue::new("target.namespace", pod.namespace.clone()));
-            attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
-        }
+        push_pod_attrs(&mut attrs, pod_info);
 
-        m.llm_responses_unparsed_total.add(1, &attrs);
+        m.record_unparsed(reason, attrs);
     }
+}
+
+/// Target labels of an LLM call; the workload is a function of the pod, so it adds no series.
+#[cfg(feature = "k8s")]
+fn push_pod_attrs(attrs: &mut Vec<KeyValue>, pod_info: Option<&std::sync::Arc<PodInfo>>) {
+    let Some(pod) = pod_info else { return };
+    let or_unattributed = |v: &Option<String>| {
+        let v = v.as_deref().filter(|s| !s.is_empty());
+        v.unwrap_or(UNATTRIBUTED).to_string()
+    };
+    attrs.push(KeyValue::new("target.namespace", pod.namespace.clone()));
+    attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
+    attrs.push(KeyValue::new(
+        "target.workload.kind",
+        or_unattributed(&pod.workload_kind),
+    ));
+    attrs.push(KeyValue::new(
+        "target.workload.name",
+        or_unattributed(&pod.workload_name),
+    ));
 }
 
 /// Shutdown OpenTelemetry (graceful shutdown)
@@ -478,6 +498,39 @@ mod tests {
         InstrumentKind, ManualReader, MetricResult, Pipeline, Temporality,
     };
     use serial_test::serial;
+
+    #[cfg(feature = "k8s")]
+    #[test]
+    fn test_pod_attrs_never_leave_workload_empty() {
+        let un = Some(UNATTRIBUTED);
+        for (kind, name, want) in [
+            (Some("CronJob"), Some("r"), [Some("CronJob"), Some("r")]),
+            (None, None, [un, un]),
+            (Some(""), Some(""), [un, un]),
+        ] {
+            let pod = Arc::new(PodInfo {
+                pod_name: "p-1".to_string(),
+                namespace: "team-a".to_string(),
+                workload_kind: kind.map(str::to_string),
+                workload_name: name.map(str::to_string),
+            });
+            let mut attrs = Vec::new();
+            push_pod_attrs(&mut attrs, Some(&pod));
+            let labels: Vec<_> = attrs.iter().map(|kv| kv.value.to_string()).collect();
+            assert_eq!(labels[..2], ["team-a", "p-1"]);
+            assert_eq!(
+                labels[2..]
+                    .iter()
+                    .map(|v| Some(v.as_str()))
+                    .collect::<Vec<_>>(),
+                want
+            );
+        }
+
+        let mut attrs = Vec::new();
+        push_pod_attrs(&mut attrs, None);
+        assert!(attrs.is_empty());
+    }
 
     #[test]
     #[serial]
@@ -619,6 +672,60 @@ mod tests {
     }
 
     #[test]
+    fn llm_unparsed_calls_are_counted_by_reason() -> Result<()> {
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"));
+        let pod = || vec![KeyValue::new("target.namespace", "team-a")];
+        metrics.record_unparsed("response_too_large", pod());
+        metrics.record_unparsed("next_request", pod());
+        metrics.record_unparsed("next_request", pod());
+
+        let mut rm = ResourceMetrics {
+            resource: Resource::empty(),
+            scope_metrics: vec![],
+        };
+        reader.collect(&mut rm)?;
+        let sum = rm
+            .scope_metrics
+            .iter()
+            .flat_map(|s| &s.metrics)
+            .find(|m| m.name == "llm_responses_unparsed_total")
+            .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
+            .context("llm_responses_unparsed_total counter not collected")?;
+        let mut points: Vec<(Vec<String>, u64)> = sum
+            .data_points
+            .iter()
+            .map(|p| {
+                let mut kv: Vec<String> = p
+                    .attributes
+                    .iter()
+                    .map(|kv| format!("{}={}", kv.key, kv.value))
+                    .collect();
+                kv.sort();
+                (kv, p.value)
+            })
+            .collect();
+        points.sort();
+        let labels = |reason: &str| {
+            vec![
+                format!("reason={reason}"),
+                "target.namespace=team-a".to_string(),
+            ]
+        };
+        assert_eq!(
+            points,
+            [
+                (labels("next_request"), 2),
+                (labels("response_too_large"), 1)
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn llm_cost_is_priced_per_call_and_unknown_models_stay_unpriced() -> Result<()> {
         let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
         let provider = SdkMeterProvider::builder()
@@ -683,7 +790,7 @@ mod tests {
             ]
         );
         assert!(cost.data_points.iter().all(|p| {
-            label(&p.attributes, "price_table_version").as_deref() == Some("2026-10-26")
+            label(&p.attributes, "price_table_version").as_deref() == Some("2026-10-28")
         }));
         let unpriced = find("llm_unpriced_tokens_total")?
             .data

@@ -126,7 +126,7 @@ impl Http11Parser {
 
 /// How the end of a response body is found.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Framing {
+pub(super) enum Framing {
     Length(usize),
     Chunked,
     UntilClose,
@@ -189,6 +189,12 @@ fn final_head(buffer: &[u8]) -> Option<Head<'_>> {
             is_sse,
         });
     }
+}
+
+/// Framing and body of a final response sent as is: neither SSE nor content-encoded.
+pub(super) fn plain_body(buffer: &[u8]) -> Option<(Framing, &[u8])> {
+    let head = final_head(buffer)?;
+    (!head.is_sse && !encoding::is_encoded(head.headers())).then_some((head.framing, head.body))
 }
 
 fn header_contains(headers: &[httparse::Header], name: &str, pattern: &[u8]) -> bool {

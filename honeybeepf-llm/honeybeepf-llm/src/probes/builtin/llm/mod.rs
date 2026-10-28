@@ -432,6 +432,7 @@ mod tests {
     use super::*;
     use conn_filter::opens_foreign_request;
     use honeybeepf_llm_common::{EventMetadata, MAX_SSL_BUF_SIZE};
+    use processor::UnparsedReason;
 
     const OPENAI_REQUEST: &[u8] = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"gpt-4o\",\"stream\":true,\"messages\":[]}";
     const ANTHROPIC_REQUEST: &[u8] = b"POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"claude-test\",\"stream\":true,\"messages\":[]}";
@@ -533,7 +534,11 @@ mod tests {
             call(1, OPENAI, Read, ANTHROPIC_START),
             call(1, OPENAI, Read, ANTHROPIC_END),
         ]);
-        assert_eq!(out[3], Outcome::Unparsed, "{out:?}");
+        assert_eq!(
+            out[3],
+            Outcome::Unparsed(UnparsedReason::ConnectionClosed),
+            "{out:?}"
+        );
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
     }
 

@@ -1,185 +1,7 @@
 use serde::Deserialize;
 
-// OpenAI-compatible routes on Azure OpenAI / Foundry and Bedrock return the same JSON as OpenAI.
-const OPENAI_HOSTS: &[&str] = &[
-    "api.openai.com",                  // OpenAI API, regional us./eu. domains included
-    "openai.azure.com",                // Azure OpenAI
-    "services.ai.azure.com",           // Azure AI Foundry /openai/v1
-    "bedrock-mantle.*.api.aws",        // Bedrock Mantle /v1, /openai/v1
-    "bedrock-runtime.*.amazonaws.com", // Bedrock Runtime /openai/v1
-];
-const ANTHROPIC_HOSTS: &[&str] = &[
-    "api.anthropic.com",                // Claude API
-    "aws-external-anthropic.*.api.aws", // Claude Platform on AWS
-    "bedrock-mantle.*.api.aws",         // Bedrock Mantle /anthropic/v1
-    "claude.googleapis.com",            // Claude on Google Cloud (Anthropic managed)
-    "services.ai.azure.com",            // Claude in Microsoft Foundry /anthropic/v1
-];
-const GEMINI_HOSTS: &[&str] = &[
-    "generativelanguage.googleapis.com", // Gemini API
-    "aiplatform.googleapis.com",         // Vertex AI global and {region}-aiplatform
-    "aiplatform.*.rep.googleapis.com",   // Vertex AI multi-region (us, eu)
-];
-const VERTEX_CLAUDE_HOSTS: &[&str] = &[
-    "aiplatform.googleapis.com", // Vertex AI global and {region}-aiplatform
-    "aiplatform.*.rep.googleapis.com", // Vertex AI multi-region (us, eu)
-];
-const BEDROCK_RUNTIME_HOSTS: &[&str] = &[
-    "bedrock-runtime.*.amazonaws.com", // Bedrock Runtime Converse, InvokeModel
-];
-
-fn to_strings(items: &[&str]) -> Vec<String> {
-    items.iter().map(|&s| s.to_string()).collect()
-}
-
-fn openai_chat() -> ProviderConfig {
-    ProviderConfig {
-        name: "openai".to_string(),
-        hosts: to_strings(OPENAI_HOSTS),
-        // `$` keeps the stored-completion endpoints (/chat/completions/{id}) out.
-        paths: vec![
-            "/chat/completions$".to_string(),
-            "/v1/completions$".to_string(),
-            "/deployments/*/completions$".to_string(), // Azure api-version route
-        ],
-        response: ResponseConfig {
-            usage_path: "usage".to_string(),
-            prompt_tokens: "prompt_tokens".to_string(),
-            completion_tokens: "completion_tokens".to_string(),
-            thoughts_tokens: Some("completion_tokens_details.reasoning_tokens".to_string()),
-            cache_read_tokens: Some("prompt_tokens_details.cached_tokens".to_string()),
-            model_path: "model".to_string(),
-            service_tier_path: Some("service_tier".to_string()),
-            ..ResponseConfig::default()
-        },
-        request_extractor: RequestExtractorType::Messages,
-    }
-}
-
-// Responses API. Usage parsing tries providers in order without a host check and anthropic
-// has the same input/output_tokens keys; only Responses usage carries input_tokens_details.
-// `$` keeps GET /v1/responses/{id} and the unbilled /responses/input_tokens out; /compact is billed.
-// Azure api-version clients post to /openai/responses, or under /deployments/{d} when bound to one.
-fn openai_responses() -> ProviderConfig {
-    ProviderConfig {
-        name: "openai".to_string(),
-        hosts: to_strings(OPENAI_HOSTS),
-        paths: vec![
-            "/v1/responses$".to_string(),
-            "/openai/responses$".to_string(),
-            "/deployments/*/responses$".to_string(),
-            "/v1/responses/compact$".to_string(),
-            "/openai/responses/compact$".to_string(),
-            "/deployments/*/responses/compact$".to_string(),
-        ],
-        response: ResponseConfig {
-            usage_path: "usage".to_string(),
-            prompt_tokens: "input_tokens".to_string(),
-            completion_tokens: "output_tokens".to_string(),
-            thoughts_tokens: Some("output_tokens_details.reasoning_tokens".to_string()),
-            cache_read_tokens: Some("input_tokens_details.cached_tokens".to_string()),
-            // `cached_tokens` leaves writes out and `input_tokens` counts both, so no adding back.
-            cache_write_tokens: Some("input_tokens_details.cache_write_tokens".to_string()),
-            cache_write_long_ttl_tokens: Some(
-                "input_tokens_details.cache_write_tokens_details.ttl_12h_tokens".to_string(),
-            ),
-            required_field: Some("input_tokens_details".to_string()),
-            model_path: "model".to_string(),
-            service_tier_path: Some("service_tier".to_string()),
-            ..ResponseConfig::default()
-        },
-        request_extractor: RequestExtractorType::Input,
-    }
-}
-
-fn anthropic_response() -> ResponseConfig {
-    ResponseConfig {
-        usage_path: "usage".to_string(),
-        prompt_tokens: "input_tokens".to_string(),
-        completion_tokens: "output_tokens".to_string(),
-        cache_read_tokens: Some("cache_read_input_tokens".to_string()),
-        cache_write_tokens: Some("cache_creation_input_tokens".to_string()),
-        cache_write_long_ttl_tokens: Some("cache_creation.ephemeral_1h_input_tokens".to_string()),
-        prompt_excludes_cache: true,
-        model_path: "model".to_string(),
-        // Streaming carries these only in message_start; message_delta usage has no such fields.
-        speed: Some("speed".to_string()),
-        inference_geo: Some("inference_geo".to_string()),
-        ..ResponseConfig::default()
-    }
-}
-
-fn anthropic() -> ProviderConfig {
-    ProviderConfig {
-        name: "anthropic".to_string(),
-        hosts: to_strings(ANTHROPIC_HOSTS),
-        // `$` keeps /v1/messages/count_tokens and /v1/messages/batches out.
-        paths: vec!["/v1/messages$".to_string()],
-        response: anthropic_response(),
-        request_extractor: RequestExtractorType::Messages,
-    }
-}
-
-fn gemini() -> ProviderConfig {
-    ProviderConfig {
-        name: "gemini".to_string(),
-        hosts: to_strings(GEMINI_HOSTS),
-        // Path matching is case-sensitive: the streaming method is `:streamGenerateContent`.
-        paths: vec![
-            "generateContent".to_string(),
-            "streamGenerateContent".to_string(),
-        ],
-        response: ResponseConfig {
-            usage_path: "usageMetadata".to_string(),
-            prompt_tokens: "promptTokenCount".to_string(),
-            completion_tokens: "candidatesTokenCount".to_string(),
-            completion_optional: true,
-            thoughts_tokens: Some("thoughtsTokenCount".to_string()),
-            completion_excludes_thoughts: true,
-            cache_read_tokens: Some("cachedContentTokenCount".to_string()),
-            model_path: "modelVersion".to_string(),
-            ..ResponseConfig::default()
-        },
-        request_extractor: RequestExtractorType::Contents,
-    }
-}
-
-// Claude on Vertex AI: Anthropic body, model in the path. `claude-` keeps count-tokens:rawPredict
-// and custom endpoints out.
-fn vertex_claude() -> ProviderConfig {
-    ProviderConfig {
-        name: "anthropic".to_string(),
-        hosts: to_strings(VERTEX_CLAUDE_HOSTS),
-        paths: vec![
-            "/publishers/anthropic/models/claude-*:rawPredict$".to_string(),
-            "/publishers/anthropic/models/claude-*:streamRawPredict$".to_string(),
-        ],
-        response: anthropic_response(),
-        request_extractor: RequestExtractorType::Messages,
-    }
-}
-
-// Bedrock Runtime native API. Converse `inputTokens` leaves out cache tokens. InvokeModel returns the
-// model's own body, so only Anthropic models (read by the anthropic entry) are matched. The `-stream`
-// variants are binary eventstream and stay out.
-fn bedrock_runtime() -> ProviderConfig {
-    ProviderConfig {
-        name: "bedrock".to_string(),
-        hosts: to_strings(BEDROCK_RUNTIME_HOSTS),
-        paths: vec!["/converse$".to_string(), "anthropic.*/invoke$".to_string()],
-        response: ResponseConfig {
-            usage_path: "usage".to_string(),
-            prompt_tokens: "inputTokens".to_string(),
-            completion_tokens: "outputTokens".to_string(),
-            cache_read_tokens: Some("cacheReadInputTokens".to_string()),
-            cache_write_tokens: Some("cacheWriteInputTokens".to_string()),
-            prompt_excludes_cache: true,
-            model_path: "model".to_string(),
-            ..ResponseConfig::default()
-        },
-        request_extractor: RequestExtractorType::Messages,
-    }
-}
+/// Built-in providers in the `LLM_PROVIDERS_CONFIG` format; serde skips their `note` fields.
+const DEFAULT_PROVIDERS: &str = include_str!("default_providers.json");
 
 /// Type of request text extractor to use
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -216,6 +38,9 @@ pub struct ResponseConfig {
     /// Whether a missing `completion_tokens` field means 0 (Gemini leaves it out when nothing was generated)
     #[serde(default)]
     pub completion_optional: bool,
+
+    /// Optional: field name for input tokens counted outside `prompt_tokens`, added to the input total
+    pub extra_prompt_tokens: Option<String>,
 
     /// Optional: field name for thinking/reasoning tokens
     pub thoughts_tokens: Option<String>,
@@ -275,6 +100,7 @@ impl Default for ResponseConfig {
             prompt_tokens: default_prompt_tokens(),
             completion_tokens: default_completion_tokens(),
             completion_optional: false,
+            extra_prompt_tokens: None,
             thoughts_tokens: None,
             completion_excludes_thoughts: false,
             cache_read_tokens: None,
@@ -327,16 +153,28 @@ impl ProviderRegistry {
 
     /// Create with default providers (OpenAI, Anthropic, Gemini, Bedrock), including their cloud endpoints
     pub fn with_defaults() -> Self {
-        Self {
-            providers: vec![
-                openai_chat(),
-                openai_responses(),
-                anthropic(),
-                gemini(),
-                vertex_claude(),
-                bedrock_runtime(),
-            ],
+        // Compiled in and parsed by a test, so an error here is a bug in the repo.
+        Self::from_json(DEFAULT_PROVIDERS).unwrap_or_default()
+    }
+
+    /// Adds `user` providers; a user provider replaces every one here with the same name.
+    pub fn merge(self, user: Self) -> Self {
+        let replaced: Vec<String> = user.providers.iter().map(|u| u.name.clone()).collect();
+        let mut rest = user.providers;
+        let mut providers = Vec::with_capacity(self.providers.len() + rest.len());
+        for provider in self.providers {
+            if !replaced.contains(&provider.name) {
+                providers.push(provider);
+                continue;
+            }
+            // Usage parsing tries providers in order, so replacements take the first replaced one's place.
+            let (same, others): (Vec<_>, Vec<_>) =
+                rest.into_iter().partition(|u| u.name == provider.name);
+            providers.extend(same);
+            rest = others;
         }
+        providers.extend(rest);
+        Self { providers }
     }
 
     /// Find matching provider for given host and path

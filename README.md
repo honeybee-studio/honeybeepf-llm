@@ -97,9 +97,14 @@ replayed against it as well. A blank cell was not checked.
 
 Compressed responses (`gzip`, `br`, `zstd`, `deflate`) are decoded, SSE included.
 
-`builtinProbes.llm.providers` in `values.yaml` describes providers by host, path and usage fields. That list
-replaces the built-in providers, so include the built-ins you still need. Only HTTPS calls made through OpenSSL
-are seen; a plain-HTTP endpoint (a typical in-cluster Ollama or vLLM) is not.
+`builtinProbes.llm.providers` in `values.yaml` describes providers by host, path and usage fields, in the format of
+the [built-in list](honeybeepf-llm/honeybeepf-llm-core/src/providers/default_providers.json). They are added to the
+built-in providers; a provider with a built-in name (`openai`, `anthropic`, `gemini`, `bedrock`, matched exactly)
+replaces every built-in entry of that name, so an `openai` entry must also cover the Responses API and an
+`anthropic` entry Claude on Vertex AI. Usage is read by matching the response's fields, not its host, with the
+built-in entries tried first: a gateway that returns an OpenAI-, Anthropic- or Gemini-shaped body is read with the
+built-in fields. Only HTTPS calls made through OpenSSL are seen; a plain-HTTP endpoint (a typical in-cluster
+Ollama or vLLM) is not.
 
 **Runtimes** (also checked in pods on k3s: `python:3.12-slim`, `python:3.13-alpine`, `node:24-slim`)
 
@@ -141,16 +146,39 @@ are checked on Linux 7.0 (the tables above).
 
 | Metric (as stored by the bundled Prometheus) | Type | Labels |
 |---|---|---|
-| `honeybeepf_llm_llm_requests_total` | counter | `model`, `status`, `target_namespace`, `target_pod_name` |
+| `honeybeepf_llm_llm_requests_total` | counter | `model`, `status`, `target_namespace`, `target_pod_name`, `target_workload_kind`, `target_workload_name` |
 | `honeybeepf_llm_llm_tokens_total` | counter | same, plus `token_type` (`prompt` / `completion`) |
 | `honeybeepf_llm_llm_cache_read_tokens_total` | counter | same as requests (subset of prompt tokens) |
 | `honeybeepf_llm_llm_cache_write_tokens_total` | counter | same as requests (subset of prompt tokens) |
 | `honeybeepf_llm_llm_reasoning_tokens_total` | counter | same as requests (subset of completion tokens) |
 | `honeybeepf_llm_llm_latency_seconds` | histogram | same as requests |
+| `honeybeepf_llm_llm_responses_unparsed_total` | counter | `reason`, `target_namespace`, `target_pod_name`, `target_workload_kind`, `target_workload_name` |
+
+`llm_responses_unparsed_total` counts LLM calls the agent saw but could not record, so a drop in recorded calls
+can be told apart from a drop in traffic. `reason` is one of:
+
+| `reason` | The call was given up because |
+|---|---|
+| `capture_lost` | part of a response read was lost in capture (ring buffer full after its first 4 KB, or one read over 16 KB) |
+| `next_request` | a complete HTTP/1.1 response had no usage when the next request started |
+| `connection_closed` | the connection closed before usage was found |
+| `request_too_large` | the captured request bytes (the first 4 KB of each write) passed the 8 MB buffer limit |
+| `response_too_large` | the response passed the 16 MB buffer limit and is not an uncompressed HTTP/1.1 JSON body with usage in its first or last 64 KB (SSE, compressed and HTTP/2 responses always count here) |
+
+Not counted here: a read lost whole because the ring buffer was full (see `llm_events_total{stage="reserve_fail"}`),
+and a connection left idle for 300 s without being closed (for example a killed process).
+
+Unparsed calls per minute by reason, for an alert on `> 0`:
+
+```promql
+sum by (target_namespace, reason) (rate(honeybeepf_llm_llm_responses_unparsed_total[5m])) * 60
+```
 
 The collector and Prometheus add more labels, such as `k8s_pod_name`, `k8s_node_name` and `namespace`; those name
 the agent's pod and node and the collector's namespace. `target_namespace` and `target_pod_name` name the pod
-that made the call.
+that made the call. `target_workload_kind` and `target_workload_name` name its owner: a Deployment (through its
+ReplicaSet), a CronJob (through its Job, which needs the chart's `jobs get` permission), a StatefulSet or
+DaemonSet, or `Pod` and the pod name for a pod without an owner; `unattributed` if the owner cannot be named.
 
 The Quickstart's Prometheus is the `honeybeepf-llm-prometheus-server` service (port 80) in the `honeybeepf`
 namespace. Tokens per minute by namespace:

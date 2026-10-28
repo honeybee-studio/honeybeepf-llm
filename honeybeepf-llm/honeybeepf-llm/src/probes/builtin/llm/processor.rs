@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use honeybeepf_llm_common::capture_limit;
 use honeybeepf_llm_core::types::{LlmDirection, UsageInfo};
-use log::{info, warn};
+use log::info;
 
 use crate::probes::builtin::llm::http::{self, ProtocolParser};
 
@@ -42,8 +42,51 @@ fn fmt_pod(pod_info: &Option<std::sync::Arc<crate::k8s::PodInfo>>) -> String {
 pub enum Outcome {
     Pending,
     Recorded,
-    /// The response lost bytes in capture, so it was counted as unparsed instead of recorded.
-    Unparsed,
+    /// The call was counted as unparsed instead of recorded.
+    Unparsed(UnparsedReason),
+}
+
+/// Why a call has no usage to record; a fixed set, so the metric label stays small.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnparsedReason {
+    CaptureLost,
+    NextRequest,
+    ConnectionClosed,
+    RequestTooLarge,
+    ResponseTooLarge,
+}
+
+impl UnparsedReason {
+    /// Value of the `reason` label on `llm_responses_unparsed_total`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CaptureLost => "capture_lost",
+            Self::NextRequest => "next_request",
+            Self::ConnectionClosed => "connection_closed",
+            Self::RequestTooLarge => "request_too_large",
+            Self::ResponseTooLarge => "response_too_large",
+        }
+    }
+}
+
+impl std::fmt::Display for UnparsedReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CaptureLost => f.write_str("response bytes lost in capture"),
+            Self::NextRequest => f.write_str("next request started before usage was found"),
+            Self::ConnectionClosed => f.write_str("connection closed before usage was found"),
+            Self::RequestTooLarge => write!(
+                f,
+                "request exceeded the {}MB buffer limit",
+                MAX_REQUEST_BUFFER_SIZE / (1024 * 1024)
+            ),
+            Self::ResponseTooLarge => write!(
+                f,
+                "response exceeded the {}MB buffer limit",
+                MAX_RESPONSE_BUFFER_SIZE / (1024 * 1024)
+            ),
+        }
+    }
 }
 
 pub struct StreamProcessor {
@@ -52,6 +95,8 @@ pub struct StreamProcessor {
     read_buf: Vec<u8>,
     /// What parsing already read of `read_buf`; cleared with it.
     read_progress: http::ResponseProgress,
+    /// A JSON response past the buffer limit, kept by its ends instead of `read_buf`.
+    json_ends: Option<Box<http::JsonEnds>>,
     last_activity: Instant,
     /// Offset the next fragment of the SSL call in progress must have; 0 between calls.
     frag_next: u32,
@@ -72,6 +117,7 @@ impl StreamProcessor {
             write_buf: Vec::new(),
             read_buf: Vec::new(),
             read_progress: http::ResponseProgress::default(),
+            json_ends: None,
             last_activity: Instant::now(),
             frag_next: 0,
             frag_dir: LlmDirection::Unknown,
@@ -113,9 +159,9 @@ impl StreamProcessor {
         self.frag_dir = direction;
 
         let reason = if gap {
-            Some("response bytes lost in capture")
+            Some(UnparsedReason::CaptureLost)
         } else if direction == LlmDirection::Write && self.awaits_http11_response() {
-            Some("next request started before usage was found")
+            Some(UnparsedReason::NextRequest)
         } else {
             None
         };
@@ -137,7 +183,7 @@ impl StreamProcessor {
         let fed = self.handle_event(direction, data, complete, pid, pod_info);
         #[cfg(not(feature = "k8s"))]
         let fed = self.handle_event(direction, data, complete, pid);
-        if dropped == Outcome::Unparsed {
+        if matches!(dropped, Outcome::Unparsed(_)) {
             dropped
         } else {
             fed
@@ -152,7 +198,7 @@ impl StreamProcessor {
     ) -> Outcome {
         self.drop_response(
             pid,
-            "connection closed before usage was found",
+            UnparsedReason::ConnectionClosed,
             #[cfg(feature = "k8s")]
             pod_info,
         )
@@ -161,10 +207,12 @@ impl StreamProcessor {
     /// Whether a whole HTTP/1.1 response without usage is buffered, so the next Write starts a new request.
     fn awaits_http11_response(&self) -> bool {
         match &self.state {
-            // A Write before that is a request body sent after `100 Continue`.
+            // A Write before that is a request body sent after `100 Continue`; a JSON body past 16 MB is
+            // long past it, and a lost read would otherwise let its walk run into the next response.
             ProcessorState::ProcessingResponse { parser, .. } => {
-                !parser.writes_during_response()
-                    && http::Http11Parser::is_complete_response(&self.read_buf)
+                self.json_ends.is_some()
+                    || !parser.writes_during_response()
+                        && http::Http11Parser::is_complete_response(&self.read_buf)
             }
             _ => false,
         }
@@ -174,13 +222,14 @@ impl StreamProcessor {
     fn drop_response(
         &mut self,
         pid: u32,
-        reason: &str,
+        reason: UnparsedReason,
         #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
     ) -> Outcome {
         if !self.is_llm() {
             return Outcome::Pending;
         }
         crate::telemetry::record_llm_unparsed(
+            reason.as_str(),
             #[cfg(feature = "k8s")]
             pod_info,
         );
@@ -195,7 +244,7 @@ impl StreamProcessor {
             pid, reason, pod_str
         );
         self.state = ProcessorState::Finished;
-        Outcome::Unparsed
+        Outcome::Unparsed(reason)
     }
 
     fn handle_event(
@@ -209,12 +258,23 @@ impl StreamProcessor {
         self.last_activity = Instant::now();
 
         let buffered = match direction {
-            LlmDirection::Write => self.buffer_write(data, pid),
-            LlmDirection::Read => self.buffer_read(data, pid),
-            _ => false,
+            LlmDirection::Write => self.buffer_write(data),
+            LlmDirection::Read => self.buffer_read(data),
+            _ => Ok(false),
         };
-        if !buffered {
-            return Outcome::Pending;
+        match buffered {
+            Ok(true) => {}
+            Ok(false) => return Outcome::Pending,
+            Err(reason) => {
+                let dropped = self.drop_response(
+                    pid,
+                    reason,
+                    #[cfg(feature = "k8s")]
+                    pod_info.as_ref(),
+                );
+                self.reset();
+                return dropped;
+            }
         }
 
         // Take ownership of current state to enable transitions
@@ -236,8 +296,10 @@ impl StreamProcessor {
             | ProcessorState::ProcessingResponse { start_time, parser } => {
                 // Parse once the SSL call's last fragment is in, not on a partial record
                 if complete
-                    && let Some(usage) =
-                        parser.parse_response_from(&self.read_buf, &mut self.read_progress)
+                    && let Some(usage) = match &mut self.json_ends {
+                        Some(ends) => ends.usage.take(),
+                        None => parser.parse_response_from(&self.read_buf, &mut self.read_progress),
+                    }
                 {
                     record_usage(
                         &usage,
@@ -255,29 +317,23 @@ impl StreamProcessor {
         Outcome::Pending
     }
 
-    /// Append a request fragment; false when the stream was discarded instead.
-    fn buffer_write(&mut self, data: &[u8], pid: u32) -> bool {
+    /// Append a request fragment; an error on overflow.
+    fn buffer_write(&mut self, data: &[u8]) -> Result<bool, UnparsedReason> {
         if matches!(self.state, ProcessorState::Finished) {
             self.reset();
         }
         if self.write_buf.len() + data.len() > MAX_REQUEST_BUFFER_SIZE {
-            warn!(
-                "LLM request buffer exceeded {}MB limit (PID: {}), discarding stream",
-                MAX_REQUEST_BUFFER_SIZE / (1024 * 1024),
-                pid
-            );
-            self.reset();
-            return false;
+            return Err(UnparsedReason::RequestTooLarge);
         }
         self.write_buf.extend_from_slice(data);
-        true
+        Ok(true)
     }
 
-    /// Append a response fragment; false when no LLM request is waiting for it.
-    fn buffer_read(&mut self, data: &[u8], pid: u32) -> bool {
+    /// Append a response fragment; false when no LLM request is waiting for it, an error on overflow.
+    fn buffer_read(&mut self, data: &[u8]) -> Result<bool, UnparsedReason> {
         match self.state {
             // Ignore Read events after completion
-            ProcessorState::Finished => return false,
+            ProcessorState::Finished => return Ok(false),
             // Don't buffer responses if we haven't detected a valid LLM request yet
             ProcessorState::Detecting => {
                 // The server is answering a non-LLM request; the next request must not sit behind it.
@@ -288,21 +344,27 @@ impl StreamProcessor {
                 {
                     self.write_buf.clear();
                 }
-                return false;
+                return Ok(false);
             }
             _ => {}
         }
-        if self.read_buf.len() + data.len() > MAX_RESPONSE_BUFFER_SIZE {
-            warn!(
-                "LLM response buffer exceeded {}MB limit (PID: {}), discarding stream",
-                MAX_RESPONSE_BUFFER_SIZE / (1024 * 1024),
-                pid
-            );
-            self.reset();
-            return false;
+        if self.json_ends.is_none() && self.read_buf.len() + data.len() > MAX_RESPONSE_BUFFER_SIZE {
+            // A plain JSON body has model near its start and usage at its end, so the middle can go.
+            let ends =
+                http::JsonEnds::start(&self.read_buf).ok_or(UnparsedReason::ResponseTooLarge)?;
+            self.json_ends = Some(Box::new(ends));
+            self.read_buf = Vec::new();
         }
-        self.read_buf.extend_from_slice(data);
-        true
+        match &mut self.json_ends {
+            Some(ends) => ends
+                .feed(data)
+                .then_some(true)
+                .ok_or(UnparsedReason::ResponseTooLarge),
+            None => {
+                self.read_buf.extend_from_slice(data);
+                Ok(true)
+            }
+        }
     }
 
     /// Next state for the request bytes buffered so far.
@@ -343,6 +405,7 @@ impl StreamProcessor {
         self.write_buf.clear();
         self.read_buf.clear();
         self.read_progress = http::ResponseProgress::default();
+        self.json_ends = None;
     }
 }
 

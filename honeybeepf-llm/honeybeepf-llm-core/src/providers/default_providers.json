@@ -1,0 +1,143 @@
+{
+  "providers": [
+    {
+      "name": "openai",
+      "note": "Chat Completions. Hosts: OpenAI API (regional us./eu. too), Azure OpenAI, Azure AI Foundry /openai/v1, Bedrock Mantle /v1 and /openai/v1, Bedrock Runtime /openai/v1. `$` keeps the stored-completion endpoints (/chat/completions/{id}) out; /deployments/*/completions is the Azure api-version route.",
+      "hosts": [
+        "api.openai.com",
+        "openai.azure.com",
+        "services.ai.azure.com",
+        "bedrock-mantle.*.api.aws",
+        "bedrock-runtime.*.amazonaws.com"
+      ],
+      "paths": ["/chat/completions$", "/v1/completions$", "/deployments/*/completions$"],
+      "response": {
+        "usage_path": "usage",
+        "prompt_tokens": "prompt_tokens",
+        "completion_tokens": "completion_tokens",
+        "thoughts_tokens": "completion_tokens_details.reasoning_tokens",
+        "cache_read_tokens": "prompt_tokens_details.cached_tokens",
+        "model_path": "model",
+        "service_tier_path": "service_tier"
+      },
+      "request_extractor": "messages"
+    },
+    {
+      "name": "openai",
+      "note": "Responses API, same hosts as Chat Completions. Usage parsing tries providers in order without a host check and anthropic has the same input/output_tokens keys, so this entry stays before anthropic and requires input_tokens_details. `$` keeps GET /v1/responses/{id} and the unbilled /responses/input_tokens out; /compact is billed. Azure api-version clients post to /openai/responses, or under /deployments/{d}. cached_tokens leaves writes out and input_tokens counts both, so no adding back.",
+      "hosts": [
+        "api.openai.com",
+        "openai.azure.com",
+        "services.ai.azure.com",
+        "bedrock-mantle.*.api.aws",
+        "bedrock-runtime.*.amazonaws.com"
+      ],
+      "paths": [
+        "/v1/responses$",
+        "/openai/responses$",
+        "/deployments/*/responses$",
+        "/v1/responses/compact$",
+        "/openai/responses/compact$",
+        "/deployments/*/responses/compact$"
+      ],
+      "response": {
+        "usage_path": "usage",
+        "prompt_tokens": "input_tokens",
+        "completion_tokens": "output_tokens",
+        "thoughts_tokens": "output_tokens_details.reasoning_tokens",
+        "cache_read_tokens": "input_tokens_details.cached_tokens",
+        "cache_write_tokens": "input_tokens_details.cache_write_tokens",
+        "cache_write_long_ttl_tokens": "input_tokens_details.cache_write_tokens_details.ttl_12h_tokens",
+        "required_field": "input_tokens_details",
+        "model_path": "model",
+        "service_tier_path": "service_tier"
+      },
+      "request_extractor": "input"
+    },
+    {
+      "name": "anthropic",
+      "note": "Messages. Hosts: Claude API, Claude Platform on AWS, Bedrock Mantle /anthropic/v1, Claude on Google Cloud (Anthropic managed), Claude in Microsoft Foundry /anthropic/v1. `$` keeps /v1/messages/count_tokens and /v1/messages/batches out. Streaming carries speed and inference_geo only in message_start.",
+      "hosts": [
+        "api.anthropic.com",
+        "aws-external-anthropic.*.api.aws",
+        "bedrock-mantle.*.api.aws",
+        "claude.googleapis.com",
+        "services.ai.azure.com"
+      ],
+      "paths": ["/v1/messages$"],
+      "response": {
+        "usage_path": "usage",
+        "prompt_tokens": "input_tokens",
+        "completion_tokens": "output_tokens",
+        "cache_read_tokens": "cache_read_input_tokens",
+        "cache_write_tokens": "cache_creation_input_tokens",
+        "cache_write_long_ttl_tokens": "cache_creation.ephemeral_1h_input_tokens",
+        "prompt_excludes_cache": true,
+        "model_path": "model",
+        "speed": "speed",
+        "inference_geo": "inference_geo"
+      },
+      "request_extractor": "messages"
+    },
+    {
+      "name": "gemini",
+      "note": "Hosts: Gemini API, Vertex AI global and {region}-aiplatform, Vertex AI multi-region (us, eu). Path matching is case-sensitive: the streaming method is :streamGenerateContent. URL context and code execution results are billed as input outside promptTokenCount.",
+      "hosts": [
+        "generativelanguage.googleapis.com",
+        "aiplatform.googleapis.com",
+        "aiplatform.*.rep.googleapis.com"
+      ],
+      "paths": ["generateContent", "streamGenerateContent"],
+      "response": {
+        "usage_path": "usageMetadata",
+        "prompt_tokens": "promptTokenCount",
+        "completion_tokens": "candidatesTokenCount",
+        "completion_optional": true,
+        "extra_prompt_tokens": "toolUsePromptTokenCount",
+        "thoughts_tokens": "thoughtsTokenCount",
+        "completion_excludes_thoughts": true,
+        "cache_read_tokens": "cachedContentTokenCount",
+        "model_path": "modelVersion"
+      },
+      "request_extractor": "contents"
+    },
+    {
+      "name": "anthropic",
+      "note": "Claude on Vertex AI (global and {region}-aiplatform, multi-region us/eu): Anthropic body, model in the path. `claude-` keeps count-tokens:rawPredict and custom endpoints out.",
+      "hosts": ["aiplatform.googleapis.com", "aiplatform.*.rep.googleapis.com"],
+      "paths": [
+        "/publishers/anthropic/models/claude-*:rawPredict$",
+        "/publishers/anthropic/models/claude-*:streamRawPredict$"
+      ],
+      "response": {
+        "usage_path": "usage",
+        "prompt_tokens": "input_tokens",
+        "completion_tokens": "output_tokens",
+        "cache_read_tokens": "cache_read_input_tokens",
+        "cache_write_tokens": "cache_creation_input_tokens",
+        "cache_write_long_ttl_tokens": "cache_creation.ephemeral_1h_input_tokens",
+        "prompt_excludes_cache": true,
+        "model_path": "model",
+        "speed": "speed",
+        "inference_geo": "inference_geo"
+      },
+      "request_extractor": "messages"
+    },
+    {
+      "name": "bedrock",
+      "note": "Bedrock Runtime Converse and InvokeModel. Converse inputTokens leaves out cache tokens. InvokeModel returns the model's own body, so only Anthropic models (read by the anthropic entry) are matched. The -stream variants are binary eventstream and stay out.",
+      "hosts": ["bedrock-runtime.*.amazonaws.com"],
+      "paths": ["/converse$", "anthropic.*/invoke$"],
+      "response": {
+        "usage_path": "usage",
+        "prompt_tokens": "inputTokens",
+        "completion_tokens": "outputTokens",
+        "cache_read_tokens": "cacheReadInputTokens",
+        "cache_write_tokens": "cacheWriteInputTokens",
+        "prompt_excludes_cache": true,
+        "model_path": "model"
+      },
+      "request_extractor": "messages"
+    }
+  ]
+}
