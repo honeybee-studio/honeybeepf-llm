@@ -82,7 +82,7 @@ spec:
             # tracefs fallback (debug/tracing) for hosts whose systemd does not mount /sys/kernel/tracing
             - mountPath: /sys/kernel/debug
               name: debugfs
-              readOnly: false
+              readOnly: true
             # Host filesystem for uprobe targets (SSL libraries)
             - mountPath: /host
               name: host-root
