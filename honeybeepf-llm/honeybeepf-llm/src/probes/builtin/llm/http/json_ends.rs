@@ -1,5 +1,6 @@
 //! JSON responses past the response buffer limit: followed to their framed end, only both ends kept.
 
+use honeybeepf_llm_core::chunked::{ChunkRules, ChunkState, ChunkWalk};
 use honeybeepf_llm_core::types::UsageInfo;
 use serde_json::{Map, Value};
 
@@ -26,16 +27,13 @@ impl JsonEnds {
     /// Takes over a buffered HTTP/1.1 response whose body is a JSON object with a framed end.
     pub fn start(buffer: &[u8]) -> Option<Self> {
         let (framing, body) = h1::plain_body(buffer)?;
-        let state = match framing {
-            Framing::Length(len) => Walk::Body(len),
-            Framing::Chunked => Walk::Size,
+        let length = match framing {
+            Framing::Length(len) => Some(len),
+            Framing::Chunked => None,
             Framing::UntilClose => return None,
         };
         let mut ends = Self {
-            walk: BodyWalk {
-                state,
-                line: Vec::new(),
-            },
+            walk: BodyWalk::new(length),
             head: Vec::with_capacity(HEAD_KEEP),
             tail: Vec::with_capacity(2 * TAIL_KEEP),
             usage: None,
@@ -62,7 +60,7 @@ impl JsonEnds {
             }
             tail.extend_from_slice(&data[cut..]);
         });
-        if self.walk.state == Walk::Ended && self.usage.is_none() {
+        if self.walk.ended() && self.usage.is_none() {
             self.usage = self.read_usage();
             return self.usage.is_some();
         }
@@ -80,74 +78,71 @@ impl JsonEnds {
     }
 }
 
+/// Chunk rules for a body followed past the buffer: strict, so any framing doubt breaks the walk.
+const WALK_RULES: ChunkRules = ChunkRules {
+    extensions: true,
+    utf8_line: true,
+    data_crlf: true,
+    max_size: usize::MAX,
+    bare_lf_breaks: true,
+    max_line: MAX_LINE,
+};
+
 /// Follows the body framing as the bytes stream past, so the end is known without keeping the body.
-#[derive(Default)]
 struct BodyWalk {
-    state: Walk,
+    /// Content-Length bytes still due, or `None` for a chunked body.
+    length: Option<usize>,
+    chunks: ChunkWalk,
+    /// A line cut by a read, kept until it ends.
     line: Vec<u8>,
 }
 
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
-enum Walk {
-    /// Content-Length bytes still due.
-    Body(usize),
-    #[default]
-    Size,
-    /// Chunk data bytes still due; at 0, the CRLF closing them.
-    Data(usize),
-    Trailer,
-    Ended,
-    Broken,
-}
-
 impl BodyWalk {
-    fn feed(&mut self, mut data: &[u8], keep: &mut impl FnMut(&[u8])) -> bool {
-        while !data.is_empty() {
-            match self.state {
-                Walk::Body(left) | Walk::Data(left) if left > 0 => {
-                    let n = left.min(data.len());
-                    keep(&data[..n]);
-                    data = &data[n..];
-                    self.state = match self.state {
-                        Walk::Body(_) if n == left => Walk::Ended,
-                        Walk::Body(_) => Walk::Body(left - n),
-                        _ => Walk::Data(left - n),
-                    };
-                }
-                Walk::Ended | Walk::Broken => break,
-                _ => {
-                    let line_end = data.iter().position(|&b| b == b'\n');
-                    self.line
-                        .extend_from_slice(&data[..line_end.unwrap_or(data.len())]);
-                    data = &data[line_end.map_or(data.len(), |i| i + 1)..];
-                    if self.line.len() > MAX_LINE {
-                        self.state = Walk::Broken;
-                    } else if line_end.is_some() {
-                        self.state = self.after_line();
-                        self.line.clear();
-                    }
-                }
-            }
+    fn new(length: Option<usize>) -> Self {
+        Self {
+            length,
+            chunks: ChunkWalk::new(WALK_RULES),
+            line: Vec::new(),
         }
-        self.state != Walk::Broken
     }
 
-    /// State after a whole line in a line state.
-    fn after_line(&self) -> Walk {
-        let size =
-            |s: &str| usize::from_str_radix(s.split(';').next().unwrap_or_default().trim(), 16);
-        let line = self.line.strip_suffix(b"\r").map(std::str::from_utf8);
-        match (self.state, line) {
-            (Walk::Data(_), Some(Ok(""))) => Walk::Size,
-            (Walk::Trailer, Some(Ok(""))) => Walk::Ended,
-            (Walk::Trailer, Some(_)) => Walk::Trailer,
-            (Walk::Size, Some(Ok(line))) => match size(line) {
-                Ok(0) => Walk::Trailer,
-                Ok(n) => Walk::Data(n),
-                Err(_) => Walk::Broken,
-            },
-            _ => Walk::Broken,
+    fn ended(&self) -> bool {
+        self.length == Some(0) || self.chunks.state() == ChunkState::Ended
+    }
+
+    fn feed(&mut self, mut data: &[u8], keep: &mut impl FnMut(&[u8])) -> bool {
+        let Self {
+            length,
+            chunks,
+            line,
+        } = self;
+        if let Some(left) = length {
+            let n = (*left).min(data.len());
+            if n > 0 {
+                keep(&data[..n]);
+            }
+            *left -= n;
+            return true;
         }
+        let done = |c: &ChunkWalk| matches!(c.state(), ChunkState::Ended | ChunkState::Broken);
+        // A line cut by the last read takes this one's bytes up to the next LF until it ends.
+        while !line.is_empty() && !data.is_empty() && !done(chunks) {
+            let n = data
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(data.len(), |i| i + 1);
+            line.extend_from_slice(&data[..n]);
+            data = &data[n..];
+            let used = chunks.walk(line, &mut *keep);
+            line.drain(..used);
+        }
+        if line.is_empty() && !done(chunks) {
+            let used = chunks.walk(data, &mut *keep);
+            if !done(chunks) {
+                line.extend_from_slice(&data[used..]);
+            }
+        }
+        chunks.state() != ChunkState::Broken
     }
 }
 
@@ -222,12 +217,12 @@ mod tests {
         for case in chunk_cases() {
             let text = String::from_utf8_lossy(case.body);
             for split in 0..=case.body.len() {
-                let (mut walk, mut kept) = (BodyWalk::default(), Vec::new());
+                let (mut walk, mut kept) = (BodyWalk::new(None), Vec::new());
                 walk.feed(&case.body[..split], &mut |d| kept.extend_from_slice(d));
-                walk.feed(&case.body[split..], &mut |d| kept.extend_from_slice(d));
-                let walked = match walk.state {
-                    Walk::Ended => Walked::Ended,
-                    Walk::Broken => Walked::Broken,
+                let followed = walk.feed(&case.body[split..], &mut |d| kept.extend_from_slice(d));
+                let walked = match (walk.ended(), followed) {
+                    (true, _) => Walked::Ended,
+                    (_, false) => Walked::Broken,
                     _ => Walked::Pending,
                 };
                 assert_eq!((&kept[..], walked), case.walked, "split {split} {text:?}");
@@ -321,16 +316,16 @@ mod tests {
     fn chunk_walk_ends_only_at_the_last_chunk() {
         let stream = b"5\r\n0\r\n\r\n\r\n3;e=1\r\n0\r\n\r\n0\r\nT: 1\r\n\r\n";
         for split in 0..stream.len() {
-            let (mut walk, mut kept) = (BodyWalk::default(), Vec::new());
+            let (mut walk, mut kept) = (BodyWalk::new(None), Vec::new());
             assert!(walk.feed(&stream[..split], &mut |d| kept.extend_from_slice(d)));
-            assert!(walk.state != Walk::Ended, "{split}");
+            assert!(!walk.ended(), "{split}");
             assert!(walk.feed(&stream[split..], &mut |d| kept.extend_from_slice(d)));
-            assert!(walk.state == Walk::Ended, "{split}");
+            assert!(walk.ended(), "{split}");
             assert_eq!(kept, b"0\r\n\r\n0\r\n");
         }
         let broken: [&[u8]; 4] = [b"zz\r\n", b"2\r\nabcd\r\n", b"2\nab\r\n", &[b'1'; 5000]];
         for bytes in broken {
-            assert!(!BodyWalk::default().feed(bytes, &mut |_| {}), "{bytes:?}");
+            assert!(!BodyWalk::new(None).feed(bytes, &mut |_| {}), "{bytes:?}");
         }
     }
 }
