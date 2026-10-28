@@ -97,9 +97,14 @@ replayed against it as well. A blank cell was not checked.
 
 Compressed responses (`gzip`, `br`, `zstd`, `deflate`) are decoded, SSE included.
 
-`builtinProbes.llm.providers` in `values.yaml` describes providers by host, path and usage fields. That list
-replaces the built-in providers, so include the built-ins you still need. Only HTTPS calls made through OpenSSL
-are seen; a plain-HTTP endpoint (a typical in-cluster Ollama or vLLM) is not.
+`builtinProbes.llm.providers` in `values.yaml` describes providers by host, path and usage fields, in the format of
+the [built-in list](honeybeepf-llm/honeybeepf-llm-core/src/providers/default_providers.json). They are added to the
+built-in providers; a provider with a built-in name (`openai`, `anthropic`, `gemini`, `bedrock`, matched exactly)
+replaces every built-in entry of that name, so an `openai` entry must also cover the Responses API and an
+`anthropic` entry Claude on Vertex AI. Usage is read by matching the response's fields, not its host, with the
+built-in entries tried first: a gateway that returns an OpenAI-, Anthropic- or Gemini-shaped body is read with the
+built-in fields. Only HTTPS calls made through OpenSSL are seen; a plain-HTTP endpoint (a typical in-cluster
+Ollama or vLLM) is not.
 
 **Runtimes** (also checked in pods on k3s: `python:3.12-slim`, `python:3.13-alpine`, `node:24-slim`)
 
