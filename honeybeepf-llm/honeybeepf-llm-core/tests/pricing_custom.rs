@@ -15,11 +15,11 @@ fn provider(name: &str, fields: &str) -> String {
 }
 
 #[test]
-fn test_user_prices_replace_add_and_discount_per_model() {
+fn test_user_prices_replace_add_and_scale_per_model() {
     let mut table = PriceTable::from_json(TABLE).expect("test table loads");
-    let openai = r#""models": {"gpt-5": {"input": 1, "output": 8}}, "discount": 0.5"#;
+    let openai = r#""models": {"gpt-5": {"input": 1, "output": 8}}, "price_multiplier": 0.5"#;
     let vllm = r#""models": {"my-vllm-llama": {"input": 0.1, "output": 0.2}}"#;
-    let anthropic = r#""models": {}, "discount": 0.25"#;
+    let anthropic = r#""models": {}, "price_multiplier": 0.25"#;
     let json = custom(&[
         provider("openai", openai),
         provider("vllm", vllm),
@@ -41,7 +41,7 @@ fn test_user_prices_replace_add_and_discount_per_model() {
         (call("gpt-5", 1_000_000, 1_000_000), Ok(9.0)),
         (call("gpt-5", 1000, 0).read(500), MISSING),
         (call("my-vllm-llama", 1_000_000, 1_000_000), Ok(0.3)),
-        // A discount scales every built-in price of its provider: base, dated name, long context, tier, speed.
+        // A price multiplier scales every built-in price of its provider: base, dated name, long context, tier, speed.
         (call("gpt-4o", 1_000_000, 0), Ok(1.25)),
         (call("gpt-4o-2024-08-06", 1_000_000, 0), Ok(1.25)),
         (call("gpt-6.1-sol", 300_000, 0), Ok(0.6)),
@@ -64,9 +64,9 @@ fn test_rejected_user_files_leave_the_table_unchanged() {
         (custom(&[openai(r#"{"gpt-5": {"input_price": 1}}"#)]), "unknown field `input_price`"),
         (custom(&[openai(r#"{"gpt-5": {}, "gpt-5": {}}"#)]), "gpt-5 is listed twice"),
         (custom(&[m(), m()]), "vllm: m is listed twice"),
-        (custom(&[provider("openai", r#""models": {}, "discount": 0"#)]), "multipliers must be above 0"),
-        (custom(&[provider("openai", r#""models": {}, "discount": 0.8"#), provider("openai", r#""models": {}, "discount": 0.5"#)]), "openai: discount is listed twice"),
-        (custom(&[provider("mistral", r#""models": {}, "discount": 0.8"#)]), "discount matches no built-in provider"),
+        (custom(&[provider("openai", r#""models": {}, "price_multiplier": 0"#)]), "multipliers must be above 0"),
+        (custom(&[provider("openai", r#""models": {}, "price_multiplier": 0.8"#), provider("openai", r#""models": {}, "price_multiplier": 0.5"#)]), "openai: price_multiplier is listed twice"),
+        (custom(&[provider("mistral", r#""models": {}, "price_multiplier": 0.8"#)]), "price_multiplier matches no built-in provider"),
         (r#"{"version": "acme-1"}"#.to_string(), "missing field `providers`"),
     ];
     for (json, why) in cases {

@@ -19,8 +19,8 @@ struct ModelPrices {
     tiers: HashMap<String, Rates>,
     speed: HashMap<String, f64>,
     geo: HashMap<String, f64>,
-    /// A user file's provider discount on this built-in entry, else 1.
-    discount: f64,
+    /// A user file's `price_multiplier` for this built-in entry's provider, else 1.
+    price_multiplier: f64,
 }
 
 /// Models a user price file replaced in the table, and models it added.
@@ -76,7 +76,7 @@ pub struct PriceTable {
     version: String,
     sources: Vec<PriceSource>,
     models: HashMap<String, ModelPrices>,
-    discounts: HashMap<String, f64>,
+    price_multipliers: HashMap<String, f64>,
 }
 
 impl PriceTable {
@@ -90,13 +90,15 @@ impl PriceTable {
         let raw: RawTable = serde_json::from_str(json)?;
         let mut models = HashMap::new();
         let mut sources = Vec::new();
-        let mut discounts = HashMap::new();
+        let mut price_multipliers = HashMap::new();
         for p in raw.providers {
             p.check().map_err(|why| invalid(&p.name, why))?;
-            if let Some(discount) = p.discount
-                && discounts.insert(p.name.clone(), discount).is_some()
+            if let Some(price_multiplier) = p.price_multiplier
+                && price_multipliers
+                    .insert(p.name.clone(), price_multiplier)
+                    .is_some()
             {
-                return Err(invalid(&p.name, "discount is listed twice"));
+                return Err(invalid(&p.name, "price_multiplier is listed twice"));
             }
             for (name, standard) in p.models {
                 let tiers = p
@@ -110,7 +112,7 @@ impl PriceTable {
                     tiers,
                     speed: p.speed.get(&name).cloned().unwrap_or_default(),
                     geo: p.geo.get(&name).cloned().unwrap_or_default(),
-                    discount: 1.0,
+                    price_multiplier: 1.0,
                 };
                 if models.contains_key(&name) {
                     return Err(invalid(&p.name, format!("{name} is listed twice")));
@@ -127,7 +129,7 @@ impl PriceTable {
             version: raw.version,
             sources,
             models,
-            discounts,
+            price_multipliers,
         })
     }
 
@@ -135,11 +137,15 @@ impl PriceTable {
     pub fn merge_custom(&mut self, json: &str) -> Result<Overrides, serde_json::Error> {
         let custom = Self::from_json(json)?;
         let known = |p: &&String| self.sources.iter().any(|s| s.provider == **p);
-        if let Some(p) = custom.discounts.keys().find(|p| !known(p)) {
-            return Err(invalid(p, "discount matches no built-in provider"));
+        if let Some(p) = custom.price_multipliers.keys().find(|p| !known(p)) {
+            return Err(invalid(p, "price_multiplier matches no built-in provider"));
         }
         for m in self.models.values_mut() {
-            m.discount = custom.discounts.get(&m.provider).copied().unwrap_or(1.0);
+            m.price_multiplier = custom
+                .price_multipliers
+                .get(&m.provider)
+                .copied()
+                .unwrap_or(1.0);
         }
         let mut overrides = Overrides::default();
         for (name, prices) in custom.models {
@@ -198,7 +204,7 @@ impl PriceTable {
             }
             _ => rates,
         };
-        let factor = model.discount
+        let factor = model.price_multiplier
             * multiplier(&model.speed, usage.speed.as_deref(), "standard")?
             * multiplier(&model.geo, usage.inference_geo.as_deref(), "global")?;
         let read = usage.cache_read_tokens.unwrap_or(0);

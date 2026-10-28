@@ -151,7 +151,7 @@ pub(super) struct RawProvider {
     #[serde(default, deserialize_with = "unique_nested_keys")]
     pub(super) geo: HashMap<String, HashMap<String, f64>>,
     /// In a user file: multiplier on every built-in price of the provider with this name.
-    pub(super) discount: Option<f64>,
+    pub(super) price_multiplier: Option<f64>,
 }
 
 impl RawProvider {
@@ -171,7 +171,7 @@ impl RawProvider {
         let in_range = |f: &f64| *f > 0.0 && *f <= MAX_FACTOR;
         if !factors
             .flat_map(HashMap::values)
-            .chain(&self.discount)
+            .chain(&self.price_multiplier)
             .all(in_range)
         {
             return Err("multipliers must be above 0 and at most 100".into());
