@@ -655,6 +655,46 @@ fn test_stream_after_a_lost_fragment_is_parsed_from_its_own_start() {
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
 }
 
+#[test]
+fn test_call_after_a_lost_response_head_read_is_recorded() {
+    // Whole SSL_reads lost in the kernel leave no gap in the fragment offsets.
+    let mut short_first_read = h1_response(3000);
+    let head = short_first_read.remove(0);
+    short_first_read.splice(0..0, [head[..5].to_vec(), head[5..].to_vec()]);
+    for (n, (mut reads, lost)) in [
+        (h1_response(3000), 0),
+        (h1_response(40000), 0),
+        (openai_sse_reads(5), 0),
+        // `HTTP/` alone passes as a status line; the request head after it shows the loss.
+        (short_first_read, 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        reads.remove(lost);
+        let mut p = StreamProcessor::new();
+        let mut out = outcomes(&mut p, &h1_response(3000), None);
+        out.extend(outcomes(&mut p, &reads, None));
+        out.extend(outcomes(&mut p, &h1_response(3000), None));
+        assert_eq!(unparsed(&out), [UnparsedReason::CaptureLost], "{n}: {out:?}");
+        assert_eq!(count(&out, Outcome::Recorded), 2, "{n}: {out:?}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{n}: {out:?}");
+    }
+}
+
+#[test]
+fn test_first_read_of_partial_status_line_is_recorded() {
+    for split in 1..=8 {
+        let mut reads = h1_response(3000);
+        let head = reads.remove(0);
+        reads.splice(0..0, [head[..split].to_vec(), head[split..].to_vec()]);
+        let mut p = StreamProcessor::new();
+        let out = outcomes(&mut p, &reads, None);
+        assert!(unparsed(&out).is_empty(), "{split}: {out:?}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{split}: {out:?}");
+    }
+}
+
 fn fastest(mut run: impl FnMut()) -> std::time::Duration {
     (0..3)
         .map(|_| {

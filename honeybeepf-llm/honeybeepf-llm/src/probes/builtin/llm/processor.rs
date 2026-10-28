@@ -162,6 +162,8 @@ impl StreamProcessor {
             Some(UnparsedReason::CaptureLost)
         } else if direction == LlmDirection::Write && self.awaits_http11_response() {
             Some(UnparsedReason::NextRequest)
+        } else if offset == 0 && self.lost_http11_head(direction, data) {
+            Some(UnparsedReason::CaptureLost)
         } else {
             None
         };
@@ -213,6 +215,24 @@ impl StreamProcessor {
                 self.json_ends.is_some()
                     || !parser.writes_during_response()
                         && http::Http11Parser::is_complete_response(&self.read_buf)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the HTTP/1.1 response lost its status line before the ringbuf, so it can never be framed.
+    fn lost_http11_head(&self, direction: LlmDirection, data: &[u8]) -> bool {
+        const STATUS: &[u8] = b"HTTP/1.";
+        match (&self.state, direction) {
+            // A short first read may carry only part of the status line.
+            (ProcessorState::ProcessingRequest { parser, .. }, LlmDirection::Read) => {
+                !parser.writes_during_response()
+                    && !STATUS.starts_with(&data[..data.len().min(STATUS.len())])
+            }
+            (ProcessorState::ProcessingResponse { parser, .. }, LlmDirection::Write) => {
+                !parser.writes_during_response()
+                    && !self.read_buf.starts_with(STATUS)
+                    && http::Http11Parser::is_request_head(data)
             }
             _ => false,
         }
