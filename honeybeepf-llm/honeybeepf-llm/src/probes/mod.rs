@@ -111,7 +111,7 @@ pub type ExecPidQueue = Arc<Mutex<VecDeque<u32>>>;
 /// Notifier to wake up the main loop immediately when new exec events arrive.
 pub type ExecNotify = Arc<Notify>;
 
-fn tracepoint_exists(category: &str, name: &str) -> bool {
+pub(crate) fn tracepoint_exists(category: &str, name: &str) -> bool {
     const TRACEFS_MOUNT_POINTS: [&str; 2] = ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"];
 
     TRACEFS_MOUNT_POINTS.iter().any(|base| {

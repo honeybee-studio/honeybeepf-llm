@@ -1,6 +1,7 @@
 use honeybeepf_llm_core::pricing::PriceTable;
 use honeybeepf_llm_core::providers::{
-    ConfigurableProvider, ProviderConfig, ProviderRegistry, RequestExtractorType, ResponseConfig,
+    ConfigurableProvider, IdentityConfig, ProviderConfig, ProviderRegistry, RequestExtractorType,
+    ResponseConfig, TokenConfig,
 };
 use honeybeepf_llm_core::types::UsageInfo;
 use serde_json::json;
@@ -10,14 +11,7 @@ fn openai_config() -> ProviderConfig {
         name: "openai".to_string(),
         hosts: vec!["api.openai.com".to_string()],
         paths: vec!["/chat/completions".to_string()],
-        response: ResponseConfig {
-            usage_path: "usage".to_string(),
-            prompt_tokens: "prompt_tokens".to_string(),
-            completion_tokens: "completion_tokens".to_string(),
-            thoughts_tokens: None,
-            model_path: "model".to_string(),
-            ..ResponseConfig::default()
-        },
+        response: ResponseConfig::default(),
         request_extractor: RequestExtractorType::Messages,
     }
 }
@@ -28,11 +22,17 @@ fn gemini_config() -> ProviderConfig {
         hosts: vec!["generativelanguage.googleapis.com".to_string()],
         paths: vec!["generateContent".to_string()],
         response: ResponseConfig {
-            usage_path: "usageMetadata".to_string(),
-            prompt_tokens: "promptTokenCount".to_string(),
-            completion_tokens: "candidatesTokenCount".to_string(),
-            thoughts_tokens: Some("thoughtsTokenCount".to_string()),
-            model_path: "modelVersion".to_string(),
+            tokens: TokenConfig {
+                usage_path: "usageMetadata".to_string(),
+                prompt_tokens: "promptTokenCount".to_string(),
+                completion_tokens: "candidatesTokenCount".to_string(),
+                thoughts_tokens: Some("thoughtsTokenCount".to_string()),
+                ..TokenConfig::default()
+            },
+            identity: IdentityConfig {
+                model_path: "modelVersion".to_string(),
+                required_field: None,
+            },
             ..ResponseConfig::default()
         },
         request_extractor: RequestExtractorType::Contents,
@@ -496,6 +496,44 @@ fn test_custom_provider_cached_tokens_key_still_reads_cache() -> Result<(), serd
         provider.parse_usage(&response).unwrap().cache_read_tokens,
         Some(8)
     );
+    Ok(())
+}
+
+// Every flat key a user config may set, so grouping the fields in Rust keeps the JSON shape.
+#[test]
+fn test_custom_provider_reads_every_flat_field() -> Result<(), serde_json::Error> {
+    let registry = ProviderRegistry::from_json(
+        r#"{"providers":[{"name":"proxy","response":{"usage_path":"meta.usage",
+            "prompt_tokens":"in","completion_tokens":"out","completion_optional":true,
+            "extra_prompt_tokens":"tool","thoughts_tokens":"think","completion_excludes_thoughts":true,"cached_tokens":"hit",
+            "cache_write_tokens":"put","cache_write_long_ttl_tokens":"put_long","prompt_excludes_cache":true,
+            "service_tier_path":"tier","speed":"mode","inference_geo":"geo",
+            "model_path":"served.model","required_field":"marker"}}]}"#,
+    )?;
+    let provider = ConfigurableProvider::new(registry.providers[0].clone());
+    let body = json!({"tier": "flex", "served": {"model": "m-1"}, "meta": {"usage": {
+        "in": 10, "tool": 2, "think": 5, "hit": 3, "put": 4, "put_long": 9, "mode": "fast", "geo": "us", "marker": {}}}});
+    let usage = provider.parse_usage(&body).unwrap();
+    let expected = UsageInfo {
+        prompt_tokens: 19,
+        completion_tokens: 5,
+        thoughts_tokens: Some(5),
+        cache_read_tokens: Some(3),
+        cache_write_tokens: Some(4),
+        cache_write_long_ttl_tokens: Some(4),
+        model: Some("m-1".to_string()),
+        service_tier: Some("flex".to_string()),
+        speed: Some("fast".to_string()),
+        inference_geo: Some("us".to_string()),
+    };
+    assert_eq!(format!("{usage:?}"), format!("{expected:?}"));
+
+    let mut no_marker = body;
+    no_marker["meta"]["usage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("marker");
+    assert!(provider.parse_usage(&no_marker).is_none());
     Ok(())
 }
 

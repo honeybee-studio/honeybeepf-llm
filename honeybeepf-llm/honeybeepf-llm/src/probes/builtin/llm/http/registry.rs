@@ -359,4 +359,27 @@ mod tests {
             1
         );
     }
+
+    // LLM_PROVIDERS_CONFIG_FILE goes through the config crate, which also turns `yes` and `1` into booleans.
+    #[test]
+    fn config_file_reads_flat_response_fields() -> Result<(), config::ConfigError> {
+        let yaml = "providers:\n  - name: proxy\n    response:\n      usage_path: meta.usage\n      \
+                    prompt_tokens: in\n      cached_tokens: hit\n      prompt_excludes_cache: yes\n      \
+                    completion_optional: 1\n      model_path: served.model\n      speed: mode\n";
+        let registry = config::Config::builder()
+            .add_source(config::File::from_str(yaml, config::FileFormat::Yaml))
+            .build()
+            .and_then(|c| c.try_deserialize::<ProviderRegistry>())?;
+        let provider = ConfigurableProvider::new(registry.providers[0].clone());
+        let body = serde_json::json!({"served": {"model": "m-1"},
+            "meta": {"usage": {"in": 10, "hit": 3, "mode": "fast"}}});
+        let Some(usage) = provider.parse_usage(&body) else {
+            panic!("no usage read from {body}");
+        };
+        assert_eq!((usage.prompt_tokens, usage.completion_tokens), (13, 0));
+        assert_eq!(usage.cache_read_tokens, Some(3));
+        assert_eq!(usage.model.as_deref(), Some("m-1"));
+        assert_eq!(usage.speed.as_deref(), Some("fast"));
+        Ok(())
+    }
 }

@@ -58,7 +58,7 @@ pub struct HoneyBeeMetrics {
     pub network_latency_ns: Histogram<u64>,
     pub gpu_open_events: Counter<u64>,
     pub process_exit_total: Counter<u64>,
-    pub process_lifetime_seconds: Histogram<u64>,
+    pub process_lifetime_seconds: Histogram<f64>,
     pub file_access_events: Counter<u64>,
     pub llm_requests_total: Counter<u64>,
     pub llm_tokens_total: Counter<u64>,
@@ -106,7 +106,7 @@ impl HoneyBeeMetrics {
                 .with_description("Total number of process exits")
                 .build(),
             process_lifetime_seconds: meter
-                .u64_histogram("process_lifetime_seconds")
+                .f64_histogram("process_lifetime_seconds")
                 .with_description("Process lifetime in seconds")
                 .with_unit("s")
                 .build(),
@@ -169,7 +169,7 @@ impl HoneyBeeMetrics {
                 )
                 .with_unit("tokens")
                 .build(),
-            prices: load_prices(),
+            prices: load_prices(custom_prices().as_deref()),
         }
     }
 
@@ -249,27 +249,49 @@ impl HoneyBeeMetrics {
     }
 }
 
-/// Load the built-in price table; if it is rejected the agent runs on without cost metrics.
-fn load_prices() -> Option<(PriceTable, KeyValue)> {
-    match PriceTable::builtin() {
-        Ok(table) => {
-            for s in table.sources() {
-                info!(
-                    "Price table {}: {} prices from {} (checked {})",
-                    table.version(),
-                    s.provider,
-                    s.url,
-                    s.checked
-                );
-            }
-            let version = KeyValue::new("price_table_version", Arc::<str>::from(table.version()));
-            Some((table, version))
-        }
-        Err(e) => {
-            log::warn!("Built-in price table rejected, LLM cost not recorded: {e}");
-            None
+/// A user price file from `LLM_PRICES_CONFIG_FILE`, else inline JSON in `LLM_PRICES_CONFIG` (chart).
+fn custom_prices() -> Option<String> {
+    if let Ok(path) = std::env::var("LLM_PRICES_CONFIG_FILE") {
+        match std::fs::read_to_string(&path) {
+            Ok(json) => return Some(json),
+            Err(e) => log::warn!("Custom price file {path} not read: {e}"),
         }
     }
+    std::env::var("LLM_PRICES_CONFIG")
+        .ok()
+        .filter(|json| !json.is_empty())
+}
+
+/// Load the built-in price table and merge user prices over it; a rejected user file keeps the built-in one.
+fn load_prices(custom: Option<&str>) -> Option<(PriceTable, KeyValue)> {
+    let mut table = match PriceTable::builtin() {
+        Ok(table) => table,
+        Err(e) => {
+            log::warn!("Built-in price table rejected, LLM cost not recorded: {e}");
+            return None;
+        }
+    };
+    if let Some(json) = custom {
+        match table.merge_custom(json) {
+            Ok(o) => info!(
+                "Custom prices: replaced [{}], added [{}]",
+                o.replaced.join(", "),
+                o.added.join(", ")
+            ),
+            Err(e) => log::warn!("Custom price table rejected, using built-in prices only: {e}"),
+        }
+    }
+    for s in table.sources() {
+        info!(
+            "Price table {}: {} prices from {} (checked {})",
+            table.version(),
+            s.provider,
+            s.url,
+            s.checked
+        );
+    }
+    let version = KeyValue::new("price_table_version", Arc::<str>::from(table.version()));
+    Some((table, version))
 }
 
 /// Priority:
@@ -524,7 +546,7 @@ pub fn shutdown_metrics() {
     }
 }
 
-pub fn record_process_exit(cause: &str, exit_code: u32, lifetime_secs: u64, cgroup_id: u64) {
+pub fn record_process_exit(cause: &str, exit_code: u32, lifetime_secs: f64, cgroup_id: u64) {
     if let Some(m) = metrics() {
         let attrs = [
             KeyValue::new("cause", cause.to_string()),
@@ -890,7 +912,7 @@ mod tests {
             ]
         );
         assert!(cost.data_points.iter().all(|p| {
-            label(&p.attributes, "price_table_version").as_deref() == Some("2026-10-26")
+            label(&p.attributes, "price_table_version").as_deref() == Some("2026-10-28")
         }));
         let unpriced = find("llm_unpriced_tokens_total")?
             .data
@@ -904,5 +926,15 @@ mod tests {
             .collect();
         assert_eq!(points, [(kind("unknown_model"), 42)]);
         Ok(())
+    }
+
+    #[test]
+    fn custom_prices_merge_over_the_builtin_table_or_are_ignored() {
+        let json = r#"{"version": "acme", "providers": [{"name": "vllm", "source": "s",
+            "checked": "2026-10-01", "models": {"my-vllm-llama": {"input": 1}}}]}"#;
+        let version = |custom| load_prices(custom).map(|(_, v)| v.value.to_string());
+        let builtin = version(None).expect("built-in table loads");
+        assert_eq!(version(Some("{")), Some(builtin.clone()));
+        assert!(version(Some(json)).is_some_and(|v| v.starts_with(&format!("{builtin}+custom-"))));
     }
 }

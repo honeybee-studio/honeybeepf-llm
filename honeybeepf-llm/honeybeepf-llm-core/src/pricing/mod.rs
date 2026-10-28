@@ -14,10 +14,20 @@ use model_name::without_date;
 use table::{Rates, RawTable};
 
 struct ModelPrices {
+    provider: String,
     standard: Rates,
     tiers: HashMap<String, Rates>,
     speed: HashMap<String, f64>,
     geo: HashMap<String, f64>,
+    /// A user file's `price_multiplier` for this built-in entry's provider, else 1.
+    price_multiplier: f64,
+}
+
+/// Models a user price file replaced in the table, and models it added.
+#[derive(Debug, Default, PartialEq)]
+pub struct Overrides {
+    pub replaced: Vec<String>,
+    pub added: Vec<String>,
 }
 
 /// Where one provider's prices were copied from, and when.
@@ -66,6 +76,7 @@ pub struct PriceTable {
     version: String,
     sources: Vec<PriceSource>,
     models: HashMap<String, ModelPrices>,
+    price_multipliers: HashMap<String, f64>,
 }
 
 impl PriceTable {
@@ -79,8 +90,16 @@ impl PriceTable {
         let raw: RawTable = serde_json::from_str(json)?;
         let mut models = HashMap::new();
         let mut sources = Vec::new();
+        let mut price_multipliers = HashMap::new();
         for p in raw.providers {
             p.check().map_err(|why| invalid(&p.name, why))?;
+            if let Some(price_multiplier) = p.price_multiplier
+                && price_multipliers
+                    .insert(p.name.clone(), price_multiplier)
+                    .is_some()
+            {
+                return Err(invalid(&p.name, "price_multiplier is listed twice"));
+            }
             for (name, standard) in p.models {
                 let tiers = p
                     .tiers
@@ -88,10 +107,12 @@ impl PriceTable {
                     .filter_map(|(tier, m)| Some((tier.clone(), m.get(&name)?.clone())))
                     .collect();
                 let prices = ModelPrices {
+                    provider: p.name.clone(),
                     standard,
                     tiers,
                     speed: p.speed.get(&name).cloned().unwrap_or_default(),
                     geo: p.geo.get(&name).cloned().unwrap_or_default(),
+                    price_multiplier: 1.0,
                 };
                 if models.contains_key(&name) {
                     return Err(invalid(&p.name, format!("{name} is listed twice")));
@@ -108,7 +129,36 @@ impl PriceTable {
             version: raw.version,
             sources,
             models,
+            price_multipliers,
         })
+    }
+
+    /// Merge a user price file over this table per model; a rejected file changes nothing.
+    pub fn merge_custom(&mut self, json: &str) -> Result<Overrides, serde_json::Error> {
+        let custom = Self::from_json(json)?;
+        let known = |p: &&String| self.sources.iter().any(|s| s.provider == **p);
+        if let Some(p) = custom.price_multipliers.keys().find(|p| !known(p)) {
+            return Err(invalid(p, "price_multiplier matches no built-in provider"));
+        }
+        for m in self.models.values_mut() {
+            m.price_multiplier = custom
+                .price_multipliers
+                .get(&m.provider)
+                .copied()
+                .unwrap_or(1.0);
+        }
+        let mut overrides = Overrides::default();
+        for (name, prices) in custom.models {
+            match self.models.insert(name.clone(), prices) {
+                Some(_) => overrides.replaced.push(name),
+                None => overrides.added.push(name),
+            }
+        }
+        overrides.replaced.sort();
+        overrides.added.sort();
+        self.sources.extend(custom.sources);
+        self.version = format!("{}+custom-{:08x}", self.version, fnv1a(json));
+        Ok(overrides)
     }
 
     pub fn version(&self) -> &str {
@@ -154,7 +204,8 @@ impl PriceTable {
             }
             _ => rates,
         };
-        let factor = multiplier(&model.speed, usage.speed.as_deref(), "standard")?
+        let factor = model.price_multiplier
+            * multiplier(&model.speed, usage.speed.as_deref(), "standard")?
             * multiplier(&model.geo, usage.inference_geo.as_deref(), "global")?;
         let read = usage.cache_read_tokens.unwrap_or(0);
         let write = usage.cache_write_tokens.unwrap_or(0);
@@ -180,6 +231,13 @@ impl PriceTable {
 
 fn invalid(provider: &str, why: impl fmt::Display) -> serde_json::Error {
     serde_json::Error::custom(format!("{provider}: {why}"))
+}
+
+/// FNV-1a: stable across builds, so the version label changes only with the file.
+fn fnv1a(s: &str) -> u32 {
+    s.bytes().fold(0x811c_9dc5, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    })
 }
 
 fn multiplier(map: &HashMap<String, f64>, v: Option<&str>, neutral: &str) -> Result<f64, Unpriced> {
