@@ -134,6 +134,8 @@ fn gemini() -> ProviderConfig {
             prompt_tokens: "promptTokenCount".to_string(),
             completion_tokens: "candidatesTokenCount".to_string(),
             completion_optional: true,
+            // URL context and code execution results are billed as input outside promptTokenCount.
+            extra_prompt_tokens: Some("toolUsePromptTokenCount".to_string()),
             thoughts_tokens: Some("thoughtsTokenCount".to_string()),
             completion_excludes_thoughts: true,
             cache_read_tokens: Some("cachedContentTokenCount".to_string()),
@@ -217,6 +219,9 @@ pub struct ResponseConfig {
     #[serde(default)]
     pub completion_optional: bool,
 
+    /// Optional: field name for input tokens counted outside `prompt_tokens`, added to the input total
+    pub extra_prompt_tokens: Option<String>,
+
     /// Optional: field name for thinking/reasoning tokens
     pub thoughts_tokens: Option<String>,
 
@@ -275,6 +280,7 @@ impl Default for ResponseConfig {
             prompt_tokens: default_prompt_tokens(),
             completion_tokens: default_completion_tokens(),
             completion_optional: false,
+            extra_prompt_tokens: None,
             thoughts_tokens: None,
             completion_excludes_thoughts: false,
             cache_read_tokens: None,

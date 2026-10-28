@@ -1,3 +1,4 @@
+use honeybeepf_llm_core::pricing::PriceTable;
 use honeybeepf_llm_core::providers::{
     ConfigurableProvider, ProviderConfig, ProviderRegistry, RequestExtractorType, ResponseConfig,
 };
@@ -276,6 +277,120 @@ fn test_gemini_thoughts_are_part_of_completion() {
     let usage = gemini_default().parse_usage(&response).unwrap();
     assert_eq!((usage.prompt_tokens, usage.completion_tokens), (15, 125));
     assert_eq!(usage.thoughts_tokens, Some(100));
+}
+
+// URL context and code execution results go back to the model as input, outside promptTokenCount.
+fn gemini_tool_use_response() -> serde_json::Value {
+    json!({
+        "candidates": [{"content": {"role": "model", "parts": [{"text": "summary"}]}, "finishReason": "STOP"}],
+        "usageMetadata": {"promptTokenCount": 27, "candidatesTokenCount": 120,
+            "toolUsePromptTokenCount": 10309, "totalTokenCount": 10456},
+        "modelVersion": "gemini-3.8-flash"
+    })
+}
+
+#[test]
+fn test_gemini_tool_use_prompt_tokens_are_part_of_prompt_on_gemini_api_and_vertex() {
+    let endpoints = [
+        (
+            "generativelanguage.googleapis.com",
+            "/v1beta/models/gemini-3.8-flash:generateContent",
+        ),
+        (
+            "generativelanguage.googleapis.com",
+            "/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse",
+        ),
+        (
+            "aiplatform.googleapis.com",
+            "/v1/projects/p/locations/global/publishers/google/models/gemini-3.8-flash:generateContent",
+        ),
+        (
+            "us-central1-aiplatform.googleapis.com",
+            "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-3.8-flash:streamGenerateContent",
+        ),
+        (
+            "aiplatform.us.rep.googleapis.com",
+            "/v1/projects/p/locations/us/publishers/google/models/gemini-3.8-flash:generateContent",
+        ),
+    ];
+    for (host, path) in endpoints {
+        let usage = default_provider(host, path)
+            .parse_usage(&gemini_tool_use_response())
+            .unwrap();
+        assert_eq!(
+            (usage.prompt_tokens, usage.completion_tokens),
+            (27 + 10309, 120),
+            "{host}{path}"
+        );
+    }
+}
+
+#[test]
+fn test_gemini_input_and_output_add_up_to_total_with_every_part() {
+    let response = json!({
+        "usageMetadata": {"promptTokenCount": 5000, "cachedContentTokenCount": 4096,
+            "candidatesTokenCount": 20, "thoughtsTokenCount": 300,
+            "toolUsePromptTokenCount": 800, "totalTokenCount": 6120},
+        "modelVersion": "gemini-test"
+    });
+
+    let usage = gemini_default().parse_usage(&response).unwrap();
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (5800, 320));
+    assert_eq!(usage.prompt_tokens + usage.completion_tokens, 6120);
+    assert_eq!(usage.cache_read_tokens, Some(4096));
+}
+
+#[test]
+fn test_gemini_bad_tool_use_count_keeps_the_prompt() {
+    for tool_use in [json!(null), json!("10309"), json!(-1), json!(1.5)] {
+        let response = json!({
+            "usageMetadata": {"promptTokenCount": 27, "candidatesTokenCount": 120,
+                "toolUsePromptTokenCount": tool_use}
+        });
+        let usage = gemini_default().parse_usage(&response).unwrap();
+        assert_eq!(
+            (usage.prompt_tokens, usage.completion_tokens),
+            (27, 120),
+            "{tool_use}"
+        );
+    }
+}
+
+#[test]
+fn test_gemini_tool_use_prompt_tokens_are_priced_as_input() {
+    let table = PriceTable::builtin().expect("builtin price table");
+    let with_tools = gemini_default()
+        .parse_usage(&gemini_tool_use_response())
+        .unwrap();
+    let plain = gemini_default()
+        .parse_usage(&json!({
+            "usageMetadata": {"promptTokenCount": 10336, "candidatesTokenCount": 120},
+            "modelVersion": "gemini-3.8-flash"
+        }))
+        .unwrap();
+
+    let (with_tools, plain) = (
+        table.cost(&with_tools).expect("priced"),
+        table.cost(&plain).expect("priced"),
+    );
+    assert!(plain.input > 0.0);
+    assert_eq!(with_tools.input, plain.input);
+}
+
+#[test]
+fn test_custom_provider_can_add_extra_prompt_tokens() -> Result<(), serde_json::Error> {
+    let registry = ProviderRegistry::from_json(
+        r#"{"providers":[{"name":"gemini-proxy","response":{"usage_path":"usageMetadata",
+            "prompt_tokens":"promptTokenCount","completion_tokens":"candidatesTokenCount",
+            "extra_prompt_tokens":"toolUsePromptTokenCount"}}]}"#,
+    )?;
+    let provider = ConfigurableProvider::new(registry.providers[0].clone());
+    let usage = provider
+        .parse_usage(&json!({"usageMetadata": {"promptTokenCount": 3,
+            "candidatesTokenCount": 2, "toolUsePromptTokenCount": 7}}))
+        .unwrap();
+    assert_eq!(usage.prompt_tokens, 10);
+    Ok(())
 }
 
 #[test]
