@@ -9,14 +9,31 @@ const NOV_30: u32 = 20_787; // 2026-11-30
 #[test]
 fn test_builtin_prices_match_the_pricing_pages() {
     let table = PriceTable::builtin().expect("built-in table loads");
-    assert_eq!(table.version(), "2026-10-26");
-    let providers: Vec<_> = table.sources().iter().map(|s| &s.provider).collect();
-    assert_eq!(providers, ["anthropic", "openai", "gemini"]);
-    assert!(table.sources().iter().all(|s| s.checked == "2026-10-26"));
+    assert_eq!(table.version(), "2026-10-28");
+    let sources: Vec<_> = table
+        .sources()
+        .iter()
+        .map(|s| (s.provider.as_str(), s.checked.as_str()))
+        .collect();
+    assert_eq!(
+        sources,
+        [
+            ("anthropic", "2026-10-26"),
+            ("openai", "2026-10-28"),
+            ("gemini", "2026-10-26")
+        ]
+    );
     // Opus 5.5 fast in the US: (10000×$4 + 500×$5 + 1500×$8 + 2000×$20) × 2 × 1.1.
     let opus = call("claude-opus-5-5", 12000, 2000).write(2000).long(1500);
     let million = |model: &str| call(model, 1_000_000, 0);
     let sol = || call("gpt-5.6-sol", 100_000, 0);
+    let terra = || call("gpt-6.1-terra", 10000, 2000);
+    let terra_long = || {
+        call("gpt-6.1-terra", 300_000, 1000)
+            .read(100_000)
+            .write(50_000)
+            .long(20_000)
+    };
     #[rustfmt::skip]
     let cases = [
         (NOV_30, opus.speed("fast").geo("us"), Ok(0.2079)),
@@ -24,6 +41,15 @@ fn test_builtin_prices_match_the_pricing_pages() {
         (NOV_30, call("gpt-6.1-sol", 12000, 500).read(4000).write(7000).long(4000), Ok(0.0349)),
         // Fast tier long context: 300000×$8 + 1000×$30.
         (NOV_30, call("gpt-6.1-sol", 300_000, 1000).tier("priority"), Ok(2.43)),
+        // GPT-6.1 Terra: 10000×$1 + 2000×$5, Flex half, Fast double.
+        (NOV_30, terra(), Ok(0.02)),
+        (NOV_30, terra().tier("flex"), Ok(0.01)),
+        (NOV_30, terra().tier("priority"), Ok(0.04)),
+        // Long context: 150000×$2 + 100000×$0.10 + 30000×$2.50 + 20000×$5 + 1000×$7.50,
+        // Flex half, Fast double.
+        (NOV_30, terra_long(), Ok(0.4925)),
+        (NOV_30, terra_long().tier("flex"), Ok(0.24625)),
+        (NOV_30, terra_long().tier("priority"), Ok(0.985)),
         // Haiku 5.5 above 100k in the US: 100001×$0.50×1.1.
         (NOV_30, call("claude-haiku-5-5", 100_001, 0).geo("us"), Ok(0.05500055)),
         // Gemini 2.5 Pro above 200k: 110000×$2.50 + 100000×$0.25 + 4000×$15.
