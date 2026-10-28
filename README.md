@@ -175,9 +175,15 @@ sum by (target_namespace, reason) (rate(honeybeepf_llm_llm_responses_unparsed_to
 
 The collector and Prometheus add more labels, such as `k8s_pod_name`, `k8s_node_name` and `namespace`; those name
 the agent's pod and node and the collector's namespace. `target_namespace` and `target_pod_name` name the pod
-that made the call. `target_workload_kind` and `target_workload_name` name its owner: a Deployment (through its
-ReplicaSet), a CronJob (through its Job, which needs the chart's `jobs get` permission), a StatefulSet or
-DaemonSet, or `Pod` and the pod name for a pod without an owner; `unattributed` if the owner cannot be named.
+that made the call. `target_workload_kind` and `target_workload_name` name its owner: a Deployment or an Argo
+Rollout (through its ReplicaSet), a CronJob (through its Job, which needs the chart's `jobs get` permission), a
+StatefulSet or DaemonSet, or `Pod` and the pod name for a pod without an owner; `unattributed` if the owner cannot
+be named.
+
+To compare variants of one workload (an A/B test, two versions), list pod labels in `builtinProbes.llm.podLabels`.
+Each becomes `target_pod_label_<name>` on every LLM metric, with characters other than letters, digits and `_`
+replaced by `_` (`app.kubernetes.io/version` → `target_pod_label_app_kubernetes_io_version`). A pod without the
+label gets none. Each label multiplies the series by its distinct values, so the list is empty by default.
 
 The Quickstart's Prometheus is the `honeybeepf-llm-prometheus-server` service (port 80) in the `honeybeepf`
 namespace. Tokens per minute by namespace:

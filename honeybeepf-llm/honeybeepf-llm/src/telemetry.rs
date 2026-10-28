@@ -531,6 +531,10 @@ fn push_pod_attrs(attrs: &mut Vec<KeyValue>, pod_info: Option<&std::sync::Arc<Po
         "target.workload.name",
         or_unattributed(&pod.workload_name),
     ));
+    // Only allowlisted labels: each one multiplies the series by its distinct values.
+    for (attr, value) in &pod.pod_labels {
+        attrs.push(KeyValue::new(attr.clone(), value.clone()));
+    }
 }
 
 /// Shutdown OpenTelemetry (graceful shutdown)
@@ -583,18 +587,21 @@ mod tests {
                 namespace: "team-a".to_string(),
                 workload_kind: kind.map(str::to_string),
                 workload_name: name.map(str::to_string),
+                pod_labels: vec![("target.pod.label.variant".into(), "b".into())],
             });
             let mut attrs = Vec::new();
             push_pod_attrs(&mut attrs, Some(&pod));
             let labels: Vec<_> = attrs.iter().map(|kv| kv.value.to_string()).collect();
             assert_eq!(labels[..2], ["team-a", "p-1"]);
             assert_eq!(
-                labels[2..]
+                labels[2..4]
                     .iter()
                     .map(|v| Some(v.as_str()))
                     .collect::<Vec<_>>(),
                 want
             );
+            let variant = attrs.last().map(|kv| format!("{}={}", kv.key, kv.value));
+            assert_eq!(variant.as_deref(), Some("target.pod.label.variant=b"));
         }
 
         let mut attrs = Vec::new();

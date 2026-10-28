@@ -42,6 +42,11 @@ builtinProbes:
     enabled: false
     # Also probe executables with OpenSSL built in (official Node.js builds, node: images).
     executables: true
+    # Pod labels copied onto LLM metrics as target_pod_label_<name> ("." "/" "-" become "_"), e.g. for A/B variants.
+    # Each label multiplies the series by its distinct values: list only low-cardinality labels.
+    podLabels: []
+    # Example:
+    # podLabels: ["variant", "app.kubernetes.io/version"]
     # Custom providers config (optional). Built-in: OpenAI, Anthropic, Gemini (also via Azure, Bedrock, Vertex AI)
     # Add your own providers here (e.g. Ollama, vLLM, private models); a built-in name replaces every built-in entry of that name.
     providers: []
