@@ -106,6 +106,8 @@ fn read_tokens(config: &TokenConfig, usage: &Value) -> Option<Tokens> {
         None if config.completion_optional => 0,
         None => return None,
     };
+    let prompt =
+        prompt.saturating_add(optional_count(usage, &config.extra_prompt_tokens).unwrap_or(0));
     let thoughts = optional_count(usage, &config.thoughts_tokens);
     let completion = if config.completion_excludes_thoughts {
         completion.saturating_add(thoughts.unwrap_or(0))

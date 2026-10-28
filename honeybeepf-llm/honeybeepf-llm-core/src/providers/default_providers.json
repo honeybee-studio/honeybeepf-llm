@@ -81,7 +81,7 @@
     },
     {
       "name": "gemini",
-      "note": "Hosts: Gemini API, Vertex AI global and {region}-aiplatform, Vertex AI multi-region (us, eu). Path matching is case-sensitive: the streaming method is :streamGenerateContent.",
+      "note": "Hosts: Gemini API, Vertex AI global and {region}-aiplatform, Vertex AI multi-region (us, eu). Path matching is case-sensitive: the streaming method is :streamGenerateContent. URL context and code execution results are billed as input outside promptTokenCount.",
       "hosts": [
         "generativelanguage.googleapis.com",
         "aiplatform.googleapis.com",
@@ -93,6 +93,7 @@
         "prompt_tokens": "promptTokenCount",
         "completion_tokens": "candidatesTokenCount",
         "completion_optional": true,
+        "extra_prompt_tokens": "toolUsePromptTokenCount",
         "thoughts_tokens": "thoughtsTokenCount",
         "completion_excludes_thoughts": true,
         "cache_read_tokens": "cachedContentTokenCount",

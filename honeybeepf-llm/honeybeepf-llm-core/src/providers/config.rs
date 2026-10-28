@@ -45,6 +45,9 @@ pub struct TokenConfig {
     /// Whether a missing `completion_tokens` field means 0 (Gemini leaves it out when nothing was generated)
     pub completion_optional: bool,
 
+    /// Optional: field name for input tokens counted outside `prompt_tokens`, added to the input total
+    pub extra_prompt_tokens: Option<String>,
+
     /// Optional: field name for thinking/reasoning tokens
     pub thoughts_tokens: Option<String>,
 
@@ -103,6 +106,7 @@ struct FlatResponseConfig {
     completion_tokens: String,
     #[serde(default)]
     completion_optional: bool,
+    extra_prompt_tokens: Option<String>,
     thoughts_tokens: Option<String>,
     #[serde(default)]
     completion_excludes_thoughts: bool,
@@ -128,6 +132,7 @@ impl From<FlatResponseConfig> for ResponseConfig {
                 prompt_tokens: flat.prompt_tokens,
                 completion_tokens: flat.completion_tokens,
                 completion_optional: flat.completion_optional,
+                extra_prompt_tokens: flat.extra_prompt_tokens,
                 thoughts_tokens: flat.thoughts_tokens,
                 completion_excludes_thoughts: flat.completion_excludes_thoughts,
             },
@@ -170,6 +175,7 @@ impl Default for TokenConfig {
             prompt_tokens: default_prompt_tokens(),
             completion_tokens: default_completion_tokens(),
             completion_optional: false,
+            extra_prompt_tokens: None,
             thoughts_tokens: None,
             completion_excludes_thoughts: false,
         }
