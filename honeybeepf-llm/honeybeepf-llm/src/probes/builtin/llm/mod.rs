@@ -724,6 +724,53 @@ mod tests {
         Ok(())
     }
 
+    /// Each uprobe program tail-calls into NO_PRIV_STACK, so a 6.13+ verifier gives it no per-CPU private stack.
+    #[test]
+    fn test_every_uprobe_program_has_a_tail_call() -> Result<()> {
+        use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget, SymbolKind};
+        const BPF_CALL: u8 = 0x85;
+        const BPF_FUNC_TAIL_CALL: i32 = 12;
+
+        let data = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/honeybeepf-llm"));
+        let obj = object::File::parse(data)?;
+        let (mut checked, mut without) = (0, Vec::new());
+        for sym in obj.symbols().filter(|s| s.kind() == SymbolKind::Text) {
+            let Some(index) = sym.section_index() else {
+                continue;
+            };
+            let section = obj.section_by_index(index)?;
+            let name = section.name()?;
+            if !name.starts_with("uprobe") && !name.starts_with("uretprobe") {
+                continue;
+            }
+            let start = usize::try_from(sym.address())?;
+            let end = start + usize::try_from(sym.size())?;
+            let code = section.data()?.get(start..end).unwrap_or_default();
+            // A helper call has src_reg 0; a bpf-to-bpf call has src_reg 1.
+            let tail_call = code.chunks_exact(8).any(|insn| {
+                insn[0] == BPF_CALL
+                    && insn[1] >> 4 == 0
+                    && i32::from_le_bytes([insn[4], insn[5], insn[6], insn[7]])
+                        == BPF_FUNC_TAIL_CALL
+            });
+            let uses_map = section.relocations().any(|(at, rel)| {
+                (start as u64..end as u64).contains(&at)
+                    && matches!(rel.target(), RelocationTarget::Symbol(i)
+                        if obj.symbol_by_index(i).and_then(|s| s.name()).is_ok_and(|n| n == "NO_PRIV_STACK"))
+            });
+            checked += 1;
+            if !tail_call || !uses_map {
+                without.push(sym.name()?);
+            }
+        }
+        assert!(checked > 0, "no uprobe program found in the eBPF object");
+        assert!(
+            without.is_empty(),
+            "uprobe programs without a tail call into NO_PRIV_STACK: {without:?}"
+        );
+        Ok(())
+    }
+
     #[test]
     fn test_unique_new_files_skips_missing_path() {
         let paths = vec!["/nonexistent/libssl.so.3".to_string()];
