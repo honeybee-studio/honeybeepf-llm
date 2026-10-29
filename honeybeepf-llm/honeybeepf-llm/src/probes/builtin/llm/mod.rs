@@ -778,6 +778,11 @@ mod tests {
             }
         }
         assert!(checked > 0, "no uprobe program found in the eBPF object");
+        // The loader sets this global by name and does not fail when it is missing.
+        assert!(
+            obj.symbols().any(|s| s.name() == Ok("TAIL_CALL_OK")),
+            "TAIL_CALL_OK not in the eBPF object"
+        );
         assert!(
             without.is_empty(),
             "uprobe programs without a tail call into NO_PRIV_STACK: {without:?}"

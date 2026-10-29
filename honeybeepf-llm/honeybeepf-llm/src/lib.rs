@@ -49,8 +49,9 @@ impl HoneyBeeEngine {
             "LLM probes keep the task stack (empty tail call): {}",
             tail_call_ok == 1
         );
+        // Not required to exist: test objects without the LLM programs still load.
         let mut bpf = EbpfLoader::new()
-            .set_global("TAIL_CALL_OK", &tail_call_ok, true)
+            .set_global("TAIL_CALL_OK", &tail_call_ok, false)
             .load(bytecode)?;
 
         // Initialize the eBPF Logger only in debug mode
@@ -80,6 +81,7 @@ impl HoneyBeeEngine {
     }
 
     pub async fn run(mut self) -> Result<()> {
+        let _shutdown = ShutdownOnDrop;
         if let Err(e) = telemetry::init_metrics() {
             warn!(
                 "Failed to initialize OpenTelemetry metrics: {}. Metrics will not be exported.",
@@ -136,7 +138,6 @@ impl HoneyBeeEngine {
             signal::ctrl_c().await?;
         }
 
-        request_shutdown();
         info!("Exiting...");
         Ok(())
     }
@@ -278,6 +279,15 @@ impl HoneyBeeEngine {
     }
 }
 
+/// Stops the ringbuf readers on every return from `run`: the runtime's drop waits for blocking tasks forever.
+struct ShutdownOnDrop;
+
+impl Drop for ShutdownOnDrop {
+    fn drop(&mut self) {
+        request_shutdown();
+    }
+}
+
 fn bump_memlock_rlimit() -> Result<()> {
     let rlim = libc::rlimit {
         rlim_cur: libc::RLIM_INFINITY,
@@ -298,7 +308,13 @@ fn tail_call_allowed(kernel: KernelVersion) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
     use super::*;
+    use crate::{
+        probes::POLL_INTERVAL_MS,
+        settings::{BuiltinProbes, FilesystemProbes},
+    };
 
     #[test]
     fn test_tail_call_allowed_by_kernel() {
@@ -318,5 +334,61 @@ mod tests {
                 "{version:?}"
             );
         }
+    }
+
+    /// A 64-bit little-endian BPF ELF header with no sections, which aya loads without the kernel.
+    fn empty_bpf_object() -> Vec<u8> {
+        let mut elf = vec![0x7f, b'E', b'L', b'F', 2, 1, 1];
+        elf.resize(16, 0);
+        // e_type ET_REL, e_machine EM_BPF, e_version 1; entry, offsets and flags stay 0.
+        elf.extend_from_slice(&[1, 0, 247, 0, 1, 0, 0, 0]);
+        elf.resize(52, 0);
+        // e_ehsize 64, no program headers, e_shentsize 64, no sections.
+        elf.extend_from_slice(&[64, 0, 0, 0, 0, 0, 64, 0]);
+        elf.resize(64, 0);
+        elf
+    }
+
+    // Leaves the process-wide shutdown flag set; no other test in this binary reads it.
+    #[test]
+    fn test_startup_error_stops_blocking_readers() {
+        let settings = Settings {
+            builtin_probes: BuiltinProbes {
+                // The object has no file access program, so attaching it fails inside run().
+                filesystem: FilesystemProbes {
+                    file_access: Some(true),
+                    watched_paths: Some(vec!["/etc".into()]),
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let engine =
+            HoneyBeeEngine::new(settings, &empty_bpf_object()).expect("empty object loads");
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+        let result = rt.block_on(async {
+            let shutdown = shutdown_flag();
+            // The loop shape of spawn_ringbuf_handler, which needs a kernel ringbuf map.
+            tokio::task::spawn_blocking(move || {
+                while !shutdown.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
+                }
+            });
+            engine.run().await
+        });
+        let err = result.expect_err("attaching the file access probe fails");
+        assert!(format!("{err:#}").contains("WATCHED_PATHS"), "{err:#}");
+
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            drop(rt);
+            let _ = done_tx.send(());
+        });
+        // Generous: with a kubeconfig, the pod watcher's DNS lookup also runs on a blocking thread.
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(30)).is_ok(),
+            "runtime drop is still waiting on the reader loop"
+        );
     }
 }
