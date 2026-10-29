@@ -747,7 +747,8 @@ mod tests {
             let end = start + usize::try_from(sym.size())?;
             let code = section.data()?.get(start..end).unwrap_or_default();
             // A helper call has src_reg 0; a bpf-to-bpf call has src_reg 1.
-            let tail_call = code.chunks_exact(8).any(|insn| {
+            let (insns, _) = code.as_chunks::<8>();
+            let tail_call = insns.iter().any(|insn| {
                 insn[0] == BPF_CALL
                     && insn[1] >> 4 == 0
                     && i32::from_le_bytes([insn[4], insn[5], insn[6], insn[7]])
