@@ -23,7 +23,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 #[cfg(feature = "k8s")]
-use crate::k8s::PodInfo;
+use crate::k8s::{PodInfo, UNATTRIBUTED};
 
 /// Metric export interval in seconds
 const METRIC_EXPORT_INTERVAL_SECS: u64 = 30;
@@ -55,7 +55,7 @@ pub struct HoneyBeeMetrics {
     pub network_latency_ns: Histogram<u64>,
     pub gpu_open_events: Counter<u64>,
     pub process_exit_total: Counter<u64>,
-    pub process_lifetime_seconds: Histogram<u64>,
+    pub process_lifetime_seconds: Histogram<f64>,
     pub file_access_events: Counter<u64>,
     pub llm_requests_total: Counter<u64>,
     pub llm_tokens_total: Counter<u64>,
@@ -103,7 +103,7 @@ impl HoneyBeeMetrics {
                 .with_description("Total number of process exits")
                 .build(),
             process_lifetime_seconds: meter
-                .u64_histogram("process_lifetime_seconds")
+                .f64_histogram("process_lifetime_seconds")
                 .with_description("Process lifetime in seconds")
                 .with_unit("s")
                 .build(),
@@ -166,7 +166,7 @@ impl HoneyBeeMetrics {
                 )
                 .with_unit("tokens")
                 .build(),
-            prices: load_prices(),
+            prices: load_prices(custom_prices().as_deref()),
         }
     }
 
@@ -246,27 +246,49 @@ impl HoneyBeeMetrics {
     }
 }
 
-/// Load the built-in price table; if it is rejected the agent runs on without cost metrics.
-fn load_prices() -> Option<(PriceTable, KeyValue)> {
-    match PriceTable::builtin() {
-        Ok(table) => {
-            for s in table.sources() {
-                info!(
-                    "Price table {}: {} prices from {} (checked {})",
-                    table.version(),
-                    s.provider,
-                    s.url,
-                    s.checked
-                );
-            }
-            let version = KeyValue::new("price_table_version", Arc::<str>::from(table.version()));
-            Some((table, version))
-        }
-        Err(e) => {
-            log::warn!("Built-in price table rejected, LLM cost not recorded: {e}");
-            None
+/// A user price file from `LLM_PRICES_CONFIG_FILE`, else inline JSON in `LLM_PRICES_CONFIG` (chart).
+fn custom_prices() -> Option<String> {
+    if let Ok(path) = std::env::var("LLM_PRICES_CONFIG_FILE") {
+        match std::fs::read_to_string(&path) {
+            Ok(json) => return Some(json),
+            Err(e) => log::warn!("Custom price file {path} not read: {e}"),
         }
     }
+    std::env::var("LLM_PRICES_CONFIG")
+        .ok()
+        .filter(|json| !json.is_empty())
+}
+
+/// Load the built-in price table and merge user prices over it; a rejected user file keeps the built-in one.
+fn load_prices(custom: Option<&str>) -> Option<(PriceTable, KeyValue)> {
+    let mut table = match PriceTable::builtin() {
+        Ok(table) => table,
+        Err(e) => {
+            log::warn!("Built-in price table rejected, LLM cost not recorded: {e}");
+            return None;
+        }
+    };
+    if let Some(json) = custom {
+        match table.merge_custom(json) {
+            Ok(o) => info!(
+                "Custom prices: replaced [{}], added [{}]",
+                o.replaced.join(", "),
+                o.added.join(", ")
+            ),
+            Err(e) => log::warn!("Custom price table rejected, using built-in prices only: {e}"),
+        }
+    }
+    for s in table.sources() {
+        info!(
+            "Price table {}: {} prices from {} (checked {})",
+            table.version(),
+            s.provider,
+            s.url,
+            s.checked
+        );
+    }
+    let version = KeyValue::new("price_table_version", Arc::<str>::from(table.version()));
+    Some((table, version))
 }
 
 /// Priority:
@@ -421,10 +443,7 @@ pub fn record_llm_request(
 
         // Only add pod info if k8s feature is enabled
         #[cfg(feature = "k8s")]
-        if let Some(pod) = pod_info {
-            attrs.push(KeyValue::new("target.namespace", pod.namespace.clone()));
-            attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
-        }
+        push_pod_attrs(&mut attrs, pod_info);
 
         m.record_llm(usage, latency_secs, is_error, attrs);
     }
@@ -440,13 +459,30 @@ pub fn record_llm_unparsed(
         let mut attrs = Vec::new();
 
         #[cfg(feature = "k8s")]
-        if let Some(pod) = pod_info {
-            attrs.push(KeyValue::new("target.namespace", pod.namespace.clone()));
-            attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
-        }
+        push_pod_attrs(&mut attrs, pod_info);
 
         m.record_unparsed(reason, attrs);
     }
+}
+
+/// Target labels of an LLM call; the workload is a function of the pod, so it adds no series.
+#[cfg(feature = "k8s")]
+fn push_pod_attrs(attrs: &mut Vec<KeyValue>, pod_info: Option<&std::sync::Arc<PodInfo>>) {
+    let Some(pod) = pod_info else { return };
+    let or_unattributed = |v: &Option<String>| {
+        let v = v.as_deref().filter(|s| !s.is_empty());
+        v.unwrap_or(UNATTRIBUTED).to_string()
+    };
+    attrs.push(KeyValue::new("target.namespace", pod.namespace.clone()));
+    attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
+    attrs.push(KeyValue::new(
+        "target.workload.kind",
+        or_unattributed(&pod.workload_kind),
+    ));
+    attrs.push(KeyValue::new(
+        "target.workload.name",
+        or_unattributed(&pod.workload_name),
+    ));
 }
 
 /// Shutdown OpenTelemetry (graceful shutdown)
@@ -462,7 +498,7 @@ pub fn shutdown_metrics() {
     }
 }
 
-pub fn record_process_exit(cause: &str, exit_code: u32, lifetime_secs: u64, cgroup_id: u64) {
+pub fn record_process_exit(cause: &str, exit_code: u32, lifetime_secs: f64, cgroup_id: u64) {
     if let Some(m) = metrics() {
         let attrs = [
             KeyValue::new("cause", cause.to_string()),
@@ -484,6 +520,39 @@ mod tests {
         InstrumentKind, ManualReader, MetricResult, Pipeline, Temporality,
     };
     use serial_test::serial;
+
+    #[cfg(feature = "k8s")]
+    #[test]
+    fn test_pod_attrs_never_leave_workload_empty() {
+        let un = Some(UNATTRIBUTED);
+        for (kind, name, want) in [
+            (Some("CronJob"), Some("r"), [Some("CronJob"), Some("r")]),
+            (None, None, [un, un]),
+            (Some(""), Some(""), [un, un]),
+        ] {
+            let pod = Arc::new(PodInfo {
+                pod_name: "p-1".to_string(),
+                namespace: "team-a".to_string(),
+                workload_kind: kind.map(str::to_string),
+                workload_name: name.map(str::to_string),
+            });
+            let mut attrs = Vec::new();
+            push_pod_attrs(&mut attrs, Some(&pod));
+            let labels: Vec<_> = attrs.iter().map(|kv| kv.value.to_string()).collect();
+            assert_eq!(labels[..2], ["team-a", "p-1"]);
+            assert_eq!(
+                labels[2..]
+                    .iter()
+                    .map(|v| Some(v.as_str()))
+                    .collect::<Vec<_>>(),
+                want
+            );
+        }
+
+        let mut attrs = Vec::new();
+        push_pod_attrs(&mut attrs, None);
+        assert!(attrs.is_empty());
+    }
 
     #[test]
     #[serial]
@@ -743,7 +812,7 @@ mod tests {
             ]
         );
         assert!(cost.data_points.iter().all(|p| {
-            label(&p.attributes, "price_table_version").as_deref() == Some("2026-10-26")
+            label(&p.attributes, "price_table_version").as_deref() == Some("2026-10-28")
         }));
         let unpriced = find("llm_unpriced_tokens_total")?
             .data
@@ -757,5 +826,15 @@ mod tests {
             .collect();
         assert_eq!(points, [(kind("unknown_model"), 42)]);
         Ok(())
+    }
+
+    #[test]
+    fn custom_prices_merge_over_the_builtin_table_or_are_ignored() {
+        let json = r#"{"version": "acme", "providers": [{"name": "vllm", "source": "s",
+            "checked": "2026-10-01", "models": {"my-vllm-llama": {"input": 1}}}]}"#;
+        let version = |custom| load_prices(custom).map(|(_, v)| v.value.to_string());
+        let builtin = version(None).expect("built-in table loads");
+        assert_eq!(version(Some("{")), Some(builtin.clone()));
+        assert!(version(Some(json)).is_some_and(|v| v.starts_with(&format!("{builtin}+custom-"))));
     }
 }

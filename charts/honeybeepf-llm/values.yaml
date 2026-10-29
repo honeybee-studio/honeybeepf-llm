@@ -43,7 +43,7 @@ builtinProbes:
     # Also probe executables with OpenSSL built in (official Node.js builds, node: images).
     executables: true
     # Custom providers config (optional). Built-in: OpenAI, Anthropic, Gemini (also via Azure, Bedrock, Vertex AI)
-    # Add your own providers here (e.g. Ollama, vLLM, private models).
+    # Add your own providers here (e.g. Ollama, vLLM, private models); a built-in name replaces every built-in entry of that name.
     providers: []
     # Example:
     # providers:
@@ -56,6 +56,25 @@ builtinProbes:
     #       completion_tokens: "eval_count"    # Field name for output tokens
     #       model_path: "model"
     #     request_extractor: "messages"       # How to extract prompt text (messages, contents, prompt, input)
+    # Price overrides (optional), in the format of honeybeepf-llm-core/src/prices.json, merged per model.
+    # "price_multiplier" multiplies the provider's built-in prices (0.8 = pay 80%), not models listed here.
+    # A rejected file is logged and ignored. Prices are read at startup: restart the DaemonSet.
+    prices: {}
+    # Example (USD per million tokens):
+    # prices:
+    #   version: "acme-2026-10"
+    #   providers:
+    #     - name: "openai"
+    #       source: "our contract"
+    #       checked: "2026-10-01"
+    #       price_multiplier: 0.8
+    #       models:
+    #         gpt-5: {input: 1.0, output: 8.0, cache_read: 0.1}
+    #     - name: "vllm"
+    #       source: "internal"
+    #       checked: "2026-10-01"
+    #       models:
+    #         my-vllm-llama: {input: 0.1, output: 0.2}
 
   interval: 1000
 
@@ -68,15 +87,16 @@ customProbes:
   tracepoints: []
 
 securityContext:
-  readOnlyRootFilesystem: false
+  readOnlyRootFilesystem: true
+  seccompProfile:
+    type: RuntimeDefault
   capabilities:
     drop:
       - ALL
     add:
-      - BPF
-      - NET_ADMIN
-      - PERFMON
-      - SYS_ADMIN   # Ubuntu perf_event_paranoid=4 workaround; not needed on Jammy >=5.15.0-165 / Noble >=6.8.0-91 (https://bugs.launchpad.net/ubuntu/+source/linux/+bug/2131046)
+      - BPF         # load eBPF programs and maps
+      - PERFMON     # uprobe/tracepoint/fentry attach and bpf_probe_read_user
+      - SYS_ADMIN   # uprobe perf_event_open: Ubuntu 7.0 denies it with PERFMON alone (EACCES at paranoid 2-4; https://bugs.launchpad.net/ubuntu/+source/linux/+bug/2131046)
       - SYS_PTRACE  # cross-pod /proc access for libssl discovery (blocked by container LSM profiles + yama on all major K8s distros)
 
 resources:

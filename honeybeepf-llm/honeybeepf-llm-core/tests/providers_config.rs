@@ -30,6 +30,46 @@ fn test_default_providers() {
     assert_eq!(registry.providers.len(), 6);
 }
 
+// `with_defaults` falls back to an empty list and serde skips unknown keys, so a typo would go unnoticed.
+#[test]
+fn test_default_providers_json_parses_with_known_keys_only() {
+    let json = include_str!("../src/providers/default_providers.json");
+    ProviderRegistry::from_json(json).unwrap();
+
+    let provider_keys = "name note hosts paths response request_extractor";
+    let response_keys = "usage_path prompt_tokens completion_tokens completion_optional extra_prompt_tokens thoughts_tokens \
+        completion_excludes_thoughts cache_read_tokens cache_write_tokens cache_write_long_ttl_tokens \
+        speed inference_geo prompt_excludes_cache required_field model_path service_tier_path";
+    let file: serde_json::Value = serde_json::from_str(json).unwrap();
+    for provider in file["providers"].as_array().unwrap() {
+        let name = &provider["name"];
+        for key in provider.as_object().unwrap().keys() {
+            let known = provider_keys.split_whitespace().any(|k| k == key);
+            assert!(known, "{name}: {key}");
+        }
+        for key in provider["response"].as_object().unwrap().keys() {
+            let known = response_keys.split_whitespace().any(|k| k == key);
+            assert!(known, "{name}: response.{key}");
+        }
+    }
+}
+
+// Claude on Vertex AI returns the Anthropic body, so its copy of the response block must not drift.
+#[test]
+fn test_vertex_claude_reads_usage_like_anthropic() {
+    let registry = ProviderRegistry::with_defaults();
+    let anthropic: Vec<_> = registry
+        .providers
+        .iter()
+        .filter(|p| p.name == "anthropic")
+        .collect();
+    assert_eq!(anthropic.len(), 2);
+    assert_eq!(
+        format!("{:?}", anthropic[0].response),
+        format!("{:?}", anthropic[1].response)
+    );
+}
+
 #[test]
 fn test_default_provider_hosts() {
     let openai = [
@@ -159,11 +199,11 @@ fn test_find_provider_foundry_host_split_by_path() {
     let anthropic = registry
         .find_provider("myres.services.ai.azure.com", "/anthropic/v1/messages")
         .unwrap();
-    assert!(anthropic.response.prompt_excludes_cache);
+    assert!(anthropic.response.cache.prompt_excludes_cache);
     let openai = registry
         .find_provider("myres.services.ai.azure.com", "/openai/v1/chat/completions")
         .unwrap();
-    assert!(!openai.response.prompt_excludes_cache);
+    assert!(!openai.response.cache.prompt_excludes_cache);
 }
 
 #[test]
@@ -223,6 +263,84 @@ fn test_custom_provider_json() {
     let registry = ProviderRegistry::from_json(json).unwrap();
     assert_eq!(registry.providers.len(), 1);
     assert_eq!(registry.providers[0].name, "my-llm");
+}
+
+fn names(registry: &ProviderRegistry) -> Vec<&str> {
+    registry.providers.iter().map(|p| p.name.as_str()).collect()
+}
+
+#[test]
+fn test_user_providers_are_added_to_the_defaults() {
+    let user = r#"{"providers": [
+        {"name": "ollama", "hosts": ["ollama.internal"], "paths": ["/api/chat$"]},
+        {"name": "vllm", "hosts": ["vllm.internal"], "paths": ["/v1/chat/completions$"]}
+    ]}"#;
+    let registry =
+        ProviderRegistry::with_defaults().merge(ProviderRegistry::from_json(user).unwrap());
+    assert_eq!(
+        names(&registry),
+        [
+            "openai",
+            "openai",
+            "anthropic",
+            "gemini",
+            "anthropic",
+            "bedrock",
+            "ollama",
+            "vllm"
+        ]
+    );
+    assert_eq!(
+        provider_for(&registry, "api.openai.com/v1/chat/completions").as_deref(),
+        Some("openai")
+    );
+    assert_eq!(
+        provider_for(&registry, "ollama.internal/api/chat").as_deref(),
+        Some("ollama")
+    );
+
+    let empty = ProviderRegistry::from_json(r#"{"providers": []}"#).unwrap();
+    assert_eq!(
+        names(&ProviderRegistry::with_defaults().merge(empty)),
+        names(&ProviderRegistry::with_defaults())
+    );
+}
+
+// Usage parsing tries providers in order, so a replacement keeps the place of the defaults it replaces.
+#[test]
+fn test_user_provider_replaces_defaults_with_its_name_in_their_place() {
+    let user = r#"{"providers": [
+        {"name": "anthropic", "hosts": ["claude.proxy.internal"], "paths": ["/v1/messages$"]},
+        {"name": "ollama", "hosts": ["ollama.internal"]},
+        {"name": "anthropic", "hosts": ["claude.proxy.internal"], "paths": [":rawPredict$"]}
+    ]}"#;
+    let registry =
+        ProviderRegistry::with_defaults().merge(ProviderRegistry::from_json(user).unwrap());
+    assert_eq!(
+        names(&registry),
+        [
+            "openai",
+            "openai",
+            "anthropic",
+            "anthropic",
+            "gemini",
+            "bedrock",
+            "ollama"
+        ]
+    );
+    assert_eq!(registry.providers[3].paths, [":rawPredict$"]);
+    assert_eq!(
+        provider_for(&registry, "api.anthropic.com/v1/messages"),
+        None
+    );
+    assert_eq!(
+        provider_for(&registry, "claude.proxy.internal/v1/messages").as_deref(),
+        Some("anthropic")
+    );
+    assert_eq!(
+        provider_for(&registry, "api.openai.com/v1/responses").as_deref(),
+        Some("openai")
+    );
 }
 
 #[test]

@@ -495,22 +495,95 @@ fn h1_response_of_size(total: usize) -> Vec<Vec<u8>> {
     }
 }
 
+/// A chat completion with `before` bytes of text ahead of its usage and `after` bytes behind it.
+fn chat_json(before: usize, after: usize) -> Vec<u8> {
+    let (x, y) = ("x".repeat(before), "y".repeat(after));
+    format!(r#"{{"model":"gpt-4o","choices":[{{"message":{{"content":"{x}"}}}}],"usage":{{"prompt_tokens":11,"completion_tokens":4}},"id":"{y}"}}"#).into_bytes()
+}
+
+/// The response in 16 KB reads; chunked in 8191-byte chunks, so chunks and reads never line up.
+fn h1_reads(headers: &str, body: &[u8]) -> Vec<Vec<u8>> {
+    let headers = headers.replace("{len}", &body.len().to_string());
+    let mut framed = Vec::with_capacity(body.len() * 2);
+    if headers.contains("chunked") {
+        for c in body.chunks(8191) {
+            framed.extend_from_slice(format!("{:x}\r\n", c.len()).as_bytes());
+            framed.extend_from_slice(c);
+            framed.extend_from_slice(b"\r\n");
+        }
+        framed.extend_from_slice(b"0\r\n\r\n");
+    } else {
+        framed.extend_from_slice(body);
+    }
+    let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{headers}\r\n\r\n");
+    let mut reads = vec![head.into_bytes()];
+    reads.extend(framed.chunks(16384).map(<[u8]>::to_vec));
+    reads
+}
+
 #[test]
-fn test_response_over_buffer_limit_is_unparsed() {
-    let too_large = [UnparsedReason::ResponseTooLarge];
-    for (total, want) in [
-        (MAX_RESPONSE_BUFFER_SIZE, &[][..]),
-        (MAX_RESPONSE_BUFFER_SIZE + 1, &too_large),
-        (MAX_RESPONSE_BUFFER_SIZE + 100_000, &too_large),
-    ] {
+fn test_response_over_buffer_limit_without_usage_at_its_ends_is_unparsed() {
+    let size = MAX_RESPONSE_BUFFER_SIZE + (1 << 20);
+    let middle = chat_json(size / 2, size / 2);
+    // Never decoded: an encoded body is dropped as soon as it passes the limit.
+    let encoded = chat_json(size, 0);
+    for (n, reads) in [
+        h1_reads("Content-Length: {len}", &middle),
+        h1_reads("Transfer-Encoding: chunked", &middle),
+        h1_reads("Content-Encoding: gzip\r\nContent-Length: {len}", &encoded),
+        h1_reads("Connection: close", &encoded),
+        openai_sse_reads(100_000),
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert!(reads.iter().map(Vec::len).sum::<usize>() > MAX_RESPONSE_BUFFER_SIZE);
         let mut p = StreamProcessor::new();
-        let out = outcomes(&mut p, &h1_response_of_size(total), None);
-        assert_eq!(unparsed(&out), want, "{total}");
-        assert_eq!(count(&out, Outcome::Recorded), 1 - want.len(), "{total}");
+        let mut out = outcomes(&mut p, reads, None);
+        out.extend(outcomes(&mut p, &h1_response(3000), None));
+        assert_eq!(unparsed(&out), [UnparsedReason::ResponseTooLarge], "{n}");
+        assert_eq!(count(&out, Outcome::Recorded), 1, "{n}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{n}");
+    }
+}
+
+#[test]
+fn test_json_response_over_buffer_limit_is_recorded() {
+    let mut cases = vec![
+        h1_response_of_size(MAX_RESPONSE_BUFFER_SIZE),
+        h1_response_of_size(MAX_RESPONSE_BUFFER_SIZE + 1),
+    ];
+    for body_len in [20 << 20, 40 << 20] {
+        let body = chat_json(body_len, 0);
+        cases.push(h1_reads("Content-Length: {len}", &body));
+        cases.push(h1_reads("Transfer-Encoding: chunked", &body));
+    }
+    for reads in cases {
+        let total: usize = reads.iter().map(Vec::len).sum();
+        let mut p = StreamProcessor::new();
+        let out = outcomes(&mut p, &reads, None);
+        assert!(unparsed(&out).is_empty(), "{total}: {out:?}");
+        assert_eq!(count(&out, Outcome::Recorded), 1, "{total}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{total}");
+        // Past the limit only the two ends are kept, whatever the size.
+        assert!(total <= MAX_RESPONSE_BUFFER_SIZE || p.read_buf.capacity() == 0);
 
         let next = outcomes(&mut p, &h1_response(3000), None);
         assert_eq!(next.last(), Some(&Outcome::Recorded), "{total}: {next:?}");
     }
+}
+
+#[test]
+fn test_json_response_over_buffer_limit_missing_a_read_ends_at_the_next_request() {
+    // A whole read lost before the ringbuf (no gap seen): the length walk never reaches 0 on its own.
+    let mut reads = h1_reads("Content-Length: {len}", &chat_json(20 << 20, 0));
+    reads.remove(reads.len() - 10);
+    let mut p = StreamProcessor::new();
+    let mut out = outcomes(&mut p, &reads, None);
+    out.extend(outcomes(&mut p, &h1_response(3000), None));
+    out.extend(outcomes(&mut p, &h1_response(3000), None));
+    assert_eq!(unparsed(&out), [UnparsedReason::NextRequest], "{out:?}");
+    assert_eq!(count(&out, Outcome::Recorded), 2);
 }
 
 #[test]
@@ -580,6 +653,72 @@ fn test_stream_after_a_lost_fragment_is_parsed_from_its_own_start() {
     out.extend(outcomes(&mut p, &[short.to_vec()], None));
     assert_eq!(unparsed(&out), [UnparsedReason::CaptureLost], "{out:?}");
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+}
+
+#[test]
+fn test_call_after_a_lost_response_head_read_is_recorded() {
+    // Whole SSL_reads lost in the kernel leave no gap in the fragment offsets.
+    let mut short_first_read = h1_response(3000);
+    let head = short_first_read.remove(0);
+    short_first_read.splice(0..0, [head[..5].to_vec(), head[5..].to_vec()]);
+    for (n, (mut reads, lost)) in [
+        (h1_response(3000), 0),
+        (h1_response(40000), 0),
+        (openai_sse_reads(5), 0),
+        (vec![h1("application/json", MESSAGES_RESPONSE)], 0),
+        // `HTTP/` alone passes as a status line; the request head after it shows the loss.
+        (short_first_read, 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        reads.remove(lost);
+        let mut p = StreamProcessor::new();
+        let mut out = outcomes(&mut p, &h1_response(3000), None);
+        out.extend(outcomes(&mut p, &reads, None));
+        out.extend(outcomes(&mut p, &h1_response(3000), None));
+        assert_eq!(
+            unparsed(&out),
+            [UnparsedReason::CaptureLost],
+            "{n}: {out:?}"
+        );
+        assert_eq!(count(&out, Outcome::Recorded), 2, "{n}: {out:?}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{n}: {out:?}");
+    }
+}
+
+#[test]
+fn test_first_read_of_partial_status_line_is_recorded() {
+    for split in 1..=8 {
+        let mut reads = h1_response(3000);
+        let head = reads.remove(0);
+        reads.splice(0..0, [head[..split].to_vec(), head[split..].to_vec()]);
+        let mut p = StreamProcessor::new();
+        let out = outcomes(&mut p, &reads, None);
+        assert!(unparsed(&out).is_empty(), "{split}: {out:?}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{split}: {out:?}");
+    }
+}
+
+#[test]
+fn test_response_after_empty_lines_is_recorded() {
+    let ok = h1("application/json", MESSAGES_RESPONSE);
+    for lead in [&b"\r\n"[..], b"\n", b"\r\n\r\n"] {
+        let mut p = StreamProcessor::new();
+        let mut out = send(&mut p, LlmDirection::Write, MESSAGES_REQUEST, None);
+        out.extend(send(
+            &mut p,
+            LlmDirection::Read,
+            &[lead, &ok].concat(),
+            None,
+        ));
+        // The empty line in a read of its own, as a server that ends the previous response with it.
+        out.extend(send(&mut p, LlmDirection::Write, MESSAGES_REQUEST, None));
+        out.extend(send(&mut p, LlmDirection::Read, lead, None));
+        out.extend(send(&mut p, LlmDirection::Read, &ok, None));
+        assert!(unparsed(&out).is_empty(), "{lead:?}: {out:?}");
+        assert_eq!(count(&out, Outcome::Recorded), 2, "{lead:?}: {out:?}");
+    }
 }
 
 fn fastest(mut run: impl FnMut()) -> std::time::Duration {

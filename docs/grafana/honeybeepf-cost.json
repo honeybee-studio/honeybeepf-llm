@@ -649,8 +649,8 @@
       "panels": []
     },
     {
-      "title": "Token Usage by Pod / min",
-      "description": "Self-hosted LLM — token usage per pod (GPU capacity planning)",
+      "title": "Token Usage by Workload / min",
+      "description": "Self-hosted LLM — token usage per workload (GPU capacity planning); pick a Workload or Pod above to drill down",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -699,16 +699,16 @@
       },
       "targets": [
         {
-          "expr": "sum by (target_namespace, target_pod_name) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
+          "expr": "sum by (target_namespace, target_workload_kind, target_workload_name) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
           "interval": "1m",
-          "legendFormat": "{{ target_namespace }} / {{ target_pod_name }}",
+          "legendFormat": "{{ target_namespace }} / {{ target_workload_name }} ({{ target_workload_kind }})",
           "refId": "A"
         }
       ]
     },
     {
-      "title": "Latency by Pod / p95",
-      "description": "Self-hosted LLM — latency per pod (rises under GPU contention)",
+      "title": "Latency by Workload / p95",
+      "description": "Self-hosted LLM — latency per workload (rises under GPU contention)",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -752,16 +752,16 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (target_namespace, target_pod_name, le) (rate(honeybeepf_llm_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (target_namespace, target_workload_kind, target_workload_name, le) (rate(honeybeepf_llm_llm_latency_seconds_bucket{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])))",
           "interval": "1m",
-          "legendFormat": "{{ target_namespace }} / {{ target_pod_name }}",
+          "legendFormat": "{{ target_namespace }} / {{ target_workload_name }} ({{ target_workload_kind }})",
           "refId": "A"
         }
       ]
     },
     {
-      "title": "Top 10 Pods by Token Usage (5m)",
-      "description": "Self-hosted LLM — top pods by token usage",
+      "title": "Top 10 Workloads by Token Usage (5m)",
+      "description": "Self-hosted LLM — top workloads by token usage",
       "type": "bargauge",
       "datasource": {
         "type": "prometheus",
@@ -813,8 +813,8 @@
       },
       "targets": [
         {
-          "expr": "topk(10, sum by (target_namespace, target_pod_name) (increase(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[5m])))",
-          "legendFormat": "{{ target_namespace }} / {{ target_pod_name }}",
+          "expr": "topk(10, sum by (target_namespace, target_workload_kind, target_workload_name) (increase(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[5m])))",
+          "legendFormat": "{{ target_namespace }} / {{ target_workload_name }} ({{ target_workload_kind }})",
           "refId": "A"
         }
       ]
@@ -885,14 +885,41 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\"}, target_pod_name)",
+        "allValue": ".*",
+        "definition": "label_values(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\"}, target_workload_name)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Workload",
+        "multi": true,
+        "name": "workload",
+        "options": [],
+        "query": "label_values(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\"}, target_workload_name)",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\", target_workload_name=~\"$workload\"}, target_pod_name)",
         "hide": 0,
         "includeAll": true,
         "label": "Pod",
         "multi": true,
         "name": "pod",
         "options": [],
-        "query": "label_values(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\"}, target_pod_name)",
+        "query": "label_values(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\", target_workload_name=~\"$workload\"}, target_pod_name)",
         "refresh": 2,
         "sort": 1,
         "type": "query"

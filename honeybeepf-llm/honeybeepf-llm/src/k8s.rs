@@ -7,22 +7,29 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, RwLock, atomic::Ordering},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::{batch::v1::Job, core::v1::Pod};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use kube::{Api, Client, runtime::watcher};
-use log::warn;
+use log::{debug, warn};
+
+/// Workload label value for a pod whose owner cannot be named.
+pub const UNATTRIBUTED: &str = "unattributed";
 
 /// Kubernetes pod identity resolved from a PID/cgroup_id.
 #[derive(Debug, Clone)]
 pub struct PodInfo {
     pub pod_name: String,
     pub namespace: String,
-    /// Owner kind: "Deployment", "StatefulSet", "DaemonSet", "Job", etc.
+    /// Owner kind: "Deployment", "CronJob", "StatefulSet", "Pod" (no owner), etc.; None if unresolvable.
     pub workload_kind: Option<String>,
     /// Owner name, e.g. "my-app" (Deployment name).
     pub workload_name: Option<String>,
@@ -120,6 +127,7 @@ impl PodResolver {
             .await
             .context("Failed to create K8s client (not running in cluster?)")?;
 
+        let jobs_client = client.clone();
         // Pods are namespaced resources, but we want to watch across all namespaces on this node.
         // Therefore, we use Api::all() to get cluster-wide visibility.
         let api: Api<Pod> = Api::all(client);
@@ -137,10 +145,11 @@ impl PodResolver {
             while let Some(event) = stream.next().await {
                 match event {
                     Ok(watcher::Event::Apply(pod) | watcher::Event::InitApply(pod)) => {
-                        resolver.apply_pod_event(&pod, false);
+                        let cronjob = resolver.lookup_cronjob(&jobs_client, &pod).await;
+                        resolver.apply_pod_event(&pod, false, cronjob);
                     }
                     Ok(watcher::Event::Delete(pod)) => {
-                        resolver.apply_pod_event(&pod, true);
+                        resolver.apply_pod_event(&pod, true, None);
                     }
                     Ok(watcher::Event::Init | watcher::Event::InitDone) => {}
                     Err(e) => {
@@ -159,8 +168,39 @@ impl PodResolver {
         Ok(handle)
     }
 
+    async fn lookup_cronjob(&self, client: &Client, pod: &Pod) -> Option<String> {
+        let (namespace, job) = self.unresolved_job(pod)?;
+        cronjob_of(client, namespace, job).await
+    }
+
+    /// Namespace and Job name of a Job pod not yet stored with its CronJob.
+    fn unresolved_job<'a>(&self, pod: &'a Pod) -> Option<(&'a str, &'a str)> {
+        let owner = controller_owner(&pod.metadata)
+            .filter(|o| o.kind == "Job" && o.api_version.starts_with("batch/"))?;
+        // Pending pods have no container IDs and so no store entry to fill.
+        if extract_container_ids_from_pod(pod).is_empty() {
+            return None;
+        }
+        // Stored as a Job: no CronJob owner, or the last lookup failed; ask again.
+        let stored = self.stored_info(&pod.metadata);
+        if stored.is_some_and(|i| i.workload_kind.as_deref() != Some("Job")) {
+            return None;
+        }
+        Some((pod.metadata.namespace.as_deref()?, owner.name.as_str()))
+    }
+
+    /// Stored info of the same pod, also under an earlier container ID after a restart.
+    fn stored_info(&self, metadata: &ObjectMeta) -> Option<Arc<PodInfo>> {
+        let (name, namespace) = (metadata.name.as_deref()?, metadata.namespace.as_deref()?);
+        let store = self.pod_store.read().ok()?;
+        store
+            .values()
+            .find(|i| i.pod_name == name && i.namespace == namespace)
+            .cloned()
+    }
+
     /// Process a pod event from the K8s API watcher.
-    fn apply_pod_event(&self, pod: &Pod, is_delete: bool) {
+    fn apply_pod_event(&self, pod: &Pod, is_delete: bool, cronjob: Option<String>) {
         let metadata = &pod.metadata;
         let pod_name = match &metadata.name {
             Some(n) => n.clone(),
@@ -198,30 +238,11 @@ impl PodResolver {
                     }
                 }
             }
-            // Extract workload info from ownerReferences
-            let (workload_kind, workload_name) = metadata
-                .owner_references
-                .as_ref()
-                .and_then(|refs| refs.first())
-                .map(|owner| {
-                    if owner.kind == "ReplicaSet" {
-                        // ReplicaSet is owned by Deployment; strip the hash suffix.
-                        // "my-app-7d4b8c9f5" → "my-app"
-                        // Note: This strips one suffix segment, which works for standard Deployment-generated
-                        // RS names, but could misfire for custom names like "my-app-v2-7d4b8c9f5" -> "my-app-v2".
-                        // True resolution would require following the ownerReferences chain up to Deployment.
-                        let name = owner
-                            .name
-                            .rsplit_once('-')
-                            .map(|(prefix, _)| prefix.to_string())
-                            .unwrap_or_else(|| owner.name.clone());
-                        ("Deployment".to_string(), name)
-                    } else {
-                        (owner.kind.clone(), owner.name.clone())
-                    }
-                })
-                .map(|(k, n)| (Some(k), Some(n)))
-                .unwrap_or((None, None));
+            // A pod's owner does not change: keep the stored workload unless a lookup just found the CronJob.
+            let (workload_kind, workload_name) = match (cronjob, self.stored_info(metadata)) {
+                (None, Some(prev)) => (prev.workload_kind.clone(), prev.workload_name.clone()),
+                (cronjob, _) => workload_of(metadata, cronjob).unzip(),
+            };
 
             let info = Arc::new(PodInfo {
                 pod_name,
@@ -282,6 +303,66 @@ impl PodResolver {
 /// returns a unique ID per container; on v1, it always returns 1 (root).
 fn detect_cgroup_v2() -> bool {
     std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists()
+}
+
+fn controller_owner(metadata: &ObjectMeta) -> Option<&OwnerReference> {
+    let refs = metadata.owner_references.as_ref()?;
+    refs.iter()
+        .find(|r| r.controller == Some(true))
+        .or_else(|| refs.first())
+}
+
+/// Owning workload (kind, name) of a pod; `cronjob` is the owner of its Job, if looked up.
+fn workload_of(metadata: &ObjectMeta, cronjob: Option<String>) -> Option<(String, String)> {
+    let Some(owner) = controller_owner(metadata) else {
+        return Some(("Pod".to_string(), metadata.name.clone()?));
+    };
+    if owner.kind.is_empty() || owner.name.is_empty() {
+        return None;
+    }
+    let workload = match owner.kind.as_str() {
+        // A Deployment names its ReplicaSets "<deployment>-<pod-template-hash>".
+        "ReplicaSet" => match metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get("pod-template-hash"))
+            .and_then(|hash| owner.name.strip_suffix(hash.as_str())?.strip_suffix('-'))
+            .filter(|d| !d.is_empty())
+        {
+            Some(deployment) => ("Deployment".to_string(), deployment.to_string()),
+            None => (owner.kind.clone(), owner.name.clone()),
+        },
+        "Job" => match cronjob {
+            Some(cronjob) => ("CronJob".to_string(), cronjob),
+            None => (owner.kind.clone(), owner.name.clone()),
+        },
+        _ => (owner.kind.clone(), owner.name.clone()),
+    };
+    Some(workload)
+}
+
+/// Name of the CronJob that owns `job`; pods only reference their Job, so this needs an API get.
+async fn cronjob_of(client: &Client, namespace: &str, job: &str) -> Option<String> {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let api: Api<Job> = Api::namespaced(client.clone(), namespace);
+    // Bounded: the pod watcher waits on this before it handles the next pod event.
+    let error = match tokio::time::timeout(Duration::from_secs(5), api.get_opt(job)).await {
+        Ok(Ok(found)) => {
+            return controller_owner(&found?.metadata)
+                .filter(|o| o.kind == "CronJob" && !o.name.is_empty())
+                .map(|o| o.name.clone());
+        }
+        Ok(Err(e)) => e.to_string(),
+        Err(_) => "timed out".to_string(),
+    };
+    if WARNED.swap(true, Ordering::Relaxed) {
+        debug!("Cannot get Job {namespace}/{job}: {error}");
+    } else {
+        warn!(
+            "Cannot get Job {namespace}/{job}: {error}; CronJob pods keep their Job label (chart grants jobs get)"
+        );
+    }
+    None
 }
 
 /// Extract container IDs from a pod's status.
@@ -496,6 +577,112 @@ mod tests {
             watcher_can_write,
             "cleanup holds pod_store while waiting for cgroup_cache"
         );
+    }
+
+    fn owner(kind: &str, name: &str, controller: Option<bool>) -> OwnerReference {
+        OwnerReference {
+            kind: kind.to_string(),
+            name: name.to_string(),
+            controller,
+            ..Default::default()
+        }
+    }
+
+    fn pod_meta(owners: Vec<OwnerReference>, hash: Option<&str>) -> ObjectMeta {
+        ObjectMeta {
+            name: Some("p-1".to_string()),
+            namespace: Some("team-a".to_string()),
+            owner_references: (!owners.is_empty()).then_some(owners),
+            labels: hash.map(|h| [("pod-template-hash".to_string(), h.to_string())].into()),
+            ..Default::default()
+        }
+    }
+
+    fn workload(kind: &str, name: &str) -> Option<(String, String)> {
+        Some((kind.to_string(), name.to_string()))
+    }
+
+    #[test]
+    fn test_workload_owner_chains() {
+        let meta = |kind: &str, name: &str, hash: Option<&str>| {
+            pod_meta(vec![owner(kind, name, Some(true))], hash)
+        };
+        let rs = |name: &str, hash| meta("ReplicaSet", name, hash);
+        // The controller reference wins over an earlier non-controller owner.
+        let two = vec![
+            owner("Secret", "s", None),
+            owner("StatefulSet", "db", Some(true)),
+        ];
+        let cases = [
+            (rs("api-h1", Some("h1")), None, Some("Deployment/api")),
+            (rs("app-v2-h1", Some("h1")), None, Some("Deployment/app-v2")),
+            // A ReplicaSet not made by a Deployment: no hash label, or a name that does not end in it.
+            (rs("web-abc", None), None, Some("ReplicaSet/web-abc")),
+            (rs("web-abc", Some("xyz")), None, Some("ReplicaSet/web-abc")),
+            (rs("h1", Some("h1")), None, Some("ReplicaSet/h1")),
+            (meta("Job", "r-1", None), Some("r"), Some("CronJob/r")),
+            (meta("Job", "r-1", None), None, Some("Job/r-1")),
+            (meta("DaemonSet", "ds", None), None, Some("DaemonSet/ds")),
+            (meta("Job", "", None), None, None),
+            (pod_meta(vec![], None), None, Some("Pod/p-1")),
+            (pod_meta(two, None), None, Some("StatefulSet/db")),
+        ];
+        for (meta, cronjob, want) in cases {
+            let got = workload_of(&meta, cronjob.map(str::to_string));
+            let got = got.map(|(kind, name)| format!("{kind}/{name}"));
+            assert_eq!(got.as_deref(), want, "{:?}", meta.owner_references);
+        }
+    }
+
+    #[test]
+    fn test_job_pod_cronjob_retried_until_found_then_kept() {
+        use k8s_openapi::api::core::v1::{ContainerStatus, PodStatus};
+        let resolver = PodResolver {
+            cgroup_v2: false,
+            ..PodResolver::new()
+        };
+        let mut job = owner("Job", "report-29345678", Some(true));
+        job.api_version = "batch/v1".to_string();
+        let mut pod = Pod {
+            metadata: pod_meta(vec![job], None),
+            ..Default::default()
+        };
+        let with_container = |pod: &mut Pod, hex: &str| {
+            pod.status = Some(PodStatus {
+                container_statuses: Some(vec![ContainerStatus {
+                    container_id: Some(format!("containerd://{}", hex.repeat(32))),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            })
+        };
+        let stored = |r: &PodResolver| {
+            r.stored_info(&pod_meta(vec![], None))
+                .and_then(|i| i.workload_kind.clone().zip(i.workload_name.clone()))
+        };
+        // Pending: no container yet, so nothing to look up.
+        assert_eq!(resolver.unresolved_job(&pod), None);
+
+        with_container(&mut pod, "ab");
+        let pending = Some(("team-a", "report-29345678"));
+        assert_eq!(resolver.unresolved_job(&pod), pending);
+        // A failed lookup labels the Job for now and is retried on the next event.
+        resolver.apply_pod_event(&pod, false, None);
+        assert_eq!(stored(&resolver), workload("Job", "report-29345678"));
+        assert_eq!(resolver.unresolved_job(&pod), pending);
+        resolver.apply_pod_event(&pod, false, Some("report".to_string()));
+        assert_eq!(resolver.unresolved_job(&pod), None);
+
+        // Later events, also after a container restart, keep the CronJob without a lookup.
+        with_container(&mut pod, "cd");
+        assert_eq!(resolver.unresolved_job(&pod), None);
+        resolver.apply_pod_event(&pod, false, None);
+        assert_eq!(stored(&resolver), workload("CronJob", "report"));
+
+        let mut other = pod;
+        other.metadata.name = Some("p-2".to_string());
+        other.metadata.owner_references = Some(vec![owner("Job", "vj", Some(true))]);
+        assert_eq!(resolver.unresolved_job(&other), None, "not a batch/v1 Job");
     }
 
     #[test]
