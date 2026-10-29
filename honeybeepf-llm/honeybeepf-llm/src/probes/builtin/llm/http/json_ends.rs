@@ -214,7 +214,26 @@ fn trailing_members(tail: &[u8]) -> Option<Map<String, Value>> {
 #[cfg(test)]
 mod tests {
     use super::super::body::parse_response_json;
+    use super::super::chunk_cases::{Walked, chunk_cases};
     use super::*;
+
+    #[test]
+    fn chunk_walk_keeps_its_answers_at_every_split() {
+        for case in chunk_cases() {
+            let text = String::from_utf8_lossy(case.body);
+            for split in 0..=case.body.len() {
+                let (mut walk, mut kept) = (BodyWalk::default(), Vec::new());
+                walk.feed(&case.body[..split], &mut |d| kept.extend_from_slice(d));
+                walk.feed(&case.body[split..], &mut |d| kept.extend_from_slice(d));
+                let walked = match walk.state {
+                    Walk::Ended => Walked::Ended,
+                    Walk::Broken => Walked::Broken,
+                    _ => Walked::Pending,
+                };
+                assert_eq!((&kept[..], walked), case.walked, "split {split} {text:?}");
+            }
+        }
+    }
 
     /// Escaped quotes and backslashes, and text that looks like JSON members or usage.
     const TRICKY: &str =
