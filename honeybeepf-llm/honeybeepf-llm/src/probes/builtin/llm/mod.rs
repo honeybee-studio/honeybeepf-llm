@@ -21,7 +21,8 @@ use processor::{Outcome, StreamProcessor};
 use regex::Regex;
 
 use crate::probes::{
-    DynamicProbe, IdentityResolver, Probe, ProcessInfo, attach_uprobe, detach_uprobe,
+    DynamicProbe, IdentityResolver, Probe, ProcessInfo, TracepointConfig, attach_tracepoint,
+    attach_uprobe, detach_uprobe,
     discovery::{
         FileId, exported_function_offsets, file_identity, find_executables_all, find_libraries_all,
     },
@@ -91,6 +92,13 @@ const OPTIONAL_PROBES: [(&str, &str, &str); 3] = [
 
 /// (program, function) that ends a connection's stream; optional like the probes above.
 const CLOSE_PROBE: (&str, &str) = ("probe_ssl_free", "SSL_free");
+
+/// Clears an exiting thread's session entries; one per node, not per probed file.
+const TASK_EXIT_PROBE: TracepointConfig = TracepointConfig {
+    program_name: "probe_ssl_task_exit",
+    category: "sched",
+    name: "sched_process_exit",
+};
 
 /// Every function in the probe tables, resolved in one pass over the file's symbols.
 const PROBED_FUNCTIONS: [&str; 6] = [
@@ -336,6 +344,11 @@ impl Probe for LlmProbe {
                 .context("Failed to get LLM_STATS map")?,
         )?;
         let _ = EVENT_STATS.set(stats);
+
+        // Without it, every thread killed inside an SSL call keeps its session map entries until restart.
+        if let Err(e) = attach_tracepoint(bpf, TASK_EXIT_PROBE) {
+            warn!("{:#}; session entries of killed threads are not cleared", e);
+        }
 
         // Skip libcrypto for SSL_* probes as they usually don't contain them
         let ssl_libs = targets.iter().filter(|path| !path.contains("libcrypto"));
@@ -769,6 +782,23 @@ mod tests {
             without.is_empty(),
             "uprobe programs without a tail call into NO_PRIV_STACK: {without:?}"
         );
+        Ok(())
+    }
+
+    /// The task exit program is in the eBPF object as a tracepoint program.
+    #[test]
+    fn test_task_exit_probe_is_a_tracepoint_program() -> Result<()> {
+        use object::{Object, ObjectSection, ObjectSymbol};
+
+        let data = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/honeybeepf-llm"));
+        let obj = object::File::parse(data)?;
+        let sym = obj
+            .symbols()
+            .find(|s| s.name() == Ok(TASK_EXIT_PROBE.program_name))
+            .context("task exit program not in the eBPF object")?;
+        let index = sym.section_index().context("symbol without a section")?;
+        let section = obj.section_by_index(index)?.name()?;
+        assert!(section.starts_with("tracepoint"), "section {section}");
         Ok(())
     }
 
