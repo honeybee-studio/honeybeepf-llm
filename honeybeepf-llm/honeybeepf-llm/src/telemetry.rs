@@ -166,7 +166,7 @@ impl HoneyBeeMetrics {
                 )
                 .with_unit("tokens")
                 .build(),
-            prices: load_prices(),
+            prices: load_prices(custom_prices().as_deref()),
         }
     }
 
@@ -246,27 +246,49 @@ impl HoneyBeeMetrics {
     }
 }
 
-/// Load the built-in price table; if it is rejected the agent runs on without cost metrics.
-fn load_prices() -> Option<(PriceTable, KeyValue)> {
-    match PriceTable::builtin() {
-        Ok(table) => {
-            for s in table.sources() {
-                info!(
-                    "Price table {}: {} prices from {} (checked {})",
-                    table.version(),
-                    s.provider,
-                    s.url,
-                    s.checked
-                );
-            }
-            let version = KeyValue::new("price_table_version", Arc::<str>::from(table.version()));
-            Some((table, version))
-        }
-        Err(e) => {
-            log::warn!("Built-in price table rejected, LLM cost not recorded: {e}");
-            None
+/// A user price file from `LLM_PRICES_CONFIG_FILE`, else inline JSON in `LLM_PRICES_CONFIG` (chart).
+fn custom_prices() -> Option<String> {
+    if let Ok(path) = std::env::var("LLM_PRICES_CONFIG_FILE") {
+        match std::fs::read_to_string(&path) {
+            Ok(json) => return Some(json),
+            Err(e) => log::warn!("Custom price file {path} not read: {e}"),
         }
     }
+    std::env::var("LLM_PRICES_CONFIG")
+        .ok()
+        .filter(|json| !json.is_empty())
+}
+
+/// Load the built-in price table and merge user prices over it; a rejected user file keeps the built-in one.
+fn load_prices(custom: Option<&str>) -> Option<(PriceTable, KeyValue)> {
+    let mut table = match PriceTable::builtin() {
+        Ok(table) => table,
+        Err(e) => {
+            log::warn!("Built-in price table rejected, LLM cost not recorded: {e}");
+            return None;
+        }
+    };
+    if let Some(json) = custom {
+        match table.merge_custom(json) {
+            Ok(o) => info!(
+                "Custom prices: replaced [{}], added [{}]",
+                o.replaced.join(", "),
+                o.added.join(", ")
+            ),
+            Err(e) => log::warn!("Custom price table rejected, using built-in prices only: {e}"),
+        }
+    }
+    for s in table.sources() {
+        info!(
+            "Price table {}: {} prices from {} (checked {})",
+            table.version(),
+            s.provider,
+            s.url,
+            s.checked
+        );
+    }
+    let version = KeyValue::new("price_table_version", Arc::<str>::from(table.version()));
+    Some((table, version))
 }
 
 /// Priority:
@@ -804,5 +826,15 @@ mod tests {
             .collect();
         assert_eq!(points, [(kind("unknown_model"), 42)]);
         Ok(())
+    }
+
+    #[test]
+    fn custom_prices_merge_over_the_builtin_table_or_are_ignored() {
+        let json = r#"{"version": "acme", "providers": [{"name": "vllm", "source": "s",
+            "checked": "2026-10-01", "models": {"my-vllm-llama": {"input": 1}}}]}"#;
+        let version = |custom| load_prices(custom).map(|(_, v)| v.value.to_string());
+        let builtin = version(None).expect("built-in table loads");
+        assert_eq!(version(Some("{")), Some(builtin.clone()));
+        assert!(version(Some(json)).is_some_and(|v| v.starts_with(&format!("{builtin}+custom-"))));
     }
 }
