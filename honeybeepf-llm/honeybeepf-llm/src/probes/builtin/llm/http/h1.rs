@@ -1,7 +1,7 @@
 //! HTTP/1.1 request detection and response parsing: framing, decoding, SSE or JSON usage.
 
 use honeybeepf_llm_core::byte_utils;
-use honeybeepf_llm_core::chunked::{ChunkState, ChunkWalk};
+use honeybeepf_llm_core::chunked::{ChunkRules, ChunkState, ChunkWalk};
 use honeybeepf_llm_core::types::UsageInfo;
 
 use super::ProtocolParser;
@@ -286,35 +286,26 @@ impl ProtocolParser for Http11Parser {
 
 /// Whether a chunked body holds its last chunk and trailer section, found by following the chunk sizes.
 fn chunked_ended(body: &[u8]) -> bool {
-    // Bytes lost in capture break the framing; then only the terminator bytes are left to go by.
-    let desynced = || body.ends_with(b"0\r\n\r\n");
-    let mut rest = body;
-    loop {
-        let Some(line_end) = byte_utils::find_pattern(rest, b"\r\n") else {
-            return false;
-        };
-        let size = rest[..line_end].split(|&b| b == b';').next().unwrap_or(&[]);
-        let Some(size) = std::str::from_utf8(size)
-            .ok()
-            .and_then(|s| usize::from_str_radix(s.trim(), 16).ok())
-        else {
-            return desynced();
-        };
-        // A chunk the response buffer can never hold is a garbled size line, not one still arriving.
-        if size > MAX_RESPONSE_BUFFER_SIZE {
-            return desynced();
-        }
-        rest = &rest[line_end + 2..];
-        if size == 0 {
-            return rest.starts_with(b"\r\n") || byte_utils::contains_pattern(rest, b"\r\n\r\n");
-        }
-        match rest.get(size..).and_then(|after| after.get(..2)) {
-            None => return false,
-            Some(b"\r\n") => rest = &rest[size + 2..],
-            Some(_) => return desynced(),
-        }
+    let mut walk = ChunkWalk::new(ENDED_RULES);
+    walk.walk(body, |_| {});
+    match walk.state() {
+        ChunkState::Ended => true,
+        // Bytes lost in capture break the framing; then only the terminator bytes are left to go by.
+        ChunkState::Broken => body.ends_with(b"0\r\n\r\n"),
+        _ => false,
     }
 }
+
+/// Chunk rules for `chunked_ended`: RFC 9112 extensions and trailers, CRLF after data checked.
+const ENDED_RULES: ChunkRules = ChunkRules {
+    extensions: true,
+    utf8_line: false,
+    data_crlf: true,
+    // A chunk the response buffer can never hold is a garbled size line, not one still arriving.
+    max_size: MAX_RESPONSE_BUFFER_SIZE,
+    bare_lf_breaks: false,
+    max_line: usize::MAX,
+};
 
 fn content_length(headers: &[httparse::Header]) -> Option<usize> {
     headers
