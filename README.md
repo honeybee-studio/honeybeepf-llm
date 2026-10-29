@@ -64,8 +64,7 @@ agent pod.
 2026-10-26T08:43:35.510264Z  INFO honeybeepf_llm::probes::builtin::llm::processor: LLM SUCCESS | PID: 1686847 | Model: claude-test | Latency: 0.00s | Tokens: 140 (Prompt: 125, Compl: 15, Cache read: 100, Cache write: 0) | Pod: team-b/support-bot-589db898dd-rv9ts
 ```
 
-The agent needs `hostPID`, `hostNetwork` and the `BPF`, `PERFMON`, `NET_ADMIN`, `SYS_ADMIN` and `SYS_PTRACE`
-capabilities, and requests 200m CPU / 512Mi per node (limits 1 CPU / 1Gi); see
+The agent needs `hostPID` and the `BPF`, `PERFMON`, `SYS_ADMIN` and `SYS_PTRACE` capabilities, and requests 200m CPU / 512Mi per node (limits 1 CPU / 1Gi); see
 [`values.yaml`](charts/honeybeepf-llm/values.yaml).
 
 Uninstall:
