@@ -58,7 +58,7 @@ builtinProbes:
     #     request_extractor: "messages"       # How to extract prompt text (messages, contents, prompt, input)
     # Price overrides (optional), in the format of honeybeepf-llm-core/src/prices.json, merged per model.
     # "price_multiplier" multiplies the provider's built-in prices (0.8 = pay 80%), not models listed here.
-    # A rejected file is logged and ignored. Prices are read at startup: restart the DaemonSet.
+    # A rejected file is logged and ignored. Changes reach the agent without a restart, within about a minute.
     prices: {}
     # Example (USD per million tokens):
     # prices:

@@ -10,6 +10,7 @@
 //! 2. Direct environment variable configuration
 
 use anyhow::{Context, Result};
+use arc_swap::ArcSwapOption;
 use honeybeepf_llm_core::pricing::PriceTable;
 use honeybeepf_llm_core::types::UsageInfo;
 use log::info;
@@ -19,6 +20,7 @@ use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -33,6 +35,9 @@ const LLM_LATENCY_BOUNDARIES_SECS: [f64; 18] = [
     0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0,
     180.0, 300.0,
 ];
+
+/// How often the user price file is reread; kubelet refreshes a ConfigMap volume only about once a minute.
+const PRICE_RELOAD_INTERVAL_SECS: u64 = 10;
 
 /// Global metrics handle
 static METRICS: OnceLock<HoneyBeeMetrics> = OnceLock::new();
@@ -69,12 +74,25 @@ pub struct HoneyBeeMetrics {
     pub llm_responses_unparsed_total: Counter<u64>,
     pub llm_cost_usd_total: Counter<f64>,
     pub llm_unpriced_tokens_total: Counter<u64>,
-    /// Built-in price table and its `price_table_version` label, built once.
-    prices: Option<(PriceTable, KeyValue)>,
+    /// Swapped whole when the user price file changes, so a call never waits on a reload.
+    prices: ArcSwapOption<Prices>,
+}
+
+/// A price table and its `price_table_version` label.
+struct Prices {
+    table: PriceTable,
+    version: KeyValue,
+}
+
+impl Prices {
+    fn new(table: PriceTable) -> Self {
+        let version = KeyValue::new("price_table_version", Arc::<str>::from(table.version()));
+        Self { table, version }
+    }
 }
 
 impl HoneyBeeMetrics {
-    fn new(meter: &Meter) -> Self {
+    fn new(meter: &Meter, prices: Option<Prices>) -> Self {
         Self {
             block_io_events: meter
                 .u64_counter("block_io_events")
@@ -169,13 +187,14 @@ impl HoneyBeeMetrics {
                 )
                 .with_unit("tokens")
                 .build(),
-            prices: load_prices(custom_prices().as_deref()),
+            prices: ArcSwapOption::from_pointee(prices),
         }
     }
 
     /// Record a call's cost by category, or its tokens as unpriced with the reason.
     fn record_cost(&self, usage: &UsageInfo, labels: &mut Vec<KeyValue>) {
-        let Some((table, version)) = &self.prices else {
+        let prices = self.prices.load();
+        let Some(Prices { table, version }) = prices.as_deref() else {
             return;
         };
         let base = labels.len();
@@ -249,21 +268,93 @@ impl HoneyBeeMetrics {
     }
 }
 
-/// A user price file from `LLM_PRICES_CONFIG_FILE`, else inline JSON in `LLM_PRICES_CONFIG` (chart).
-fn custom_prices() -> Option<String> {
-    if let Ok(path) = std::env::var("LLM_PRICES_CONFIG_FILE") {
-        match std::fs::read_to_string(&path) {
-            Ok(json) => return Some(json),
-            Err(e) => log::warn!("Custom price file {path} not read: {e}"),
+/// The user price file named by `LLM_PRICES_CONFIG_FILE`, read again whenever its contents change.
+struct PriceFile {
+    path: String,
+    /// Contents last read, so a rewrite with the same bytes reloads nothing.
+    seen: Option<String>,
+    unreadable: bool,
+}
+
+impl PriceFile {
+    fn new(path: String) -> Self {
+        Self {
+            path,
+            seen: None,
+            unreadable: false,
         }
     }
+
+    /// The file's contents if they differ from the last read; a read error is logged once.
+    fn changed(&mut self) -> Option<&str> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(json) => {
+                self.unreadable = false;
+                if self.seen.as_ref() == Some(&json) {
+                    return None;
+                }
+                Some(self.seen.insert(json).as_str())
+            }
+            Err(e) => {
+                if !std::mem::replace(&mut self.unreadable, true) {
+                    log::warn!("Custom price file {} not read: {e}", self.path);
+                }
+                None
+            }
+        }
+    }
+}
+
+/// Inline user prices in `LLM_PRICES_CONFIG` (chart), used when no price file was read.
+fn inline_prices() -> Option<String> {
     std::env::var("LLM_PRICES_CONFIG")
         .ok()
         .filter(|json| !json.is_empty())
 }
 
+/// Swap in the built-in table merged with the user file when the file changed and passes the checks.
+fn reload_prices(prices: &ArcSwapOption<Prices>, file: &mut PriceFile) {
+    let Some(current) = prices.load_full() else {
+        return;
+    };
+    let Some(json) = file.changed() else {
+        return;
+    };
+    let merged = PriceTable::builtin().and_then(|mut t| t.merge_custom(json).map(|o| (t, o)));
+    match merged {
+        // Back to the contents already loaded, after a rejected file in between.
+        Ok((table, _)) if table.version() == current.table.version() => {}
+        Ok((table, o)) => {
+            info!(
+                "Custom prices reloaded: price table {} -> {}, replaced [{}], added [{}]",
+                current.table.version(),
+                table.version(),
+                o.replaced.join(", "),
+                o.added.join(", ")
+            );
+            prices.store(Some(Arc::new(Prices::new(table))));
+        }
+        Err(e) => log::warn!(
+            "Custom price file {} rejected, keeping price table {}: {e}",
+            file.path,
+            current.table.version()
+        ),
+    }
+}
+
+/// Reread the user price file every PRICE_RELOAD_INTERVAL_SECS until shutdown.
+fn start_price_reload(metrics: &'static HoneyBeeMetrics, mut file: PriceFile) {
+    let shutdown = crate::probes::shutdown_flag();
+    std::thread::spawn(move || {
+        while !shutdown.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_secs(PRICE_RELOAD_INTERVAL_SECS));
+            reload_prices(&metrics.prices, &mut file);
+        }
+    });
+}
+
 /// Load the built-in price table and merge user prices over it; a rejected user file keeps the built-in one.
-fn load_prices(custom: Option<&str>) -> Option<(PriceTable, KeyValue)> {
+fn load_prices(custom: Option<&str>) -> Option<Prices> {
     let mut table = match PriceTable::builtin() {
         Ok(table) => table,
         Err(e) => {
@@ -290,8 +381,7 @@ fn load_prices(custom: Option<&str>) -> Option<(PriceTable, KeyValue)> {
             s.checked
         );
     }
-    let version = KeyValue::new("price_table_version", Arc::<str>::from(table.version()));
-    Some((table, version))
+    Some(Prices::new(table))
 }
 
 /// Priority:
@@ -383,7 +473,20 @@ pub fn init_metrics() -> Result<()> {
 
     register_provider_config_info(&meter, &PROVIDER_CONFIG);
 
-    let _ = METRICS.set(HoneyBeeMetrics::new(&meter));
+    let mut price_file = std::env::var("LLM_PRICES_CONFIG_FILE")
+        .ok()
+        .map(PriceFile::new);
+    let custom = price_file
+        .as_mut()
+        .and_then(PriceFile::changed)
+        .map(str::to_owned)
+        .or_else(inline_prices);
+    let _ = METRICS.set(HoneyBeeMetrics::new(&meter, load_prices(custom.as_deref())));
+    if let (Some(m), Some(file)) = (METRICS.get(), price_file)
+        && m.prices.load().is_some()
+    {
+        start_price_reload(m, file);
+    }
 
     info!("OpenTelemetry metrics initialized successfully");
     Ok(())
@@ -719,7 +822,7 @@ mod tests {
         let provider = SdkMeterProvider::builder()
             .with_reader(reader.clone())
             .build();
-        let metrics = HoneyBeeMetrics::new(&provider.meter("test"));
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(None));
         for secs in [0.3, 1.2, 3.0, 45.0] {
             metrics.llm_latency_seconds.record(secs, &[]);
         }
@@ -762,7 +865,7 @@ mod tests {
         let provider = SdkMeterProvider::builder()
             .with_reader(reader.clone())
             .build();
-        let metrics = HoneyBeeMetrics::new(&provider.meter("test"));
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(None));
         let usage = UsageInfo {
             prompt_tokens: 5,
             completion_tokens: 4,
@@ -799,7 +902,7 @@ mod tests {
         let provider = SdkMeterProvider::builder()
             .with_reader(reader.clone())
             .build();
-        let metrics = HoneyBeeMetrics::new(&provider.meter("test"));
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(None));
         let pod = || vec![KeyValue::new("target.namespace", "team-a")];
         metrics.record_unparsed("response_too_large", pod());
         metrics.record_unparsed("next_request", pod());
@@ -853,7 +956,7 @@ mod tests {
         let provider = SdkMeterProvider::builder()
             .with_reader(reader.clone())
             .build();
-        let metrics = HoneyBeeMetrics::new(&provider.meter("test"));
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(None));
         let priced = UsageInfo {
             prompt_tokens: 1200,
             completion_tokens: 800,
@@ -932,9 +1035,176 @@ mod tests {
     fn custom_prices_merge_over_the_builtin_table_or_are_ignored() {
         let json = r#"{"version": "acme", "providers": [{"name": "vllm", "source": "s",
             "checked": "2026-10-01", "models": {"my-vllm-llama": {"input": 1}}}]}"#;
-        let version = |custom| load_prices(custom).map(|(_, v)| v.value.to_string());
+        let version = |custom| load_prices(custom).map(|p| p.version.value.to_string());
         let builtin = version(None).expect("built-in table loads");
         assert_eq!(version(Some("{")), Some(builtin.clone()));
         assert!(version(Some(json)).is_some_and(|v| v.starts_with(&format!("{builtin}+custom-"))));
+    }
+
+    /// A ConfigMap volume: `prices.json -> ..data/prices.json`, `..data -> ..<n>`.
+    struct ConfigMapDir {
+        root: std::path::PathBuf,
+        n: u32,
+    }
+
+    impl ConfigMapDir {
+        fn new(name: &str) -> Result<Self> {
+            let dir = format!("hb-prices-{name}-{}", std::process::id());
+            let root = std::env::temp_dir().join(dir);
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root)?;
+            std::os::unix::fs::symlink("..data/prices.json", root.join("prices.json"))?;
+            Ok(Self { root, n: 0 })
+        }
+
+        fn path(&self) -> String {
+            self.root.join("prices.json").to_string_lossy().into_owned()
+        }
+
+        /// Publish new contents the way kubelet does: a new directory, then a rename over `..data`.
+        fn publish(&mut self, contents: impl AsRef<[u8]>) -> Result<()> {
+            self.n += 1;
+            let dir = format!("..{}", self.n);
+            std::fs::create_dir(self.root.join(&dir))?;
+            std::fs::write(self.root.join(&dir).join("prices.json"), contents)?;
+            std::os::unix::fs::symlink(&dir, self.root.join("..data_tmp"))?;
+            std::fs::rename(self.root.join("..data_tmp"), self.root.join("..data"))?;
+            let old = self.root.join(format!("..{}", self.n - 1));
+            let _ = std::fs::remove_dir_all(old);
+            Ok(())
+        }
+    }
+
+    impl Drop for ConfigMapDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn vllm_prices(input: &str) -> String {
+        format!(
+            r#"{{"version": "acme", "providers": [{{"name": "vllm", "source": "s",
+            "checked": "2026-10-01", "models": {{"my-vllm-llama": {{"input": {input}}}}}}}]}}"#
+        )
+    }
+
+    fn vllm_call() -> UsageInfo {
+        UsageInfo {
+            prompt_tokens: 1_000_000,
+            model: Some("my-vllm-llama".to_string()),
+            ..UsageInfo::default()
+        }
+    }
+
+    #[test]
+    fn price_file_swaps_the_table_only_for_new_contents_that_pass_the_checks() -> Result<()> {
+        let mut dir = ConfigMapDir::new("swap")?;
+        let mut file = PriceFile::new(dir.path());
+        assert_eq!(file.changed(), None, "no file yet");
+        dir.publish(vllm_prices("1"))?;
+        let prices = ArcSwapOption::from_pointee(load_prices(file.changed()));
+        let input_usd = |p: &ArcSwapOption<Prices>| {
+            let cost = p.load().as_deref().map(|p| p.table.cost(&vllm_call()));
+            cost.and_then(Result::ok).map(|c| c.input)
+        };
+        assert_eq!(input_usd(&prices), Some(1.0));
+        let loaded = prices.load_full().context("prices loaded")?;
+        let kept =
+            |p: &ArcSwapOption<Prices>| p.load_full().is_some_and(|t| Arc::ptr_eq(&t, &loaded));
+
+        for (contents, why) in [
+            (vllm_prices("1"), "same contents rewritten"),
+            ("{".to_string(), "not JSON"),
+            (vllm_prices("-1"), "fails the table checks"),
+            (vllm_prices("1"), "back to the loaded contents"),
+        ] {
+            dir.publish(contents)?;
+            reload_prices(&prices, &mut file);
+            assert!(kept(&prices), "{why}");
+        }
+        dir.publish(b"{\"version\": \"\xff\"}")?;
+        reload_prices(&prices, &mut file);
+        assert!(kept(&prices), "not UTF-8");
+        std::fs::remove_file(dir.root.join("..data"))?;
+        reload_prices(&prices, &mut file);
+        assert!(kept(&prices), "file removed");
+
+        dir.publish(vllm_prices("2"))?;
+        reload_prices(&prices, &mut file);
+        assert_eq!(input_usd(&prices), Some(2.0));
+        let version =
+            |p: &ArcSwapOption<Prices>| p.load().as_deref().map(|p| p.table.version().to_string());
+        assert!(version(&prices).is_some_and(|v| v != loaded.table.version()));
+        Ok(())
+    }
+
+    #[test]
+    fn price_file_rejected_at_startup_is_loaded_once_fixed() -> Result<()> {
+        let mut dir = ConfigMapDir::new("fixed")?;
+        dir.publish(vllm_prices("-1"))?;
+        let mut file = PriceFile::new(dir.path());
+        let prices = ArcSwapOption::from_pointee(load_prices(file.changed()));
+        let builtin = load_prices(None).context("built-in table loads")?;
+        let builtin = builtin.table.version();
+        let version =
+            |p: &ArcSwapOption<Prices>| p.load().as_deref().map(|p| p.table.version().to_string());
+        assert_eq!(version(&prices).as_deref(), Some(builtin));
+        reload_prices(&prices, &mut file);
+        assert_eq!(
+            version(&prices).as_deref(),
+            Some(builtin),
+            "same rejected file"
+        );
+
+        dir.publish(vllm_prices("1"))?;
+        reload_prices(&prices, &mut file);
+        let custom = format!("{builtin}+custom-");
+        assert!(version(&prices).is_some_and(|v| v.starts_with(&custom)));
+        Ok(())
+    }
+
+    #[test]
+    fn llm_cost_after_a_reload_has_the_new_price_and_version() -> Result<()> {
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        let mut dir = ConfigMapDir::new("label")?;
+        dir.publish(vllm_prices("1"))?;
+        let mut file = PriceFile::new(dir.path());
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(file.changed()));
+        metrics.record_llm(&vllm_call(), 1.0, false, vec![]);
+        dir.publish(vllm_prices("3"))?;
+        reload_prices(&metrics.prices, &mut file);
+        metrics.record_llm(&vllm_call(), 1.0, false, vec![]);
+
+        let mut rm = ResourceMetrics {
+            resource: Resource::empty(),
+            scope_metrics: vec![],
+        };
+        reader.collect(&mut rm)?;
+        let cost = rm
+            .scope_metrics
+            .iter()
+            .flat_map(|s| &s.metrics)
+            .find(|m| m.name == "llm_cost_usd_total")
+            .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<f64>>())
+            .context("llm_cost_usd_total counter not collected")?;
+        let mut points: Vec<(f64, String)> = cost
+            .data_points
+            .iter()
+            .flat_map(|p| {
+                let version = p
+                    .attributes
+                    .iter()
+                    .find(|kv| kv.key.as_str() == "price_table_version");
+                version.map(|kv| (p.value, kv.value.to_string()))
+            })
+            .collect();
+        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let usd: Vec<f64> = points.iter().map(|p| p.0).collect();
+        assert_eq!(usd, [1.0, 3.0]);
+        assert!(points[0].1.contains("+custom-") && points[0].1 != points[1].1);
+        Ok(())
     }
 }
