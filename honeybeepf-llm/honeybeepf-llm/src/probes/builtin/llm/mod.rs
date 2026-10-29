@@ -323,6 +323,7 @@ fn route_event(
 
 impl Probe for LlmProbe {
     fn attach(&self, bpf: &mut Ebpf, _resolver: IdentityResolver) -> Result<()> {
+        http::report_provider_config();
         let targets = find_all_targets()?;
 
         // Keep going: libssl opened later is attached by re-discovery and needs the reader below.

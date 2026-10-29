@@ -30,7 +30,7 @@ fn test_default_providers() {
     assert_eq!(registry.providers.len(), 6);
 }
 
-// `with_defaults` falls back to an empty list and serde skips unknown keys, so a typo would go unnoticed.
+// `with_defaults` panics only on a parse error, and serde skips unknown keys, so a key typo would go unnoticed.
 #[test]
 fn test_default_providers_json_parses_with_known_keys_only() {
     let json = include_str!("../src/providers/default_providers.json");

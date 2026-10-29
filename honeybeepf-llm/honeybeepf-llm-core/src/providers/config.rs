@@ -227,9 +227,12 @@ impl ProviderRegistry {
     }
 
     /// Create with default providers (OpenAI, Anthropic, Gemini, Bedrock), including their cloud endpoints
+    ///
+    /// # Panics
+    /// If the compiled-in provider list does not parse, which a test rules out.
     pub fn with_defaults() -> Self {
-        // Compiled in and parsed by a test, so an error here is a bug in the repo.
-        Self::from_json(DEFAULT_PROVIDERS).unwrap_or_default()
+        // An empty list would record nothing without any error, so fail at startup instead.
+        Self::from_json(DEFAULT_PROVIDERS).expect("built-in default_providers.json must parse")
     }
 
     /// Adds `user` providers; a user provider replaces every one here with the same name.

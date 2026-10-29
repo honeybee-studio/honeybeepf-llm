@@ -6,16 +6,20 @@ use honeybeepf_llm_core::providers::{ConfigurableProvider, ProviderRegistry, pat
 
 /// Cached providers - built once at initialization
 static CACHED_PROVIDERS: Lazy<Vec<ConfigurableProvider>> = Lazy::new(|| {
-    let registry = load_provider_registry();
-    registry
+    PROVIDER_REGISTRY
         .providers
-        .into_iter()
+        .iter()
+        .cloned()
         .map(ConfigurableProvider::new)
         .collect()
 });
 
+/// Providers from LLM_PROVIDERS_CONFIG_FILE or LLM_PROVIDERS_CONFIG, loaded once.
+pub(super) static CONFIGURED: Lazy<Option<ProviderRegistry>> = Lazy::new(load_configured);
+
 /// Global provider registry - for host/path matching only
-pub(super) static PROVIDER_REGISTRY: Lazy<ProviderRegistry> = Lazy::new(load_provider_registry);
+pub(super) static PROVIDER_REGISTRY: Lazy<ProviderRegistry> =
+    Lazy::new(|| merged(CONFIGURED.clone()));
 
 /// Distinct provider hosts: the HTTP/2 pre-check scans the whole buffer once per entry.
 pub(super) static KNOWN_HOSTS: Lazy<Vec<&'static str>> = Lazy::new(|| {
@@ -33,16 +37,17 @@ pub(super) static KNOWN_HOSTS: Lazy<Vec<&'static str>> = Lazy::new(|| {
     hosts
 });
 
-fn load_provider_registry() -> ProviderRegistry {
+fn load_configured() -> Option<ProviderRegistry> {
     let file = std::env::var("LLM_PROVIDERS_CONFIG_FILE").ok();
     let inline = std::env::var("LLM_PROVIDERS_CONFIG").ok();
-    registry_from(file.as_deref(), inline.as_deref())
+    configured_from(file.as_deref(), inline.as_deref())
 }
 
-/// Built-in providers plus the configured ones, from the file if it loads, else from the inline JSON.
-fn registry_from(file: Option<&str>, inline: Option<&str>) -> ProviderRegistry {
-    let defaults = ProviderRegistry::with_defaults();
-
+/// The configured providers, from the file if it loads, else from the inline JSON.
+pub(super) fn configured_from(
+    file: Option<&str>,
+    inline: Option<&str>,
+) -> Option<ProviderRegistry> {
     // 1. Try loading from config file (supports YAML, JSON, TOML via config crate)
     if let Some(path) = file {
         if let Ok(settings) = config::Config::builder()
@@ -51,21 +56,34 @@ fn registry_from(file: Option<&str>, inline: Option<&str>) -> ProviderRegistry {
             && let Ok(reg) = settings.try_deserialize::<ProviderRegistry>()
         {
             log::info!("Loaded LLM providers from: {}", path);
-            return defaults.merge(reg);
+            return Some(reg);
         }
         log::warn!("Failed to load or parse config file: {}", path);
     }
 
     // 2. Try inline JSON (for Kubernetes ConfigMap)
-    if let Some(config) = inline
-        && !config.is_empty()
-        && let Ok(reg) = ProviderRegistry::from_json(config)
-    {
-        return defaults.merge(reg);
+    let config = inline.filter(|config| !config.is_empty())?;
+    match ProviderRegistry::from_json(config) {
+        Ok(reg) => Some(reg),
+        Err(e) => {
+            log::warn!("Ignoring LLM_PROVIDERS_CONFIG, built-in providers only: {e}");
+            None
+        }
     }
+}
 
-    // 3. Use defaults
-    defaults
+/// Built-in providers plus the configured ones.
+pub(super) fn merged(configured: Option<ProviderRegistry>) -> ProviderRegistry {
+    let defaults = ProviderRegistry::with_defaults();
+    match configured {
+        Some(reg) => defaults.merge(reg),
+        None => defaults,
+    }
+}
+
+#[cfg(test)]
+fn registry_from(file: Option<&str>, inline: Option<&str>) -> ProviderRegistry {
+    merged(configured_from(file, inline))
 }
 
 /// Get cached providers (no allocation per call)
