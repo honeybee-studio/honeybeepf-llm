@@ -12,10 +12,11 @@
 //! - `probe_ssl_write_ex_exit` → Return from `SSL_write_ex`
 //! - `probe_ssl_do_handshake_enter/exit` → `SSL_do_handshake` for latency measurement
 //! - `probe_ssl_free` → Entry for `SSL_free(ssl)`, ends the connection's stream
+//! - `probe_ssl_task_exit` → `sched:sched_process_exit`, clears the exiting thread's call state
 
 use aya_ebpf::{
-    macros::{uprobe, uretprobe},
-    programs::{ProbeContext, RetProbeContext},
+    macros::{tracepoint, uprobe, uretprobe},
+    programs::{ProbeContext, RetProbeContext, TracePointContext},
 };
 use honeybeepf_llm_common::{
     LLM_STAT_DISCARD, LLM_STAT_EMPTY, LLM_STAT_ENTER, LLM_STAT_FILTERED, LLM_STAT_FRAGMENT,
@@ -108,6 +109,14 @@ pub fn probe_ssl_free(ctx: ProbeContext) -> u32 {
         }
         _ => count(LLM_STAT_DISCARD),
     }
+    0
+}
+
+/// Runs for every exiting thread: one killed inside an SSL call never reaches the return probe,
+/// and its entries would fill the session maps for good.
+#[tracepoint]
+pub fn probe_ssl_task_exit(_ctx: TracePointContext) -> u32 {
+    Session::clear(get_current_tid());
     0
 }
 
