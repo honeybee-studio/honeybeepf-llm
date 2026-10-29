@@ -18,7 +18,10 @@ use anyhow::{Context, Result};
 use futures::StreamExt;
 use k8s_openapi::api::{batch::v1::Job, core::v1::Pod};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
-use kube::{Api, Client, runtime::watcher};
+use kube::{
+    Api, Client,
+    runtime::{WatchStreamExt, watcher},
+};
 use log::{debug, warn};
 
 /// Workload label value for a pod whose owner cannot be named.
@@ -127,6 +130,20 @@ impl PodResolver {
             .await
             .context("Failed to create K8s client (not running in cluster?)")?;
 
+        let handle = self.spawn_pod_watcher(client, &node_name);
+
+        // Start cache cleanup task
+        self.start_cache_cleanup_task();
+
+        Ok(handle)
+    }
+
+    /// Spawn the task that keeps pod_store in sync with the pods on `node_name`.
+    fn spawn_pod_watcher(
+        self: &Arc<Self>,
+        client: Client,
+        node_name: &str,
+    ) -> tokio::task::JoinHandle<()> {
         let jobs_client = client.clone();
         // Pods are namespaced resources, but we want to watch across all namespaces on this node.
         // Therefore, we use Api::all() to get cluster-wide visibility.
@@ -138,8 +155,9 @@ impl PodResolver {
 
         let resolver = Arc::clone(self);
 
-        let handle = tokio::spawn(async move {
-            let stream = watcher(api, watcher_config);
+        tokio::spawn(async move {
+            // The bare watcher re-lists on the next poll after an error; without backoff a 403 is a busy loop.
+            let stream = watcher(api, watcher_config).default_backoff();
             tokio::pin!(stream);
 
             while let Some(event) = stream.next().await {
@@ -153,19 +171,14 @@ impl PodResolver {
                     }
                     Ok(watcher::Event::Init | watcher::Event::InitDone) => {}
                     Err(e) => {
+                        // One line per backoff step, not per request.
                         warn!("K8s pod watcher error: {}. Will retry.", e);
-                        // kube's watcher automatically retries with backoff
                     }
                 }
             }
 
             warn!("K8s pod watcher stream ended");
-        });
-
-        // Start cache cleanup task
-        self.start_cache_cleanup_task();
-
-        Ok(handle)
+        })
     }
 
     async fn lookup_cronjob(&self, client: &Client, pod: &Pod) -> Option<String> {
@@ -683,6 +696,48 @@ mod tests {
         other.metadata.name = Some("p-2".to_string());
         other.metadata.owner_references = Some(vec![owner("Job", "vj", Some(true))]);
         assert_eq!(resolver.unresolved_job(&other), None, "not a batch/v1 Job");
+    }
+
+    /// An API server that refuses every request (RBAC removed) must not be hammered with re-lists.
+    #[tokio::test]
+    async fn test_watcher_backs_off_on_api_403() {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+        let body = r#"{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"pods is forbidden","reason":"Forbidden","code":403}"#;
+        let response = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let server = tokio::spawn(async move {
+            while let Ok((mut conn, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::Relaxed);
+                let response = response.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = conn.read(&mut buf).await;
+                    let _ = conn.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+
+        let config = kube::Config::new(format!("http://{addr}").parse().unwrap());
+        let client = Client::try_from(config).unwrap();
+        let watcher = Arc::new(PodResolver::new()).spawn_pod_watcher(client, "node-a");
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        watcher.abort();
+        server.abort();
+        let n = requests.load(Ordering::Relaxed);
+        assert!(n >= 1, "the watcher never reached the fake API server");
+        assert!(
+            n <= 10,
+            "{n} API requests in 2 s: the watcher retries without backoff"
+        );
     }
 
     #[test]
