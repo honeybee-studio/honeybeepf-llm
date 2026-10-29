@@ -2,6 +2,8 @@ use std::borrow::Cow;
 
 use serde_json::Value;
 
+use crate::chunked::{ChunkRules, ChunkWalk};
+
 /// Find byte pattern in haystack
 pub fn find_pattern(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     let Some((&first, rest)) = needle.split_first() else {
@@ -40,37 +42,7 @@ pub fn decode_chunked_body(buffer: &[u8]) -> Cow<'_, [u8]> {
     }
 
     let mut result = Vec::with_capacity(buffer.len());
-    let mut pos = 0;
-
-    while pos < buffer.len() {
-        let size_end = match find_pattern(&buffer[pos..], b"\r\n") {
-            Some(i) => pos + i,
-            None => break,
-        };
-
-        let size_str = String::from_utf8_lossy(&buffer[pos..size_end]);
-        let chunk_size = match usize::from_str_radix(size_str.trim(), 16) {
-            Ok(n) => n,
-            Err(_) => break,
-        };
-
-        if chunk_size == 0 {
-            break;
-        }
-
-        let data_start = size_end + 2;
-        // A garbled size line can claim more than usize holds; treat it like any chunk past the buffer.
-        let data_end = match data_start.checked_add(chunk_size) {
-            Some(end) if end <= buffer.len() => end,
-            _ => {
-                result.extend_from_slice(&buffer[data_start..]);
-                break;
-            }
-        };
-
-        result.extend_from_slice(&buffer[data_start..data_end]);
-        pos = data_end + 2;
-    }
+    ChunkWalk::new(ChunkRules::BASIC).walk(buffer, |data| result.extend_from_slice(data));
 
     if result.is_empty() {
         Cow::Borrowed(buffer)

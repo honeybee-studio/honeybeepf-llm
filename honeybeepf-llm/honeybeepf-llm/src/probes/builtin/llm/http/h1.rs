@@ -1,6 +1,7 @@
 //! HTTP/1.1 request detection and response parsing: framing, decoding, SSE or JSON usage.
 
 use honeybeepf_llm_core::byte_utils;
+use honeybeepf_llm_core::chunked::{ChunkState, ChunkWalk};
 use honeybeepf_llm_core::types::UsageInfo;
 
 use super::ProtocolParser;
@@ -20,76 +21,42 @@ pub struct ResponseProgress {
 /// Chunk decoding resumed across reads; passes on the bytes `byte_utils::decode_chunked_body` would return.
 #[derive(Default)]
 struct Dechunker {
-    /// Body offset of the next size line or data byte.
+    /// Body offset of the next byte the walk has not used.
     pos: usize,
-    state: Dechunk,
-    decoded_any: bool,
-}
-
-#[derive(Default, Clone, Copy)]
-enum Dechunk {
-    #[default]
-    Size,
-    Data(usize),
+    walk: ChunkWalk,
     /// Not chunked, or stopped before any data, which decode_chunked_body returns unchanged.
-    Raw,
-    Stopped,
+    raw: bool,
+    decoded_any: bool,
 }
 
 impl Dechunker {
     fn advance(&mut self, body: &[u8], chunked: bool, mut sink: impl FnMut(&[u8])) {
-        if !chunked {
-            self.state = Dechunk::Raw;
-        }
-        loop {
+        self.raw |= !chunked;
+        if !self.stopped() {
+            let decoded_any = &mut self.decoded_any;
             let rest = body.get(self.pos..).unwrap_or_default();
-            match self.state {
-                Dechunk::Stopped => return,
-                Dechunk::Raw => {
-                    sink(rest);
-                    self.pos = body.len();
-                    return;
-                }
-                Dechunk::Data(_) if rest.is_empty() => return,
-                Dechunk::Data(left) => {
-                    let n = left.min(rest.len());
-                    sink(&rest[..n]);
-                    self.decoded_any = true;
-                    self.pos += n;
-                    self.state = if n < left {
-                        Dechunk::Data(left - n)
-                    } else {
-                        // The CRLF after the data is skipped unchecked, as decode_chunked_body does.
-                        self.pos += 2;
-                        Dechunk::Size
-                    };
-                }
-                Dechunk::Size => {
-                    let Some(line_end) = byte_utils::find_pattern(rest, b"\r\n") else {
-                        return;
-                    };
-                    let size = std::str::from_utf8(&rest[..line_end])
-                        .ok()
-                        .and_then(|s| usize::from_str_radix(s.trim(), 16).ok());
-                    self.state = match size {
-                        Some(0) | None if !self.decoded_any => {
-                            self.pos = 0;
-                            Dechunk::Raw
-                        }
-                        Some(0) | None => Dechunk::Stopped,
-                        Some(n) => {
-                            self.pos += line_end + 2;
-                            Dechunk::Data(n)
-                        }
-                    };
-                }
+            self.pos += self.walk.walk(rest, |data| {
+                *decoded_any = true;
+                sink(data);
+            });
+            if self.stopped() && !self.decoded_any {
+                self.raw = true;
+                self.pos = 0;
             }
+        }
+        if self.raw {
+            sink(body.get(self.pos..).unwrap_or_default());
+            self.pos = body.len();
         }
     }
 
     /// Whether no further size line will be read, so only the full walk can tell if the body ended.
     fn stopped(&self) -> bool {
-        matches!(self.state, Dechunk::Stopped | Dechunk::Raw)
+        self.raw
+            || matches!(
+                self.walk.state(),
+                ChunkState::Trailer | ChunkState::Ended | ChunkState::Broken
+            )
     }
 }
 
