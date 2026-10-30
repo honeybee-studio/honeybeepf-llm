@@ -18,6 +18,14 @@ pub struct ResponseProgress {
     sse: SseCursor,
 }
 
+#[cfg(test)]
+impl ResponseProgress {
+    /// Bytes of an unfinished SSE line held for the next read.
+    pub fn held_line_len(&self) -> usize {
+        self.sse.partial_len()
+    }
+}
+
 /// Chunk decoding resumed across reads; passes on the bytes `byte_utils::decode_chunked_body` would return.
 #[derive(Default)]
 struct Dechunker {

@@ -726,6 +726,18 @@ fn test_sse_response_over_buffer_limit_without_usage_is_unparsed_at_the_next_req
 }
 
 #[test]
+fn test_sse_line_cut_by_the_buffer_limit_is_not_kept_twice() {
+    // Ends past the limit, so it is unfinished at the takeover, yet stays under the line limit.
+    let line = format!("data: {}\n\n", "x".repeat(MAX_RESPONSE_BUFFER_SIZE - 50));
+    let body = [line.as_bytes(), &openai_sse_body(10)].concat();
+    let reads = typed_reads("text/event-stream", "Content-Length: {len}", &body);
+    let mut p = StreamProcessor::new();
+    let out = outcomes(&mut p, &reads, None);
+    assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+    assert_eq!(p.read_progress.held_line_len(), 0);
+}
+
+#[test]
 fn test_sse_response_over_buffer_limit_missing_a_read_is_unparsed_once() {
     // A whole read lost before the ringbuf: the chunk walk loses its place.
     let mut reads = typed_reads(
