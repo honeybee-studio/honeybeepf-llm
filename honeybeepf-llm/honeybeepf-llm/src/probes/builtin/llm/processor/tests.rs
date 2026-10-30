@@ -832,6 +832,92 @@ fn test_response_after_empty_lines_is_recorded() {
     }
 }
 
+use crate::probes::builtin::llm::http::test_support::es_event;
+
+const CONVERSE_STREAM_REQUEST: &[u8] = b"POST /model/anthropic.claude-sonnet-5-5-v1%3A0/converse-stream HTTP/1.1\r\nHost: bedrock-runtime.us-east-1.amazonaws.com\r\nContent-Type: application/json\r\n\r\n{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hi\"}]}]}";
+
+/// A Bedrock stream in reads: the head, then one message per chunk and read, `last` closing the body.
+fn bedrock_stream_reads(deltas: usize, delta_len: usize, last: &[u8]) -> Vec<Vec<u8>> {
+    let chunk = |m: &[u8]| [format!("{:x}\r\n", m.len()).as_bytes(), m, b"\r\n"].concat();
+    let mut reads = vec![b"HTTP/1.1 200 OK\r\nContent-Type: application/vnd.amazon.eventstream\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec()];
+    let delta = format!(
+        r#"{{"contentBlockIndex":0,"delta":{{"text":"{}"}}}}"#,
+        "x".repeat(delta_len)
+    );
+    reads.extend((0..deltas).map(|_| chunk(&es_event("contentBlockDelta", &delta))));
+    reads.push([chunk(last), b"0\r\n\r\n".to_vec()].concat());
+    reads
+}
+
+fn converse_metadata() -> Vec<u8> {
+    es_event(
+        "metadata",
+        r#"{"usage":{"inputTokens":30,"outputTokens":9,"totalTokens":39}}"#,
+    )
+}
+
+fn bedrock_call(p: &mut StreamProcessor, request: &[u8], reads: &[Vec<u8>]) -> Vec<Outcome> {
+    let mut out = send(p, LlmDirection::Write, request, None);
+    for r in reads {
+        out.extend(send(p, LlmDirection::Read, r, None));
+    }
+    out
+}
+
+#[test]
+fn test_bedrock_streams_after_count_tokens_are_recorded() {
+    let count_tokens = b"POST /model/anthropic.claude-sonnet-5-5-v1%3A0/count-tokens HTTP/1.1\r\nHost: bedrock-runtime.us-east-1.amazonaws.com\r\nContent-Type: application/json\r\n\r\n{\"input\":{}}";
+    let mut p = StreamProcessor::new();
+    let mut out = exchange(
+        &mut p,
+        count_tokens,
+        &h1("application/json", r#"{"inputTokens":14}"#),
+    );
+    out.extend(bedrock_call(
+        &mut p,
+        CONVERSE_STREAM_REQUEST,
+        &bedrock_stream_reads(5, 20, &converse_metadata()),
+    ));
+    out.extend(bedrock_call(
+        &mut p,
+        CONVERSE_STREAM_REQUEST,
+        &bedrock_stream_reads(0, 0, &converse_metadata()),
+    ));
+    assert!(unparsed(&out).is_empty(), "{out:?}");
+    assert_eq!(count(&out, Outcome::Recorded), 2, "{out:?}");
+}
+
+#[test]
+fn test_bedrock_stream_over_buffer_limit_is_unparsed() {
+    // ~16 KB messages, one per read as the server flushes them, until the stream passes 16 MB.
+    let reads = bedrock_stream_reads(1050, 16_000, &converse_metadata());
+    assert!(reads.iter().map(Vec::len).sum::<usize>() > MAX_RESPONSE_BUFFER_SIZE);
+    let mut p = StreamProcessor::new();
+    let mut out = bedrock_call(&mut p, CONVERSE_STREAM_REQUEST, &reads);
+    out.extend(bedrock_call(
+        &mut p,
+        CONVERSE_STREAM_REQUEST,
+        &bedrock_stream_reads(1, 20, &converse_metadata()),
+    ));
+    assert_eq!(
+        unparsed(&out),
+        [UnparsedReason::ResponseTooLarge],
+        "{out:?}"
+    );
+    assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+}
+
+#[test]
+fn test_bedrock_stream_missing_its_last_read_resyncs_on_the_next_response() {
+    let reads = bedrock_stream_reads(5, 20, &converse_metadata());
+    let mut p = StreamProcessor::new();
+    let mut out = bedrock_call(&mut p, CONVERSE_STREAM_REQUEST, &reads[..reads.len() - 1]);
+    out.extend(bedrock_call(&mut p, CONVERSE_STREAM_REQUEST, &reads));
+    assert_eq!(unparsed(&out), [UnparsedReason::CaptureLost], "{out:?}");
+    assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+    assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+}
+
 fn fastest(mut run: impl FnMut()) -> std::time::Duration {
     (0..3)
         .map(|_| {

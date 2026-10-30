@@ -7,6 +7,7 @@ mod body;
 #[cfg(test)]
 mod chunk_cases;
 mod encoding;
+mod eventstream;
 mod h1;
 mod h2;
 mod json_ends;
@@ -50,11 +51,46 @@ pub trait ProtocolParser: Send + Sync {
 }
 
 #[cfg(test)]
-mod test_support {
+pub(crate) mod test_support {
     use super::*;
 
     pub(super) fn tokens(info: Option<UsageInfo>) -> Option<(u64, u64)> {
         info.map(|u| (u.prompt_tokens, u.completion_tokens))
+    }
+
+    /// One AWS event stream message with string headers, framed with both CRCs.
+    pub(crate) fn es_message(headers: &[(&str, &str)], payload: &[u8]) -> Vec<u8> {
+        let crc = |bytes: &[u8]| {
+            let mut crc = flate2::Crc::new();
+            crc.update(bytes);
+            crc.sum().to_be_bytes()
+        };
+        let mut packed = Vec::new();
+        for (name, value) in headers {
+            packed.push(name.len() as u8);
+            packed.extend_from_slice(name.as_bytes());
+            packed.push(7);
+            packed.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            packed.extend_from_slice(value.as_bytes());
+        }
+        let total = 12 + packed.len() + payload.len() + 4;
+        let mut msg = (total as u32).to_be_bytes().to_vec();
+        msg.extend_from_slice(&(packed.len() as u32).to_be_bytes());
+        msg.extend_from_slice(&crc(&msg));
+        msg.extend_from_slice(&packed);
+        msg.extend_from_slice(payload);
+        msg.extend_from_slice(&crc(&msg));
+        msg
+    }
+
+    /// A Bedrock event message with a JSON payload.
+    pub(crate) fn es_event(event_type: &str, payload: &str) -> Vec<u8> {
+        let headers = [
+            (":event-type", event_type),
+            (":content-type", "application/json"),
+            (":message-type", "event"),
+        ];
+        es_message(&headers, payload.as_bytes())
     }
 
     /// Usage Gemini sends when nothing was generated: no `candidatesTokenCount`.

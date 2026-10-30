@@ -7,6 +7,7 @@ use honeybeepf_llm_core::types::UsageInfo;
 use super::ProtocolParser;
 use super::body::{extract_text_from_json, parse_response_json};
 use super::encoding;
+use super::eventstream::{EventStreamCursor, parse_event_stream_body};
 use super::registry::PROVIDER_REGISTRY;
 use super::sse::{SseCursor, parse_sse_body};
 use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
@@ -16,6 +17,7 @@ use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
 pub struct ResponseProgress {
     chunks: Dechunker,
     sse: SseCursor,
+    events: EventStreamCursor,
 }
 
 /// Chunk decoding resumed across reads; passes on the bytes `byte_utils::decode_chunked_body` would return.
@@ -116,13 +118,15 @@ impl Framing {
     }
 }
 
-/// The final response head with its framing and SSE flag.
+/// The final response head with its framing and stream flags.
 struct Head<'b> {
     header_slots: [httparse::Header<'b>; 64],
     header_count: usize,
     body: &'b [u8],
     framing: Framing,
     is_sse: bool,
+    /// AWS binary event stream (Bedrock `*-stream` routes).
+    is_eventstream: bool,
 }
 
 impl<'b> Head<'b> {
@@ -152,6 +156,11 @@ fn final_head(buffer: &[u8]) -> Option<Head<'_>> {
             content_length(resp.headers).map_or(Framing::UntilClose, Framing::Length)
         };
         let is_sse = header_contains(resp.headers, "Content-Type", b"text/event-stream");
+        let is_eventstream = header_contains(
+            resp.headers,
+            "Content-Type",
+            b"application/vnd.amazon.eventstream",
+        );
         // httparse fills the array from the front and shrinks `resp.headers` to the parsed ones.
         let header_count = resp.headers.len();
         return Some(Head {
@@ -160,14 +169,16 @@ fn final_head(buffer: &[u8]) -> Option<Head<'_>> {
             body: &rest[n..],
             framing,
             is_sse,
+            is_eventstream,
         });
     }
 }
 
-/// Framing and body of a final response sent as is: neither SSE nor content-encoded.
+/// Framing and body of a final response sent as is: not a stream and not content-encoded.
 pub(super) fn plain_body(buffer: &[u8]) -> Option<(Framing, &[u8])> {
     let head = final_head(buffer)?;
-    (!head.is_sse && !encoding::is_encoded(head.headers())).then_some((head.framing, head.body))
+    (!head.is_sse && !head.is_eventstream && !encoding::is_encoded(head.headers()))
+        .then_some((head.framing, head.body))
 }
 
 fn header_contains(headers: &[httparse::Header], name: &str, pattern: &[u8]) -> bool {
@@ -230,13 +241,24 @@ impl ProtocolParser for Http11Parser {
 
         // SSE events can straddle chunk boundaries, so they are read only after dechunking.
         // JSON bodies are walked too: where the walk stops tells `ended` when the full check is worth it.
-        let ResponseProgress { chunks, sse } = progress;
+        let ResponseProgress {
+            chunks,
+            sse,
+            events,
+        } = progress;
         let feed_sse = head.is_sse && !is_encoded;
+        let feed_events = head.is_eventstream && !is_encoded;
         chunks.advance(body, is_chunked, |data| {
             if feed_sse {
                 sse.feed(data);
+            } else if feed_events {
+                events.feed(data);
             }
         });
+        // CRC-checked messages cannot be found again in raw bytes once the chunk framing broke.
+        if feed_events {
+            return events.usage();
+        }
 
         // A close-delimited body has no end to wait for, so it is decoded as it stands.
         // A chunked body can only have ended once the walk stopped or it ends in the terminator.
@@ -272,6 +294,9 @@ impl ProtocolParser for Http11Parser {
 
         if head.is_sse {
             return parse_sse_body(&decompressed);
+        }
+        if head.is_eventstream {
+            return parse_event_stream_body(&decompressed);
         }
 
         let trimmed = byte_utils::trim_trailing_whitespace(&decompressed);
