@@ -165,6 +165,7 @@ can be told apart from a drop in traffic. `reason` is one of:
 | `connection_closed` | the connection closed before usage was found |
 | `request_too_large` | the captured request bytes (the first 4 KB of each write) passed the 8 MB buffer limit |
 | `response_too_large` | the response passed the 16 MB buffer limit and is not an uncompressed HTTP/1.1 JSON body with usage in its first or last 64 KB (SSE, compressed and HTTP/2 responses always count here) |
+| `background_unfinished` | an OpenAI Responses call made with `"background": true` had no usage in any poll the node saw: not polled for an hour, more than 4096 such calls waiting, or ended without usage |
 
 Not counted here: a read lost whole because the ring buffer was full (see `llm_events_total{stage="reserve_fail"}`),
 and a connection left idle for 300 s without being closed (for example a killed process).

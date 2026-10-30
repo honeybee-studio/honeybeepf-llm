@@ -15,6 +15,7 @@ mod registry;
 mod sse;
 
 // Re-export main types
+pub use body::BackgroundState;
 pub use h1::{Http11Parser, ResponseProgress};
 pub use h2::Http2Parser;
 pub use json_ends::JsonEnds;

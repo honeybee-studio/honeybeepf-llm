@@ -256,7 +256,7 @@ mod tests {
         let (last, most) = reads.split_last().expect("reads");
         assert!(most.iter().all(|read| ends.feed(read)));
         assert_eq!(ends.feed(last), ends.usage.is_some());
-        assert_eq!(ends.usage, parse_response_json(&body));
+        assert_eq!(ends.usage, parse_response_json(&body, &mut None));
         (ends.usage, ends.head.capacity() + ends.tail.capacity())
     }
 

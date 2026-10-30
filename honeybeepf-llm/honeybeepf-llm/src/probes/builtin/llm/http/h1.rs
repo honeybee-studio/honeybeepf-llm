@@ -5,7 +5,7 @@ use honeybeepf_llm_core::chunked::{ChunkRules, ChunkState, ChunkWalk};
 use honeybeepf_llm_core::types::UsageInfo;
 
 use super::ProtocolParser;
-use super::body::{extract_text_from_json, parse_response_json};
+use super::body::{BackgroundState, extract_text_from_json, is_response_id, parse_response_json};
 use super::encoding;
 use super::registry::PROVIDER_REGISTRY;
 use super::sse::{SseCursor, parse_sse_body};
@@ -16,6 +16,14 @@ use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
 pub struct ResponseProgress {
     chunks: Dechunker,
     sse: SseCursor,
+    background: Option<BackgroundState>,
+}
+
+impl ResponseProgress {
+    /// Where the background call this response belongs to stands, once parsing has seen it.
+    pub fn take_background(&mut self) -> Option<BackgroundState> {
+        self.background.take()
+    }
 }
 
 /// Chunk decoding resumed across reads; passes on the bytes `byte_utils::decode_chunked_body` would return.
@@ -69,6 +77,27 @@ impl Http11Parser {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
         matches!(req.parse(buffer), Ok(httparse::Status::Complete(_)))
+    }
+
+    /// The id in a `GET <provider path>/{id}` request head: how a background call's result is fetched.
+    pub fn retrieved_response_id(buffer: &[u8]) -> Option<&str> {
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut req = httparse::Request::new(&mut headers);
+        req.parse(buffer).ok()?;
+        if req.method != Some("GET") {
+            return None;
+        }
+        let path = req.path?;
+        let (base, id) = path
+            .split_once('?')
+            .map_or(path, |(p, _)| p)
+            .rsplit_once('/')?;
+        let host = req
+            .headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("Host"))
+            .and_then(|h| std::str::from_utf8(h.value).ok())?;
+        (is_response_id(id) && PROVIDER_REGISTRY.find_provider(host, base).is_some()).then_some(id)
     }
 
     /// Whether the buffer starts with a complete request head whose Host no provider serves.
@@ -230,7 +259,11 @@ impl ProtocolParser for Http11Parser {
 
         // SSE events can straddle chunk boundaries, so they are read only after dechunking.
         // JSON bodies are walked too: where the walk stops tells `ended` when the full check is worth it.
-        let ResponseProgress { chunks, sse } = progress;
+        let ResponseProgress {
+            chunks,
+            sse,
+            background,
+        } = progress;
         let feed_sse = head.is_sse && !is_encoded;
         chunks.advance(body, is_chunked, |data| {
             if feed_sse {
@@ -249,13 +282,14 @@ impl ProtocolParser for Http11Parser {
 
         if feed_sse {
             // A truncated read desyncs the chunk framing; once the stream has ended, fall back to raw lines.
-            return sse.usage().or_else(|| {
+            let usage = sse.usage().or_else(|| {
                 if is_chunked && ended() {
                     parse_sse_body(body)
                 } else {
                     None
                 }
             });
+            return stream_end(usage, background);
         }
 
         // Decoding is not incremental, so wait for the framed end.
@@ -271,7 +305,7 @@ impl ProtocolParser for Http11Parser {
         let decompressed = encoding::decode(dechunked, head.headers())?;
 
         if head.is_sse {
-            return parse_sse_body(&decompressed);
+            return stream_end(parse_sse_body(&decompressed), background);
         }
 
         let trimmed = byte_utils::trim_trailing_whitespace(&decompressed);
@@ -286,8 +320,19 @@ impl ProtocolParser for Http11Parser {
         let start = s.find('{')?;
         let json_body = &s[start..];
 
-        parse_response_json(json_body)
+        parse_response_json(json_body, background)
     }
+}
+
+/// Responses streams carry usage only in their terminal event, so a stream with usage has ended.
+fn stream_end(
+    usage: Option<UsageInfo>,
+    background: &mut Option<BackgroundState>,
+) -> Option<UsageInfo> {
+    if usage.is_some() {
+        *background = Some(BackgroundState::Ended);
+    }
+    usage
 }
 
 /// Whether a chunked body holds its last chunk and trailer section, found by following the chunk sizes.
@@ -367,6 +412,23 @@ mod tests {
         );
         let get = b"GET /v1/responses/r1 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
         assert_eq!(Http11Parser.detect_request(get), None);
+    }
+
+    #[test]
+    fn retrieval_gets_give_their_response_id() {
+        for (req, id) in [
+            (&b"GET /v1/responses/resp_1 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n"[..], Some("resp_1")),
+            (b"GET /v1/responses/resp_1?stream=true&starting_after=2 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n", Some("resp_1")),
+            (b"GET /openai/responses/resp_1?api-version=2025-04-01-preview HTTP/1.1\r\nHost: r.openai.azure.com\r\n\r\n", Some("resp_1")),
+            (b"GET /v1/responses/resp_1/input_items HTTP/1.1\r\nHost: api.openai.com\r\n\r\n", None),
+            (b"GET /v1/responses/resp_1 HTTP/1.1\r\nHost: noise.internal\r\n\r\n", None),
+            (b"POST /v1/responses/resp_1 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n", None),
+            (b"GET /v1/responses/ HTTP/1.1\r\nHost: api.openai.com\r\n\r\n", None),
+            (b"GET /v1/responses/resp%201 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n", None),
+            (b"GET /v1/responses/resp_1 HTTP/1.1\r\n\r\n", None),
+        ] {
+            assert_eq!(Http11Parser::retrieved_response_id(req), id, "{req:?}");
+        }
     }
 
     #[test]
