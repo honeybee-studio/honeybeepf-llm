@@ -106,7 +106,10 @@ impl HoneyBeeEngine {
 
             if let Ok(node_name) = resolved_node_name {
                 info!("Starting K8s pod watcher for node: {}", node_name);
-                let pod_resolver = Arc::new(k8s::PodResolver::new());
+                let pod_labels = self.settings.builtin_probes.llm_pod_labels.as_deref();
+                let pod_resolver = Arc::new(k8s::PodResolver::with_pod_labels(
+                    pod_labels.unwrap_or_default(),
+                ));
                 match pod_resolver.start_k8s_watcher(node_name).await {
                     Ok(_handle) => {
                         info!("K8s pod watcher started");

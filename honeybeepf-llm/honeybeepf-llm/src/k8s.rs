@@ -32,10 +32,12 @@ pub const UNATTRIBUTED: &str = "unattributed";
 pub struct PodInfo {
     pub pod_name: String,
     pub namespace: String,
-    /// Owner kind: "Deployment", "CronJob", "StatefulSet", "Pod" (no owner), etc.; None if unresolvable.
+    /// Owner kind: "Deployment", "Rollout", "CronJob", "StatefulSet", "Pod" (no owner), etc.; None if unresolvable.
     pub workload_kind: Option<String>,
     /// Owner name, e.g. "my-app" (Deployment name).
     pub workload_name: Option<String>,
+    /// (metric attribute, value) of each allowlisted label the pod has.
+    pub pod_labels: Vec<(String, String)>,
 }
 
 impl PodInfo {
@@ -63,6 +65,8 @@ pub struct PodResolver {
     /// container_id (short 12-char prefix) → PodInfo.
     /// Populated and updated by the K8s watcher task.
     pod_store: RwLock<HashMap<String, Arc<PodInfo>>>,
+    /// (pod label key, metric attribute) of each label copied onto LLM metrics.
+    pod_labels: Vec<(String, String)>,
 }
 
 impl Default for PodResolver {
@@ -73,10 +77,16 @@ impl Default for PodResolver {
 
 impl PodResolver {
     pub fn new() -> Self {
+        Self::with_pod_labels(&[])
+    }
+
+    /// Resolver that also copies the given pod labels onto LLM metrics.
+    pub fn with_pod_labels(allowlist: &[String]) -> Self {
         Self {
             cgroup_v2: detect_cgroup_v2(),
             cgroup_cache: RwLock::new(HashMap::new()),
             pod_store: RwLock::new(HashMap::new()),
+            pod_labels: pod_label_attrs(allowlist),
         }
     }
 
@@ -212,6 +222,20 @@ impl PodResolver {
             .cloned()
     }
 
+    /// (metric attribute, value) of the allowlisted labels a pod has; read from every event, as labels can change.
+    fn allowlisted_labels(&self, metadata: &ObjectMeta) -> Vec<(String, String)> {
+        let Some(labels) = metadata.labels.as_ref() else {
+            return Vec::new();
+        };
+        self.pod_labels
+            .iter()
+            .filter_map(|(key, attr)| {
+                let value = labels.get(key).filter(|v| !v.is_empty())?;
+                Some((attr.clone(), value.clone()))
+            })
+            .collect()
+    }
+
     /// Process a pod event from the K8s API watcher.
     fn apply_pod_event(&self, pod: &Pod, is_delete: bool, cronjob: Option<String>) {
         let metadata = &pod.metadata;
@@ -256,12 +280,12 @@ impl PodResolver {
                 (None, Some(prev)) => (prev.workload_kind.clone(), prev.workload_name.clone()),
                 (cronjob, _) => workload_of(metadata, cronjob).unzip(),
             };
-
             let info = Arc::new(PodInfo {
                 pod_name,
                 namespace,
                 workload_kind,
                 workload_name,
+                pod_labels: self.allowlisted_labels(metadata),
             });
 
             if let Ok(mut store) = self.pod_store.write() {
@@ -318,12 +342,36 @@ fn detect_cgroup_v2() -> bool {
     std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists()
 }
 
+/// Metric attribute for each allowlisted pod label; Prometheus label names allow only `[a-zA-Z0-9_]`.
+fn pod_label_attrs(allowlist: &[String]) -> Vec<(String, String)> {
+    let mut attrs: Vec<(String, String)> = Vec::new();
+    for key in allowlist.iter().filter(|k| !k.is_empty()) {
+        let name: String = key
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let attr = format!("target.pod.label.{name}");
+        if let Some((first, _)) = attrs.iter().find(|(_, a)| *a == attr) {
+            warn!("Pod labels {first} and {key} both map to {attr}; only {first} is recorded");
+            continue;
+        }
+        attrs.push((key.clone(), attr));
+    }
+    attrs
+}
+
 fn controller_owner(metadata: &ObjectMeta) -> Option<&OwnerReference> {
     let refs = metadata.owner_references.as_ref()?;
     refs.iter()
         .find(|r| r.controller == Some(true))
         .or_else(|| refs.first())
 }
+
+/// Owner kinds of a ReplicaSet, by the pod label that holds the ReplicaSet's name suffix.
+const RS_OWNERS: [(&str, &str); 2] = [
+    ("Deployment", "pod-template-hash"),
+    ("Rollout", "rollouts-pod-template-hash"),
+];
 
 /// Owning workload (kind, name) of a pod; `cronjob` is the owner of its Job, if looked up.
 fn workload_of(metadata: &ObjectMeta, cronjob: Option<String>) -> Option<(String, String)> {
@@ -334,15 +382,13 @@ fn workload_of(metadata: &ObjectMeta, cronjob: Option<String>) -> Option<(String
         return None;
     }
     let workload = match owner.kind.as_str() {
-        // A Deployment names its ReplicaSets "<deployment>-<pod-template-hash>".
-        "ReplicaSet" => match metadata
-            .labels
-            .as_ref()
-            .and_then(|l| l.get("pod-template-hash"))
-            .and_then(|hash| owner.name.strip_suffix(hash.as_str())?.strip_suffix('-'))
-            .filter(|d| !d.is_empty())
-        {
-            Some(deployment) => ("Deployment".to_string(), deployment.to_string()),
+        // Deployments and Argo Rollouts name their ReplicaSets "<owner>-<hash label value>".
+        "ReplicaSet" => match RS_OWNERS.iter().find_map(|&(kind, hash_label)| {
+            let hash = metadata.labels.as_ref()?.get(hash_label)?;
+            let name = owner.name.strip_suffix(hash.as_str())?.strip_suffix('-')?;
+            (!name.is_empty()).then_some((kind, name))
+        }) {
+            Some((kind, name)) => (kind.to_string(), name.to_string()),
             None => (owner.kind.clone(), owner.name.clone()),
         },
         "Job" => match cronjob {
@@ -621,6 +667,12 @@ mod tests {
             pod_meta(vec![owner(kind, name, Some(true))], hash)
         };
         let rs = |name: &str, hash| meta("ReplicaSet", name, hash);
+        // Argo Rollouts names its ReplicaSets "<rollout>-<hash>" under its own hash label.
+        let argo = |name: &str, hash: &str| {
+            let mut m = rs(name, None);
+            m.labels = Some([("rollouts-pod-template-hash".into(), hash.into())].into());
+            m
+        };
         // The controller reference wins over an earlier non-controller owner.
         let two = vec![
             owner("Secret", "s", None),
@@ -633,6 +685,8 @@ mod tests {
             (rs("web-abc", None), None, Some("ReplicaSet/web-abc")),
             (rs("web-abc", Some("xyz")), None, Some("ReplicaSet/web-abc")),
             (rs("h1", Some("h1")), None, Some("ReplicaSet/h1")),
+            (argo("api-6f7d8", "6f7d8"), None, Some("Rollout/api")),
+            (argo("api-6f7d8", "xyz"), None, Some("ReplicaSet/api-6f7d8")),
             (meta("Job", "r-1", None), Some("r"), Some("CronJob/r")),
             (meta("Job", "r-1", None), None, Some("Job/r-1")),
             (meta("DaemonSet", "ds", None), None, Some("DaemonSet/ds")),
@@ -741,12 +795,70 @@ mod tests {
     }
 
     #[test]
+    fn test_pod_labels_copied_from_allowlist_and_refreshed() {
+        use k8s_openapi::api::core::v1::{ContainerStatus, PodStatus};
+        // The second version key maps to the same attribute, so the first one wins.
+        let (v1, v2) = ("app.kubernetes.io/version", "app-kubernetes-io/version");
+        let allow = ["variant", v1, v2, "", "tier"].map(str::to_string);
+        let resolver = PodResolver {
+            cgroup_v2: false,
+            ..PodResolver::with_pod_labels(&allow)
+        };
+        let status = ContainerStatus {
+            container_id: Some(format!("containerd://{}", "ab".repeat(32))),
+            ..Default::default()
+        };
+        let mut pod = Pod {
+            metadata: pod_meta(vec![], None),
+            status: Some(PodStatus {
+                container_statuses: Some(vec![status]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let stored = |pod: &Pod, labels: &[(&str, &str)]| {
+            let mut pod = pod.clone();
+            let labels = labels.iter().map(|&(k, v)| (k.into(), v.into()));
+            pod.metadata.labels = Some(labels.chain([("other".into(), "x".into())]).collect());
+            resolver.apply_pod_event(&pod, false, None);
+            let info = resolver.stored_info(&pod.metadata).expect("pod stored");
+            let attrs = info.pod_labels.iter().map(|(a, v)| format!("{a}={v}"));
+            attrs.collect::<Vec<_>>()
+        };
+        assert_eq!(
+            stored(
+                &pod,
+                &[("variant", "b"), (v1, "1.2"), (v2, "9"), ("tier", "")]
+            ),
+            [
+                "target.pod.label.variant=b",
+                "target.pod.label.app_kubernetes_io_version=1.2"
+            ]
+        );
+        // A relabelled pod gets its new value; a removed label is dropped.
+        assert_eq!(
+            stored(&pod, &[("variant", "a")]),
+            ["target.pod.label.variant=a"]
+        );
+
+        pod.metadata.labels = Some([("variant".into(), "b".into())].into());
+        let none = PodResolver {
+            cgroup_v2: false,
+            ..PodResolver::new()
+        };
+        none.apply_pod_event(&pod, false, None);
+        let info = none.stored_info(&pod.metadata).expect("pod stored");
+        assert!(info.pod_labels.is_empty(), "empty allowlist adds no labels");
+    }
+
+    #[test]
     fn test_pod_info_service_name() {
         let info = PodInfo {
             pod_name: "my-app-7d4b8c9f5-abc12".to_string(),
             namespace: "default".to_string(),
             workload_kind: Some("Deployment".to_string()),
             workload_name: Some("my-app".to_string()),
+            pod_labels: Vec::new(),
         };
         assert_eq!(info.service_name(), "my-app");
     }
@@ -758,6 +870,7 @@ mod tests {
             namespace: "default".to_string(),
             workload_kind: None,
             workload_name: None,
+            pod_labels: Vec::new(),
         };
         assert_eq!(info.service_name(), "standalone-pod");
     }
