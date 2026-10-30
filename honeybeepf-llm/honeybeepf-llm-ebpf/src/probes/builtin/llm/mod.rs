@@ -15,6 +15,8 @@
 //! - `probe_ssl_task_exit` → `sched:sched_process_exit`, clears the exiting thread's call state
 
 use aya_ebpf::{
+    EbpfContext,
+    helpers::r#gen,
     macros::{tracepoint, uprobe, uretprobe},
     programs::{ProbeContext, RetProbeContext, TracePointContext},
 };
@@ -38,6 +40,7 @@ pub fn probe_ssl_rw_enter(ctx: ProbeContext) -> u32 {
     count(LLM_STAT_ENTER);
     let tid = get_current_tid();
     Session::start(tid, ctx.arg(0).unwrap_or(0), ctx.arg(1).unwrap_or(0), None);
+    keep_task_stack(&ctx);
     0
 }
 
@@ -65,6 +68,7 @@ pub fn probe_ssl_rw_ex_enter(ctx: ProbeContext) -> u32 {
         ctx.arg(1).unwrap_or(0),
         Some(ctx.arg(3).unwrap_or(0)),
     );
+    keep_task_stack(&ctx);
     0
 }
 
@@ -88,6 +92,7 @@ pub fn probe_ssl_do_handshake_enter(ctx: ProbeContext) -> u32 {
     let ssl = ctx.arg(0).unwrap_or(0);
     filter::forget(ssl);
     Session::start(tid, ssl, 0, None);
+    keep_task_stack(&ctx);
     0
 }
 
@@ -109,6 +114,7 @@ pub fn probe_ssl_free(ctx: ProbeContext) -> u32 {
         }
         _ => count(LLM_STAT_DISCARD),
     }
+    keep_task_stack(&ctx);
     0
 }
 
@@ -131,7 +137,31 @@ fn emit_llm_event(ctx: &RetProbeContext, rw: u8, is_handshake: bool) -> u32 {
     }
     // Always clear session state - handles success, failure, and reserve failure cases
     Session::clear(tid);
+    keep_task_stack(ctx);
     0
+}
+
+/// Set by the loader where a tail call may share a program with bpf-to-bpf calls (x86-64 5.10+, 6.0+).
+#[unsafe(no_mangle)]
+static TAIL_CALL_OK: u8 = 0;
+
+/// Tail call into the empty NO_PRIV_STACK so this preemptible program keeps its frame on the task stack.
+#[inline(always)]
+fn keep_task_stack<C: EbpfContext>(ctx: &C) {
+    // The verifier skips the call when TAIL_CALL_OK is 0 but still sees it, which disables the private stack.
+    // SAFETY: TAIL_CALL_OK is a u8 static; the volatile read keeps the loader's value from being folded to 0.
+    let ok = unsafe { core::ptr::read_volatile(&TAIL_CALL_OK) };
+    if ok == 0 {
+        return;
+    }
+    // SAFETY: NO_PRIV_STACK holds no program, so the tail call fails and execution continues here.
+    unsafe {
+        r#gen::bpf_tail_call(
+            ctx.as_ptr(),
+            (&raw const NO_PRIV_STACK).cast_mut().cast(),
+            0,
+        );
+    }
 }
 
 /// Send the call's data as up to MAX_SSL_FRAGMENTS events of MAX_SSL_BUF_SIZE bytes each.

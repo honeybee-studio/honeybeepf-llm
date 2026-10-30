@@ -12,7 +12,7 @@ use std::{
 };
 
 use anyhow::Result;
-use aya::Ebpf;
+use aya::{Ebpf, EbpfLoader, util::KernelVersion};
 use aya_log::EbpfLogger;
 use log::{debug, info, warn};
 use tokio::{signal, time::Instant};
@@ -44,7 +44,15 @@ pub struct HoneyBeeEngine {
 impl HoneyBeeEngine {
     pub fn new(settings: Settings, bytecode: &[u8]) -> Result<Self> {
         bump_memlock_rlimit()?;
-        let mut bpf = Ebpf::load(bytecode)?;
+        let tail_call_ok = KernelVersion::current().is_ok_and(tail_call_allowed) as u8;
+        info!(
+            "LLM probes keep the task stack (empty tail call): {}",
+            tail_call_ok == 1
+        );
+        // Not required to exist: test objects without the LLM programs still load.
+        let mut bpf = EbpfLoader::new()
+            .set_global("TAIL_CALL_OK", &tail_call_ok, false)
+            .load(bytecode)?;
 
         // Initialize the eBPF Logger only in debug mode
         if settings.debug.unwrap_or(false) {
@@ -292,6 +300,12 @@ fn bump_memlock_rlimit() -> Result<()> {
     Ok(())
 }
 
+/// Whether the verifier accepts a tail call in a program with bpf-to-bpf calls (x86-64 since 5.10, every JIT since 6.0).
+fn tail_call_allowed(kernel: KernelVersion) -> bool {
+    kernel >= KernelVersion::new(6, 0, 0)
+        || cfg!(target_arch = "x86_64") && kernel >= KernelVersion::new(5, 10, 0)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
@@ -301,6 +315,26 @@ mod tests {
         probes::POLL_INTERVAL_MS,
         settings::{BuiltinProbes, FilesystemProbes},
     };
+
+    #[test]
+    fn test_tail_call_allowed_by_kernel() {
+        let x86 = cfg!(target_arch = "x86_64");
+        for (version, want) in [
+            ((4, 18, 0), false),
+            ((5, 4, 0), false),
+            ((5, 10, 0), x86),
+            ((5, 19, 17), x86),
+            ((6, 0, 0), true),
+            ((7, 0, 0), true),
+        ] {
+            let (major, minor, patch) = version;
+            assert_eq!(
+                tail_call_allowed(KernelVersion::new(major, minor, patch)),
+                want,
+                "{version:?}"
+            );
+        }
+    }
 
     /// A 64-bit little-endian BPF ELF header with no sections, which aya loads without the kernel.
     fn empty_bpf_object() -> Vec<u8> {
