@@ -1,0 +1,166 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+env:
+  IMAGE: ghcr.io/honeybee-studio/honeybeepf-llm
+  # Not oci://ghcr.io/honeybee-studio: helm pushes there as honeybeepf-llm:<version>, the image's own tag.
+  CHART_REPO: oci://ghcr.io/honeybee-studio/charts
+  BUILD_CACHE: type=registry,ref=ghcr.io/honeybee-studio/honeybeepf-llm:buildcache
+
+permissions:
+  contents: read
+
+# One release at a time, so two tags cannot race for the X.Y image tag.
+concurrency:
+  group: release
+
+jobs:
+  version:
+    name: Check version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Tag is on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+      - name: Tag, agent crate and chart name one version
+        id: check
+        run: |
+          version=$(bash ci/check-version.sh . "$GITHUB_REF_NAME")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to GitHub Container Registry (helm)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: printf '%s' "$GHCR_TOKEN" | helm registry login ghcr.io -u "$GHCR_USER" --password-stdin
+
+      # Checked before anything is pushed, and only "not found" counts as free: a registry error must not
+      # let a release be overwritten.
+      - name: Image and chart version are not released yet
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          free() {
+            local out
+            if out=$("$@" 2>&1); then
+              echo "::error::$VERSION is already released ($*); a release is never overwritten"
+              return 1
+            elif ! grep -qiE 'not found|manifest[ _]unknown|name[ _]unknown' <<<"$out"; then
+              echo "::error::cannot tell whether $VERSION exists ($*): $out"
+              return 1
+            fi
+          }
+          free docker buildx imagetools inspect "$IMAGE:$VERSION"
+          free helm show chart "$CHART_REPO/honeybeepf-llm" --version "$VERSION"
+
+  image:
+    name: Push image
+    needs: version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ env.IMAGE }}
+          # latest stays the newest main build.
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: ${{ env.BUILD_CACHE }}
+          provenance: false
+
+  chart:
+    name: Push chart
+    needs: [version, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Log in to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: printf '%s' "$GHCR_TOKEN" | helm registry login ghcr.io -u "$GHCR_USER" --password-stdin
+
+      - name: Package and push chart
+        run: |
+          helm package charts/honeybeepf-llm --version "$VERSION" --app-version "$VERSION"
+          helm push "honeybeepf-llm-$VERSION.tgz" "$CHART_REPO"
+
+  release:
+    name: GitHub release
+    needs: [version, image, chart]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Create release with generated notes
+        run: |
+          printf '%s\n' \
+            "Image: \`$IMAGE:$VERSION\` (also \`${VERSION%.*}\`), linux/amd64 and linux/arm64" \
+            "" \
+            "Chart: \`helm install honeybeepf-llm $CHART_REPO/honeybeepf-llm --version $VERSION\`" >notes.md
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "honeybeepf-llm $VERSION" --notes-file notes.md --generate-notes

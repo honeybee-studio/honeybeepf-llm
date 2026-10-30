@@ -1,6 +1,7 @@
 //! HTTP/1.1 request detection and response parsing: framing, decoding, SSE or JSON usage.
 
 use honeybeepf_llm_core::byte_utils;
+use honeybeepf_llm_core::chunked::{ChunkRules, ChunkState, ChunkWalk};
 use honeybeepf_llm_core::types::UsageInfo;
 
 use super::ProtocolParser;
@@ -20,76 +21,42 @@ pub struct ResponseProgress {
 /// Chunk decoding resumed across reads; passes on the bytes `byte_utils::decode_chunked_body` would return.
 #[derive(Default)]
 struct Dechunker {
-    /// Body offset of the next size line or data byte.
+    /// Body offset of the next byte the walk has not used.
     pos: usize,
-    state: Dechunk,
-    decoded_any: bool,
-}
-
-#[derive(Default, Clone, Copy)]
-enum Dechunk {
-    #[default]
-    Size,
-    Data(usize),
+    walk: ChunkWalk,
     /// Not chunked, or stopped before any data, which decode_chunked_body returns unchanged.
-    Raw,
-    Stopped,
+    raw: bool,
+    decoded_any: bool,
 }
 
 impl Dechunker {
     fn advance(&mut self, body: &[u8], chunked: bool, mut sink: impl FnMut(&[u8])) {
-        if !chunked {
-            self.state = Dechunk::Raw;
-        }
-        loop {
+        self.raw |= !chunked;
+        if !self.stopped() {
+            let decoded_any = &mut self.decoded_any;
             let rest = body.get(self.pos..).unwrap_or_default();
-            match self.state {
-                Dechunk::Stopped => return,
-                Dechunk::Raw => {
-                    sink(rest);
-                    self.pos = body.len();
-                    return;
-                }
-                Dechunk::Data(_) if rest.is_empty() => return,
-                Dechunk::Data(left) => {
-                    let n = left.min(rest.len());
-                    sink(&rest[..n]);
-                    self.decoded_any = true;
-                    self.pos += n;
-                    self.state = if n < left {
-                        Dechunk::Data(left - n)
-                    } else {
-                        // The CRLF after the data is skipped unchecked, as decode_chunked_body does.
-                        self.pos += 2;
-                        Dechunk::Size
-                    };
-                }
-                Dechunk::Size => {
-                    let Some(line_end) = byte_utils::find_pattern(rest, b"\r\n") else {
-                        return;
-                    };
-                    let size = std::str::from_utf8(&rest[..line_end])
-                        .ok()
-                        .and_then(|s| usize::from_str_radix(s.trim(), 16).ok());
-                    self.state = match size {
-                        Some(0) | None if !self.decoded_any => {
-                            self.pos = 0;
-                            Dechunk::Raw
-                        }
-                        Some(0) | None => Dechunk::Stopped,
-                        Some(n) => {
-                            self.pos += line_end + 2;
-                            Dechunk::Data(n)
-                        }
-                    };
-                }
+            self.pos += self.walk.walk(rest, |data| {
+                *decoded_any = true;
+                sink(data);
+            });
+            if self.stopped() && !self.decoded_any {
+                self.raw = true;
+                self.pos = 0;
             }
+        }
+        if self.raw {
+            sink(body.get(self.pos..).unwrap_or_default());
+            self.pos = body.len();
         }
     }
 
     /// Whether no further size line will be read, so only the full walk can tell if the body ended.
     fn stopped(&self) -> bool {
-        matches!(self.state, Dechunk::Stopped | Dechunk::Raw)
+        self.raw
+            || matches!(
+                self.walk.state(),
+                ChunkState::Trailer | ChunkState::Ended | ChunkState::Broken
+            )
     }
 }
 
@@ -122,11 +89,17 @@ impl Http11Parser {
     pub fn is_complete_response(buffer: &[u8]) -> bool {
         final_head(buffer).is_some_and(|head| head.framing.ended(head.body))
     }
+
+    /// Whether the buffer starts with a final response head that has headers; body text that merely starts with
+    /// `HTTP/1.` parses with none, since SSE and JSON bodies have raw newlines only between events.
+    pub fn starts_with_response_head(buffer: &[u8]) -> bool {
+        final_head(buffer).is_some_and(|head| head.header_count > 0)
+    }
 }
 
 /// How the end of a response body is found.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Framing {
+pub(super) enum Framing {
     Length(usize),
     Chunked,
     UntilClose,
@@ -189,6 +162,12 @@ fn final_head(buffer: &[u8]) -> Option<Head<'_>> {
             is_sse,
         });
     }
+}
+
+/// Framing and body of a final response sent as is: neither SSE nor content-encoded.
+pub(super) fn plain_body(buffer: &[u8]) -> Option<(Framing, &[u8])> {
+    let head = final_head(buffer)?;
+    (!head.is_sse && !encoding::is_encoded(head.headers())).then_some((head.framing, head.body))
 }
 
 fn header_contains(headers: &[httparse::Header], name: &str, pattern: &[u8]) -> bool {
@@ -313,35 +292,26 @@ impl ProtocolParser for Http11Parser {
 
 /// Whether a chunked body holds its last chunk and trailer section, found by following the chunk sizes.
 fn chunked_ended(body: &[u8]) -> bool {
-    // Bytes lost in capture break the framing; then only the terminator bytes are left to go by.
-    let desynced = || body.ends_with(b"0\r\n\r\n");
-    let mut rest = body;
-    loop {
-        let Some(line_end) = byte_utils::find_pattern(rest, b"\r\n") else {
-            return false;
-        };
-        let size = rest[..line_end].split(|&b| b == b';').next().unwrap_or(&[]);
-        let Some(size) = std::str::from_utf8(size)
-            .ok()
-            .and_then(|s| usize::from_str_radix(s.trim(), 16).ok())
-        else {
-            return desynced();
-        };
-        // A chunk the response buffer can never hold is a garbled size line, not one still arriving.
-        if size > MAX_RESPONSE_BUFFER_SIZE {
-            return desynced();
-        }
-        rest = &rest[line_end + 2..];
-        if size == 0 {
-            return rest.starts_with(b"\r\n") || byte_utils::contains_pattern(rest, b"\r\n\r\n");
-        }
-        match rest.get(size..).and_then(|after| after.get(..2)) {
-            None => return false,
-            Some(b"\r\n") => rest = &rest[size + 2..],
-            Some(_) => return desynced(),
-        }
+    let mut walk = ChunkWalk::new(ENDED_RULES);
+    walk.walk(body, |_| {});
+    match walk.state() {
+        ChunkState::Ended => true,
+        // Bytes lost in capture break the framing; then only the terminator bytes are left to go by.
+        ChunkState::Broken => body.ends_with(b"0\r\n\r\n"),
+        _ => false,
     }
 }
+
+/// Chunk rules for `chunked_ended`: RFC 9112 extensions and trailers, CRLF after data checked.
+const ENDED_RULES: ChunkRules = ChunkRules {
+    extensions: true,
+    utf8_line: false,
+    data_crlf: true,
+    // A chunk the response buffer can never hold is a garbled size line, not one still arriving.
+    max_size: MAX_RESPONSE_BUFFER_SIZE,
+    bare_lf_breaks: false,
+    max_line: usize::MAX,
+};
 
 fn content_length(headers: &[httparse::Header]) -> Option<usize> {
     headers
@@ -353,6 +323,7 @@ fn content_length(headers: &[httparse::Header]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::chunk_cases;
     use super::super::test_support::tokens;
     use super::*;
 
@@ -706,6 +677,28 @@ mod tests {
                         assert!(got.is_empty() || got == prefix, "{prefix:?}: {got:?}")
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_walkers_in_h1_keep_their_answers() {
+        for case in chunk_cases::chunk_cases() {
+            let text = String::from_utf8_lossy(case.body);
+            let decoded = byte_utils::decode_chunked_body(case.body);
+            assert_eq!(&*decoded, case.or_body(case.decoded), "decode {text:?}");
+            assert_eq!(chunked_ended(case.body), case.ended, "ended {text:?}");
+            let (want, stopped) = case.dechunked;
+            for split in 0..=case.body.len() {
+                let (mut dechunker, mut got) = (Dechunker::default(), Vec::new());
+                dechunker.advance(&case.body[..split], true, |d| got.extend_from_slice(d));
+                dechunker.advance(case.body, true, |d| got.extend_from_slice(d));
+                let at = format!("dechunk split {split} {text:?}");
+                assert_eq!(
+                    (&got[..], dechunker.stopped()),
+                    (case.or_body(want), stopped),
+                    "{at}"
+                );
             }
         }
     }

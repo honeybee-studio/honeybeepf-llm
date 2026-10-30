@@ -4,15 +4,21 @@
 //! LLM request/response data.
 
 mod body;
+#[cfg(test)]
+mod chunk_cases;
 mod encoding;
 mod h1;
 mod h2;
+mod json_ends;
+mod provider_report;
 mod registry;
 mod sse;
 
 // Re-export main types
 pub use h1::{Http11Parser, ResponseProgress};
 pub use h2::Http2Parser;
+pub use json_ends::JsonEnds;
+pub use provider_report::report_provider_config;
 
 use honeybeepf_llm_core::types::UsageInfo;
 

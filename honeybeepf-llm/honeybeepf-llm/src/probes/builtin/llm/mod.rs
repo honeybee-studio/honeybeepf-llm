@@ -21,7 +21,8 @@ use processor::{Outcome, StreamProcessor};
 use regex::Regex;
 
 use crate::probes::{
-    DynamicProbe, IdentityResolver, Probe, ProcessInfo, attach_uprobe, detach_uprobe,
+    DynamicProbe, IdentityResolver, Probe, ProcessInfo, TracepointConfig, attach_tracepoint,
+    attach_uprobe, detach_uprobe,
     discovery::{
         FileId, exported_function_offsets, file_identity, find_executables_all, find_libraries_all,
     },
@@ -91,6 +92,13 @@ const OPTIONAL_PROBES: [(&str, &str, &str); 3] = [
 
 /// (program, function) that ends a connection's stream; optional like the probes above.
 const CLOSE_PROBE: (&str, &str) = ("probe_ssl_free", "SSL_free");
+
+/// Clears an exiting thread's session entries; one per node, not per probed file.
+const TASK_EXIT_PROBE: TracepointConfig = TracepointConfig {
+    program_name: "probe_ssl_task_exit",
+    category: "sched",
+    name: "sched_process_exit",
+};
 
 /// Every function in the probe tables, resolved in one pass over the file's symbols.
 const PROBED_FUNCTIONS: [&str; 6] = [
@@ -323,6 +331,7 @@ fn route_event(
 
 impl Probe for LlmProbe {
     fn attach(&self, bpf: &mut Ebpf, _resolver: IdentityResolver) -> Result<()> {
+        http::report_provider_config();
         let targets = find_all_targets()?;
 
         // Keep going: libssl opened later is attached by re-discovery and needs the reader below.
@@ -335,6 +344,11 @@ impl Probe for LlmProbe {
                 .context("Failed to get LLM_STATS map")?,
         )?;
         let _ = EVENT_STATS.set(stats);
+
+        // Without it, every thread killed inside an SSL call keeps its session map entries until restart.
+        if let Err(e) = attach_tracepoint(bpf, TASK_EXIT_PROBE) {
+            warn!("{:#}; session entries of killed threads are not cleared", e);
+        }
 
         // Skip libcrypto for SSL_* probes as they usually don't contain them
         let ssl_libs = targets.iter().filter(|path| !path.contains("libcrypto"));
@@ -432,6 +446,7 @@ mod tests {
     use super::*;
     use conn_filter::opens_foreign_request;
     use honeybeepf_llm_common::{EventMetadata, MAX_SSL_BUF_SIZE};
+    use processor::UnparsedReason;
 
     const OPENAI_REQUEST: &[u8] = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"gpt-4o\",\"stream\":true,\"messages\":[]}";
     const ANTHROPIC_REQUEST: &[u8] = b"POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"claude-test\",\"stream\":true,\"messages\":[]}";
@@ -533,7 +548,11 @@ mod tests {
             call(1, OPENAI, Read, ANTHROPIC_START),
             call(1, OPENAI, Read, ANTHROPIC_END),
         ]);
-        assert_eq!(out[3], Outcome::Unparsed, "{out:?}");
+        assert_eq!(
+            out[3],
+            Outcome::Unparsed(UnparsedReason::ConnectionClosed),
+            "{out:?}"
+        );
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
     }
 
@@ -715,6 +734,76 @@ mod tests {
         }
         let tabled: HashSet<&str> = tabled.into_keys().collect();
         assert_eq!(programs, tabled, "uprobe programs vs probe tables");
+        Ok(())
+    }
+
+    /// Each uprobe program tail-calls into NO_PRIV_STACK, so a 6.13+ verifier gives it no per-CPU private stack.
+    #[test]
+    fn test_every_uprobe_program_has_a_tail_call() -> Result<()> {
+        use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget, SymbolKind};
+        const BPF_CALL: u8 = 0x85;
+        const BPF_FUNC_TAIL_CALL: i32 = 12;
+
+        let data = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/honeybeepf-llm"));
+        let obj = object::File::parse(data)?;
+        let (mut checked, mut without) = (0, Vec::new());
+        for sym in obj.symbols().filter(|s| s.kind() == SymbolKind::Text) {
+            let Some(index) = sym.section_index() else {
+                continue;
+            };
+            let section = obj.section_by_index(index)?;
+            let name = section.name()?;
+            if !name.starts_with("uprobe") && !name.starts_with("uretprobe") {
+                continue;
+            }
+            let start = usize::try_from(sym.address())?;
+            let end = start + usize::try_from(sym.size())?;
+            let code = section.data()?.get(start..end).unwrap_or_default();
+            // A helper call has src_reg 0; a bpf-to-bpf call has src_reg 1.
+            let (insns, _) = code.as_chunks::<8>();
+            let tail_call = insns.iter().any(|insn| {
+                insn[0] == BPF_CALL
+                    && insn[1] >> 4 == 0
+                    && i32::from_le_bytes([insn[4], insn[5], insn[6], insn[7]])
+                        == BPF_FUNC_TAIL_CALL
+            });
+            let uses_map = section.relocations().any(|(at, rel)| {
+                (start as u64..end as u64).contains(&at)
+                    && matches!(rel.target(), RelocationTarget::Symbol(i)
+                        if obj.symbol_by_index(i).and_then(|s| s.name()).is_ok_and(|n| n == "NO_PRIV_STACK"))
+            });
+            checked += 1;
+            if !tail_call || !uses_map {
+                without.push(sym.name()?);
+            }
+        }
+        assert!(checked > 0, "no uprobe program found in the eBPF object");
+        // The loader sets this global by name and does not fail when it is missing.
+        assert!(
+            obj.symbols().any(|s| s.name() == Ok("TAIL_CALL_OK")),
+            "TAIL_CALL_OK not in the eBPF object"
+        );
+        assert!(
+            without.is_empty(),
+            "uprobe programs without a tail call into NO_PRIV_STACK: {without:?}"
+        );
+        Ok(())
+    }
+
+    /// The task exit program is in the eBPF object as a tracepoint program.
+    #[test]
+    fn test_task_exit_probe_is_a_tracepoint_program() -> Result<()> {
+        use object::{Object, ObjectSection, ObjectSymbol};
+
+        let data = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/honeybeepf-llm"));
+        let obj = object::File::parse(data)?;
+        let sym = obj
+            .symbols()
+            .find(|s| s.name() == Ok(TASK_EXIT_PROBE.program_name))
+            .context("task exit program not in the eBPF object")?;
+        let index = sym.section_index().context("symbol without a section")?;
+        let section = obj.section_by_index(index)?.name()?;
+        assert!(section.starts_with("tracepoint"), "section {section}");
         Ok(())
     }
 

@@ -28,8 +28,14 @@ data:
   {{- if not (kindIs "invalid" .Values.builtinProbes.llm.executables) }}
   BUILTIN_PROBES__LLM_EXECUTABLES: {{ .Values.builtinProbes.llm.executables | quote }}
   {{- end }}
+  {{- if .Values.builtinProbes.llm.podLabels }}
+  BUILTIN_PROBES__LLM_POD_LABELS: {{ .Values.builtinProbes.llm.podLabels | join "," | quote }}
+  {{- end }}
   {{- if .Values.builtinProbes.llm.providers }}
   LLM_PROVIDERS_CONFIG: {{ dict "providers" .Values.builtinProbes.llm.providers | toJson | quote }}
+  {{- end }}
+  {{- if .Values.builtinProbes.llm.prices }}
+  LLM_PRICES_CONFIG: {{ .Values.builtinProbes.llm.prices | toJson | quote }}
   {{- end }}
 
   # === Collection Interval ===

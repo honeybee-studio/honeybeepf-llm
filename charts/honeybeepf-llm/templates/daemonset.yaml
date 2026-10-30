@@ -24,10 +24,8 @@ spec:
       {{- end }}
       
       serviceAccountName: {{ include "honeybeepf-llm.serviceAccountName" . }}
-      hostPID: true 
-      hostNetwork: true
-      # Required for cluster DNS resolution with hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
+      # /proc/<pid> of other pods: libssl discovery and pod attribution
+      hostPID: true
 
       {{- with .Values.nodeSelector }}
       nodeSelector:
@@ -77,14 +75,14 @@ spec:
                 name: {{ include "honeybeepf-llm.fullname" . }}
 
           volumeMounts:
-            - mountPath: /sys/fs/bpf
-              name: bpf-fs
+            # tracefs for the exec-watch tracepoint; with neither tracefs path the agent records nothing
             - mountPath: /sys/kernel/tracing
               name: tracefs
-              readOnly: false
+              readOnly: true
+            # tracefs fallback (debug/tracing) for hosts whose systemd does not mount /sys/kernel/tracing
             - mountPath: /sys/kernel/debug
               name: debugfs
-              readOnly: false
+              readOnly: true
             # Host filesystem for uprobe targets (SSL libraries)
             - mountPath: /host
               name: host-root
@@ -94,10 +92,6 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
       volumes:
-        - name: bpf-fs
-          hostPath:
-            path: /sys/fs/bpf
-            type: Directory
         - name: tracefs
           hostPath:
             path: /sys/kernel/tracing

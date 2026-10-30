@@ -23,8 +23,8 @@ mod request;
 mod usage;
 
 pub use config::{
-    ProviderConfig, ProviderRegistry, RequestExtractorType, ResponseConfig, host_matches,
-    path_matches,
+    CacheConfig, IdentityConfig, PricingConfig, ProviderConfig, ProviderRegistry,
+    RequestExtractorType, ResponseConfig, TokenConfig, host_matches, path_matches,
 };
 pub use request::{RequestExtractor, get_extractor};
 pub use usage::ConfigurableProvider;

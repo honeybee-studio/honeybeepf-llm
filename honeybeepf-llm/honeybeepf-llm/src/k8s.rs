@@ -7,25 +7,37 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, RwLock, atomic::Ordering},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use k8s_openapi::api::core::v1::Pod;
-use kube::{Api, Client, runtime::watcher};
-use log::warn;
+use k8s_openapi::api::{batch::v1::Job, core::v1::Pod};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
+use kube::{
+    Api, Client,
+    runtime::{WatchStreamExt, watcher},
+};
+use log::{debug, warn};
+
+/// Workload label value for a pod whose owner cannot be named.
+pub const UNATTRIBUTED: &str = "unattributed";
 
 /// Kubernetes pod identity resolved from a PID/cgroup_id.
 #[derive(Debug, Clone)]
 pub struct PodInfo {
     pub pod_name: String,
     pub namespace: String,
-    /// Owner kind: "Deployment", "StatefulSet", "DaemonSet", "Job", etc.
+    /// Owner kind: "Deployment", "Rollout", "CronJob", "StatefulSet", "Pod" (no owner), etc.; None if unresolvable.
     pub workload_kind: Option<String>,
     /// Owner name, e.g. "my-app" (Deployment name).
     pub workload_name: Option<String>,
+    /// (metric attribute, value) of each allowlisted label the pod has.
+    pub pod_labels: Vec<(String, String)>,
 }
 
 impl PodInfo {
@@ -53,6 +65,8 @@ pub struct PodResolver {
     /// container_id (short 12-char prefix) → PodInfo.
     /// Populated and updated by the K8s watcher task.
     pod_store: RwLock<HashMap<String, Arc<PodInfo>>>,
+    /// (pod label key, metric attribute) of each label copied onto LLM metrics.
+    pod_labels: Vec<(String, String)>,
 }
 
 impl Default for PodResolver {
@@ -63,10 +77,16 @@ impl Default for PodResolver {
 
 impl PodResolver {
     pub fn new() -> Self {
+        Self::with_pod_labels(&[])
+    }
+
+    /// Resolver that also copies the given pod labels onto LLM metrics.
+    pub fn with_pod_labels(allowlist: &[String]) -> Self {
         Self {
             cgroup_v2: detect_cgroup_v2(),
             cgroup_cache: RwLock::new(HashMap::new()),
             pod_store: RwLock::new(HashMap::new()),
+            pod_labels: pod_label_attrs(allowlist),
         }
     }
 
@@ -120,6 +140,21 @@ impl PodResolver {
             .await
             .context("Failed to create K8s client (not running in cluster?)")?;
 
+        let handle = self.spawn_pod_watcher(client, &node_name);
+
+        // Start cache cleanup task
+        self.start_cache_cleanup_task();
+
+        Ok(handle)
+    }
+
+    /// Spawn the task that keeps pod_store in sync with the pods on `node_name`.
+    fn spawn_pod_watcher(
+        self: &Arc<Self>,
+        client: Client,
+        node_name: &str,
+    ) -> tokio::task::JoinHandle<()> {
+        let jobs_client = client.clone();
         // Pods are namespaced resources, but we want to watch across all namespaces on this node.
         // Therefore, we use Api::all() to get cluster-wide visibility.
         let api: Api<Pod> = Api::all(client);
@@ -130,37 +165,79 @@ impl PodResolver {
 
         let resolver = Arc::clone(self);
 
-        let handle = tokio::spawn(async move {
-            let stream = watcher(api, watcher_config);
+        tokio::spawn(async move {
+            // The bare watcher re-lists on the next poll after an error; without backoff a 403 is a busy loop.
+            let stream = watcher(api, watcher_config).default_backoff();
             tokio::pin!(stream);
 
             while let Some(event) = stream.next().await {
                 match event {
                     Ok(watcher::Event::Apply(pod) | watcher::Event::InitApply(pod)) => {
-                        resolver.apply_pod_event(&pod, false);
+                        let cronjob = resolver.lookup_cronjob(&jobs_client, &pod).await;
+                        resolver.apply_pod_event(&pod, false, cronjob);
                     }
                     Ok(watcher::Event::Delete(pod)) => {
-                        resolver.apply_pod_event(&pod, true);
+                        resolver.apply_pod_event(&pod, true, None);
                     }
                     Ok(watcher::Event::Init | watcher::Event::InitDone) => {}
                     Err(e) => {
+                        // One line per backoff step, not per request.
                         warn!("K8s pod watcher error: {}. Will retry.", e);
-                        // kube's watcher automatically retries with backoff
                     }
                 }
             }
 
             warn!("K8s pod watcher stream ended");
-        });
+        })
+    }
 
-        // Start cache cleanup task
-        self.start_cache_cleanup_task();
+    async fn lookup_cronjob(&self, client: &Client, pod: &Pod) -> Option<String> {
+        let (namespace, job) = self.unresolved_job(pod)?;
+        cronjob_of(client, namespace, job).await
+    }
 
-        Ok(handle)
+    /// Namespace and Job name of a Job pod not yet stored with its CronJob.
+    fn unresolved_job<'a>(&self, pod: &'a Pod) -> Option<(&'a str, &'a str)> {
+        let owner = controller_owner(&pod.metadata)
+            .filter(|o| o.kind == "Job" && o.api_version.starts_with("batch/"))?;
+        // Pending pods have no container IDs and so no store entry to fill.
+        if extract_container_ids_from_pod(pod).is_empty() {
+            return None;
+        }
+        // Stored as a Job: no CronJob owner, or the last lookup failed; ask again.
+        let stored = self.stored_info(&pod.metadata);
+        if stored.is_some_and(|i| i.workload_kind.as_deref() != Some("Job")) {
+            return None;
+        }
+        Some((pod.metadata.namespace.as_deref()?, owner.name.as_str()))
+    }
+
+    /// Stored info of the same pod, also under an earlier container ID after a restart.
+    fn stored_info(&self, metadata: &ObjectMeta) -> Option<Arc<PodInfo>> {
+        let (name, namespace) = (metadata.name.as_deref()?, metadata.namespace.as_deref()?);
+        let store = self.pod_store.read().ok()?;
+        store
+            .values()
+            .find(|i| i.pod_name == name && i.namespace == namespace)
+            .cloned()
+    }
+
+    /// (metric attribute, value) of the allowlisted labels a pod has; read from every event, as labels can change.
+    fn allowlisted_labels(&self, metadata: &ObjectMeta) -> Vec<(String, String)> {
+        let Some(labels) = metadata.labels.as_ref() else {
+            return Vec::new();
+        };
+        self.pod_labels
+            .iter()
+            .filter_map(|(key, attr)| {
+                let value = labels.get(key).filter(|v| !v.is_empty())?;
+                Some((attr.clone(), value.clone()))
+            })
+            .collect()
     }
 
     /// Process a pod event from the K8s API watcher.
-    fn apply_pod_event(&self, pod: &Pod, is_delete: bool) {
+    fn apply_pod_event(&self, pod: &Pod, is_delete: bool, cronjob: Option<String>) {
         let metadata = &pod.metadata;
         let pod_name = match &metadata.name {
             Some(n) => n.clone(),
@@ -198,36 +275,17 @@ impl PodResolver {
                     }
                 }
             }
-            // Extract workload info from ownerReferences
-            let (workload_kind, workload_name) = metadata
-                .owner_references
-                .as_ref()
-                .and_then(|refs| refs.first())
-                .map(|owner| {
-                    if owner.kind == "ReplicaSet" {
-                        // ReplicaSet is owned by Deployment; strip the hash suffix.
-                        // "my-app-7d4b8c9f5" → "my-app"
-                        // Note: This strips one suffix segment, which works for standard Deployment-generated
-                        // RS names, but could misfire for custom names like "my-app-v2-7d4b8c9f5" -> "my-app-v2".
-                        // True resolution would require following the ownerReferences chain up to Deployment.
-                        let name = owner
-                            .name
-                            .rsplit_once('-')
-                            .map(|(prefix, _)| prefix.to_string())
-                            .unwrap_or_else(|| owner.name.clone());
-                        ("Deployment".to_string(), name)
-                    } else {
-                        (owner.kind.clone(), owner.name.clone())
-                    }
-                })
-                .map(|(k, n)| (Some(k), Some(n)))
-                .unwrap_or((None, None));
-
+            // A pod's owner does not change: keep the stored workload unless a lookup just found the CronJob.
+            let (workload_kind, workload_name) = match (cronjob, self.stored_info(metadata)) {
+                (None, Some(prev)) => (prev.workload_kind.clone(), prev.workload_name.clone()),
+                (cronjob, _) => workload_of(metadata, cronjob).unzip(),
+            };
             let info = Arc::new(PodInfo {
                 pod_name,
                 namespace,
                 workload_kind,
                 workload_name,
+                pod_labels: self.allowlisted_labels(metadata),
             });
 
             if let Ok(mut store) = self.pod_store.write() {
@@ -282,6 +340,88 @@ impl PodResolver {
 /// returns a unique ID per container; on v1, it always returns 1 (root).
 fn detect_cgroup_v2() -> bool {
     std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists()
+}
+
+/// Metric attribute for each allowlisted pod label; Prometheus label names allow only `[a-zA-Z0-9_]`.
+fn pod_label_attrs(allowlist: &[String]) -> Vec<(String, String)> {
+    let mut attrs: Vec<(String, String)> = Vec::new();
+    for key in allowlist.iter().filter(|k| !k.is_empty()) {
+        let name: String = key
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let attr = format!("target.pod.label.{name}");
+        if let Some((first, _)) = attrs.iter().find(|(_, a)| *a == attr) {
+            warn!("Pod labels {first} and {key} both map to {attr}; only {first} is recorded");
+            continue;
+        }
+        attrs.push((key.clone(), attr));
+    }
+    attrs
+}
+
+fn controller_owner(metadata: &ObjectMeta) -> Option<&OwnerReference> {
+    let refs = metadata.owner_references.as_ref()?;
+    refs.iter()
+        .find(|r| r.controller == Some(true))
+        .or_else(|| refs.first())
+}
+
+/// Owner kinds of a ReplicaSet, by the pod label that holds the ReplicaSet's name suffix.
+const RS_OWNERS: [(&str, &str); 2] = [
+    ("Deployment", "pod-template-hash"),
+    ("Rollout", "rollouts-pod-template-hash"),
+];
+
+/// Owning workload (kind, name) of a pod; `cronjob` is the owner of its Job, if looked up.
+fn workload_of(metadata: &ObjectMeta, cronjob: Option<String>) -> Option<(String, String)> {
+    let Some(owner) = controller_owner(metadata) else {
+        return Some(("Pod".to_string(), metadata.name.clone()?));
+    };
+    if owner.kind.is_empty() || owner.name.is_empty() {
+        return None;
+    }
+    let workload = match owner.kind.as_str() {
+        // Deployments and Argo Rollouts name their ReplicaSets "<owner>-<hash label value>".
+        "ReplicaSet" => match RS_OWNERS.iter().find_map(|&(kind, hash_label)| {
+            let hash = metadata.labels.as_ref()?.get(hash_label)?;
+            let name = owner.name.strip_suffix(hash.as_str())?.strip_suffix('-')?;
+            (!name.is_empty()).then_some((kind, name))
+        }) {
+            Some((kind, name)) => (kind.to_string(), name.to_string()),
+            None => (owner.kind.clone(), owner.name.clone()),
+        },
+        "Job" => match cronjob {
+            Some(cronjob) => ("CronJob".to_string(), cronjob),
+            None => (owner.kind.clone(), owner.name.clone()),
+        },
+        _ => (owner.kind.clone(), owner.name.clone()),
+    };
+    Some(workload)
+}
+
+/// Name of the CronJob that owns `job`; pods only reference their Job, so this needs an API get.
+async fn cronjob_of(client: &Client, namespace: &str, job: &str) -> Option<String> {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let api: Api<Job> = Api::namespaced(client.clone(), namespace);
+    // Bounded: the pod watcher waits on this before it handles the next pod event.
+    let error = match tokio::time::timeout(Duration::from_secs(5), api.get_opt(job)).await {
+        Ok(Ok(found)) => {
+            return controller_owner(&found?.metadata)
+                .filter(|o| o.kind == "CronJob" && !o.name.is_empty())
+                .map(|o| o.name.clone());
+        }
+        Ok(Err(e)) => e.to_string(),
+        Err(_) => "timed out".to_string(),
+    };
+    if WARNED.swap(true, Ordering::Relaxed) {
+        debug!("Cannot get Job {namespace}/{job}: {error}");
+    } else {
+        warn!(
+            "Cannot get Job {namespace}/{job}: {error}; CronJob pods keep their Job label (chart grants jobs get)"
+        );
+    }
+    None
 }
 
 /// Extract container IDs from a pod's status.
@@ -498,6 +638,219 @@ mod tests {
         );
     }
 
+    fn owner(kind: &str, name: &str, controller: Option<bool>) -> OwnerReference {
+        OwnerReference {
+            kind: kind.to_string(),
+            name: name.to_string(),
+            controller,
+            ..Default::default()
+        }
+    }
+
+    fn pod_meta(owners: Vec<OwnerReference>, hash: Option<&str>) -> ObjectMeta {
+        ObjectMeta {
+            name: Some("p-1".to_string()),
+            namespace: Some("team-a".to_string()),
+            owner_references: (!owners.is_empty()).then_some(owners),
+            labels: hash.map(|h| [("pod-template-hash".to_string(), h.to_string())].into()),
+            ..Default::default()
+        }
+    }
+
+    fn workload(kind: &str, name: &str) -> Option<(String, String)> {
+        Some((kind.to_string(), name.to_string()))
+    }
+
+    #[test]
+    fn test_workload_owner_chains() {
+        let meta = |kind: &str, name: &str, hash: Option<&str>| {
+            pod_meta(vec![owner(kind, name, Some(true))], hash)
+        };
+        let rs = |name: &str, hash| meta("ReplicaSet", name, hash);
+        // Argo Rollouts names its ReplicaSets "<rollout>-<hash>" under its own hash label.
+        let argo = |name: &str, hash: &str| {
+            let mut m = rs(name, None);
+            m.labels = Some([("rollouts-pod-template-hash".into(), hash.into())].into());
+            m
+        };
+        // The controller reference wins over an earlier non-controller owner.
+        let two = vec![
+            owner("Secret", "s", None),
+            owner("StatefulSet", "db", Some(true)),
+        ];
+        let cases = [
+            (rs("api-h1", Some("h1")), None, Some("Deployment/api")),
+            (rs("app-v2-h1", Some("h1")), None, Some("Deployment/app-v2")),
+            // A ReplicaSet not made by a Deployment: no hash label, or a name that does not end in it.
+            (rs("web-abc", None), None, Some("ReplicaSet/web-abc")),
+            (rs("web-abc", Some("xyz")), None, Some("ReplicaSet/web-abc")),
+            (rs("h1", Some("h1")), None, Some("ReplicaSet/h1")),
+            (argo("api-6f7d8", "6f7d8"), None, Some("Rollout/api")),
+            (argo("api-6f7d8", "xyz"), None, Some("ReplicaSet/api-6f7d8")),
+            (meta("Job", "r-1", None), Some("r"), Some("CronJob/r")),
+            (meta("Job", "r-1", None), None, Some("Job/r-1")),
+            (meta("DaemonSet", "ds", None), None, Some("DaemonSet/ds")),
+            (meta("Job", "", None), None, None),
+            (pod_meta(vec![], None), None, Some("Pod/p-1")),
+            (pod_meta(two, None), None, Some("StatefulSet/db")),
+        ];
+        for (meta, cronjob, want) in cases {
+            let got = workload_of(&meta, cronjob.map(str::to_string));
+            let got = got.map(|(kind, name)| format!("{kind}/{name}"));
+            assert_eq!(got.as_deref(), want, "{:?}", meta.owner_references);
+        }
+    }
+
+    #[test]
+    fn test_job_pod_cronjob_retried_until_found_then_kept() {
+        use k8s_openapi::api::core::v1::{ContainerStatus, PodStatus};
+        let resolver = PodResolver {
+            cgroup_v2: false,
+            ..PodResolver::new()
+        };
+        let mut job = owner("Job", "report-29345678", Some(true));
+        job.api_version = "batch/v1".to_string();
+        let mut pod = Pod {
+            metadata: pod_meta(vec![job], None),
+            ..Default::default()
+        };
+        let with_container = |pod: &mut Pod, hex: &str| {
+            pod.status = Some(PodStatus {
+                container_statuses: Some(vec![ContainerStatus {
+                    container_id: Some(format!("containerd://{}", hex.repeat(32))),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            })
+        };
+        let stored = |r: &PodResolver| {
+            r.stored_info(&pod_meta(vec![], None))
+                .and_then(|i| i.workload_kind.clone().zip(i.workload_name.clone()))
+        };
+        // Pending: no container yet, so nothing to look up.
+        assert_eq!(resolver.unresolved_job(&pod), None);
+
+        with_container(&mut pod, "ab");
+        let pending = Some(("team-a", "report-29345678"));
+        assert_eq!(resolver.unresolved_job(&pod), pending);
+        // A failed lookup labels the Job for now and is retried on the next event.
+        resolver.apply_pod_event(&pod, false, None);
+        assert_eq!(stored(&resolver), workload("Job", "report-29345678"));
+        assert_eq!(resolver.unresolved_job(&pod), pending);
+        resolver.apply_pod_event(&pod, false, Some("report".to_string()));
+        assert_eq!(resolver.unresolved_job(&pod), None);
+
+        // Later events, also after a container restart, keep the CronJob without a lookup.
+        with_container(&mut pod, "cd");
+        assert_eq!(resolver.unresolved_job(&pod), None);
+        resolver.apply_pod_event(&pod, false, None);
+        assert_eq!(stored(&resolver), workload("CronJob", "report"));
+
+        let mut other = pod;
+        other.metadata.name = Some("p-2".to_string());
+        other.metadata.owner_references = Some(vec![owner("Job", "vj", Some(true))]);
+        assert_eq!(resolver.unresolved_job(&other), None, "not a batch/v1 Job");
+    }
+
+    /// An API server that refuses every request (RBAC removed) must not be hammered with re-lists.
+    #[tokio::test]
+    async fn test_watcher_backs_off_on_api_403() {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+        let body = r#"{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"pods is forbidden","reason":"Forbidden","code":403}"#;
+        let response = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let server = tokio::spawn(async move {
+            while let Ok((mut conn, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::Relaxed);
+                let response = response.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = conn.read(&mut buf).await;
+                    let _ = conn.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+
+        let config = kube::Config::new(format!("http://{addr}").parse().unwrap());
+        let client = Client::try_from(config).unwrap();
+        let watcher = Arc::new(PodResolver::new()).spawn_pod_watcher(client, "node-a");
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        watcher.abort();
+        server.abort();
+        let n = requests.load(Ordering::Relaxed);
+        assert!(n >= 1, "the watcher never reached the fake API server");
+        assert!(
+            n <= 10,
+            "{n} API requests in 2 s: the watcher retries without backoff"
+        );
+    }
+
+    #[test]
+    fn test_pod_labels_copied_from_allowlist_and_refreshed() {
+        use k8s_openapi::api::core::v1::{ContainerStatus, PodStatus};
+        // The second version key maps to the same attribute, so the first one wins.
+        let (v1, v2) = ("app.kubernetes.io/version", "app-kubernetes-io/version");
+        let allow = ["variant", v1, v2, "", "tier"].map(str::to_string);
+        let resolver = PodResolver {
+            cgroup_v2: false,
+            ..PodResolver::with_pod_labels(&allow)
+        };
+        let status = ContainerStatus {
+            container_id: Some(format!("containerd://{}", "ab".repeat(32))),
+            ..Default::default()
+        };
+        let mut pod = Pod {
+            metadata: pod_meta(vec![], None),
+            status: Some(PodStatus {
+                container_statuses: Some(vec![status]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let stored = |pod: &Pod, labels: &[(&str, &str)]| {
+            let mut pod = pod.clone();
+            let labels = labels.iter().map(|&(k, v)| (k.into(), v.into()));
+            pod.metadata.labels = Some(labels.chain([("other".into(), "x".into())]).collect());
+            resolver.apply_pod_event(&pod, false, None);
+            let info = resolver.stored_info(&pod.metadata).expect("pod stored");
+            let attrs = info.pod_labels.iter().map(|(a, v)| format!("{a}={v}"));
+            attrs.collect::<Vec<_>>()
+        };
+        assert_eq!(
+            stored(
+                &pod,
+                &[("variant", "b"), (v1, "1.2"), (v2, "9"), ("tier", "")]
+            ),
+            [
+                "target.pod.label.variant=b",
+                "target.pod.label.app_kubernetes_io_version=1.2"
+            ]
+        );
+        // A relabelled pod gets its new value; a removed label is dropped.
+        assert_eq!(
+            stored(&pod, &[("variant", "a")]),
+            ["target.pod.label.variant=a"]
+        );
+
+        pod.metadata.labels = Some([("variant".into(), "b".into())].into());
+        let none = PodResolver {
+            cgroup_v2: false,
+            ..PodResolver::new()
+        };
+        none.apply_pod_event(&pod, false, None);
+        let info = none.stored_info(&pod.metadata).expect("pod stored");
+        assert!(info.pod_labels.is_empty(), "empty allowlist adds no labels");
+    }
+
     #[test]
     fn test_pod_info_service_name() {
         let info = PodInfo {
@@ -505,6 +858,7 @@ mod tests {
             namespace: "default".to_string(),
             workload_kind: Some("Deployment".to_string()),
             workload_name: Some("my-app".to_string()),
+            pod_labels: Vec::new(),
         };
         assert_eq!(info.service_name(), "my-app");
     }
@@ -516,6 +870,7 @@ mod tests {
             namespace: "default".to_string(),
             workload_kind: None,
             workload_name: None,
+            pod_labels: Vec::new(),
         };
         assert_eq!(info.service_name(), "standalone-pod");
     }

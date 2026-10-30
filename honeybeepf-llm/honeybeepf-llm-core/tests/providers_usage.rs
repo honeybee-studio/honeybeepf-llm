@@ -1,5 +1,7 @@
+use honeybeepf_llm_core::pricing::PriceTable;
 use honeybeepf_llm_core::providers::{
-    ConfigurableProvider, ProviderConfig, ProviderRegistry, RequestExtractorType, ResponseConfig,
+    ConfigurableProvider, IdentityConfig, ProviderConfig, ProviderRegistry, RequestExtractorType,
+    ResponseConfig, TokenConfig,
 };
 use honeybeepf_llm_core::types::UsageInfo;
 use serde_json::json;
@@ -9,14 +11,7 @@ fn openai_config() -> ProviderConfig {
         name: "openai".to_string(),
         hosts: vec!["api.openai.com".to_string()],
         paths: vec!["/chat/completions".to_string()],
-        response: ResponseConfig {
-            usage_path: "usage".to_string(),
-            prompt_tokens: "prompt_tokens".to_string(),
-            completion_tokens: "completion_tokens".to_string(),
-            thoughts_tokens: None,
-            model_path: "model".to_string(),
-            ..ResponseConfig::default()
-        },
+        response: ResponseConfig::default(),
         request_extractor: RequestExtractorType::Messages,
     }
 }
@@ -27,11 +22,17 @@ fn gemini_config() -> ProviderConfig {
         hosts: vec!["generativelanguage.googleapis.com".to_string()],
         paths: vec!["generateContent".to_string()],
         response: ResponseConfig {
-            usage_path: "usageMetadata".to_string(),
-            prompt_tokens: "promptTokenCount".to_string(),
-            completion_tokens: "candidatesTokenCount".to_string(),
-            thoughts_tokens: Some("thoughtsTokenCount".to_string()),
-            model_path: "modelVersion".to_string(),
+            tokens: TokenConfig {
+                usage_path: "usageMetadata".to_string(),
+                prompt_tokens: "promptTokenCount".to_string(),
+                completion_tokens: "candidatesTokenCount".to_string(),
+                thoughts_tokens: Some("thoughtsTokenCount".to_string()),
+                ..TokenConfig::default()
+            },
+            identity: IdentityConfig {
+                model_path: "modelVersion".to_string(),
+                required_field: None,
+            },
             ..ResponseConfig::default()
         },
         request_extractor: RequestExtractorType::Contents,
@@ -278,6 +279,120 @@ fn test_gemini_thoughts_are_part_of_completion() {
     assert_eq!(usage.thoughts_tokens, Some(100));
 }
 
+// URL context and code execution results go back to the model as input, outside promptTokenCount.
+fn gemini_tool_use_response() -> serde_json::Value {
+    json!({
+        "candidates": [{"content": {"role": "model", "parts": [{"text": "summary"}]}, "finishReason": "STOP"}],
+        "usageMetadata": {"promptTokenCount": 27, "candidatesTokenCount": 120,
+            "toolUsePromptTokenCount": 10309, "totalTokenCount": 10456},
+        "modelVersion": "gemini-3.8-flash"
+    })
+}
+
+#[test]
+fn test_gemini_tool_use_prompt_tokens_are_part_of_prompt_on_gemini_api_and_vertex() {
+    let endpoints = [
+        (
+            "generativelanguage.googleapis.com",
+            "/v1beta/models/gemini-3.8-flash:generateContent",
+        ),
+        (
+            "generativelanguage.googleapis.com",
+            "/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse",
+        ),
+        (
+            "aiplatform.googleapis.com",
+            "/v1/projects/p/locations/global/publishers/google/models/gemini-3.8-flash:generateContent",
+        ),
+        (
+            "us-central1-aiplatform.googleapis.com",
+            "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-3.8-flash:streamGenerateContent",
+        ),
+        (
+            "aiplatform.us.rep.googleapis.com",
+            "/v1/projects/p/locations/us/publishers/google/models/gemini-3.8-flash:generateContent",
+        ),
+    ];
+    for (host, path) in endpoints {
+        let usage = default_provider(host, path)
+            .parse_usage(&gemini_tool_use_response())
+            .unwrap();
+        assert_eq!(
+            (usage.prompt_tokens, usage.completion_tokens),
+            (27 + 10309, 120),
+            "{host}{path}"
+        );
+    }
+}
+
+#[test]
+fn test_gemini_input_and_output_add_up_to_total_with_every_part() {
+    let response = json!({
+        "usageMetadata": {"promptTokenCount": 5000, "cachedContentTokenCount": 4096,
+            "candidatesTokenCount": 20, "thoughtsTokenCount": 300,
+            "toolUsePromptTokenCount": 800, "totalTokenCount": 6120},
+        "modelVersion": "gemini-test"
+    });
+
+    let usage = gemini_default().parse_usage(&response).unwrap();
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (5800, 320));
+    assert_eq!(usage.prompt_tokens + usage.completion_tokens, 6120);
+    assert_eq!(usage.cache_read_tokens, Some(4096));
+}
+
+#[test]
+fn test_gemini_bad_tool_use_count_keeps_the_prompt() {
+    for tool_use in [json!(null), json!("10309"), json!(-1), json!(1.5)] {
+        let response = json!({
+            "usageMetadata": {"promptTokenCount": 27, "candidatesTokenCount": 120,
+                "toolUsePromptTokenCount": tool_use}
+        });
+        let usage = gemini_default().parse_usage(&response).unwrap();
+        assert_eq!(
+            (usage.prompt_tokens, usage.completion_tokens),
+            (27, 120),
+            "{tool_use}"
+        );
+    }
+}
+
+#[test]
+fn test_gemini_tool_use_prompt_tokens_are_priced_as_input() {
+    let table = PriceTable::builtin().expect("builtin price table");
+    let with_tools = gemini_default()
+        .parse_usage(&gemini_tool_use_response())
+        .unwrap();
+    let plain = gemini_default()
+        .parse_usage(&json!({
+            "usageMetadata": {"promptTokenCount": 10336, "candidatesTokenCount": 120},
+            "modelVersion": "gemini-3.8-flash"
+        }))
+        .unwrap();
+
+    let (with_tools, plain) = (
+        table.cost(&with_tools).expect("priced"),
+        table.cost(&plain).expect("priced"),
+    );
+    assert!(plain.input > 0.0);
+    assert_eq!(with_tools.input, plain.input);
+}
+
+#[test]
+fn test_custom_provider_can_add_extra_prompt_tokens() -> Result<(), serde_json::Error> {
+    let registry = ProviderRegistry::from_json(
+        r#"{"providers":[{"name":"gemini-proxy","response":{"usage_path":"usageMetadata",
+            "prompt_tokens":"promptTokenCount","completion_tokens":"candidatesTokenCount",
+            "extra_prompt_tokens":"toolUsePromptTokenCount"}}]}"#,
+    )?;
+    let provider = ConfigurableProvider::new(registry.providers[0].clone());
+    let usage = provider
+        .parse_usage(&json!({"usageMetadata": {"promptTokenCount": 3,
+            "candidatesTokenCount": 2, "toolUsePromptTokenCount": 7}}))
+        .unwrap();
+    assert_eq!(usage.prompt_tokens, 10);
+    Ok(())
+}
+
 #[test]
 fn test_openai_reasoning_is_not_added_to_completion_again() {
     let chat = json!({"model": "gpt-5", "usage": {"prompt_tokens": 1200, "completion_tokens": 800,
@@ -381,6 +496,44 @@ fn test_custom_provider_cached_tokens_key_still_reads_cache() -> Result<(), serd
         provider.parse_usage(&response).unwrap().cache_read_tokens,
         Some(8)
     );
+    Ok(())
+}
+
+// Every flat key a user config may set, so grouping the fields in Rust keeps the JSON shape.
+#[test]
+fn test_custom_provider_reads_every_flat_field() -> Result<(), serde_json::Error> {
+    let registry = ProviderRegistry::from_json(
+        r#"{"providers":[{"name":"proxy","response":{"usage_path":"meta.usage",
+            "prompt_tokens":"in","completion_tokens":"out","completion_optional":true,
+            "extra_prompt_tokens":"tool","thoughts_tokens":"think","completion_excludes_thoughts":true,"cached_tokens":"hit",
+            "cache_write_tokens":"put","cache_write_long_ttl_tokens":"put_long","prompt_excludes_cache":true,
+            "service_tier_path":"tier","speed":"mode","inference_geo":"geo",
+            "model_path":"served.model","required_field":"marker"}}]}"#,
+    )?;
+    let provider = ConfigurableProvider::new(registry.providers[0].clone());
+    let body = json!({"tier": "flex", "served": {"model": "m-1"}, "meta": {"usage": {
+        "in": 10, "tool": 2, "think": 5, "hit": 3, "put": 4, "put_long": 9, "mode": "fast", "geo": "us", "marker": {}}}});
+    let usage = provider.parse_usage(&body).unwrap();
+    let expected = UsageInfo {
+        prompt_tokens: 19,
+        completion_tokens: 5,
+        thoughts_tokens: Some(5),
+        cache_read_tokens: Some(3),
+        cache_write_tokens: Some(4),
+        cache_write_long_ttl_tokens: Some(4),
+        model: Some("m-1".to_string()),
+        service_tier: Some("flex".to_string()),
+        speed: Some("fast".to_string()),
+        inference_geo: Some("us".to_string()),
+    };
+    assert_eq!(format!("{usage:?}"), format!("{expected:?}"));
+
+    let mut no_marker = body;
+    no_marker["meta"]["usage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("marker");
+    assert!(provider.parse_usage(&no_marker).is_none());
     Ok(())
 }
 

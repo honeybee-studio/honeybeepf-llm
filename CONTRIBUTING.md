@@ -119,6 +119,22 @@ make build
 make test
 ```
 
+### Releasing
+
+The agent, its image and the `honeybeepf-llm` chart share one version.
+
+1. In a PR, set the same `X.Y.Z` in `honeybeepf-llm/honeybeepf-llm/Cargo.toml` (`version`) and
+   `charts/honeybeepf-llm/Chart.yaml` (`version` and `appVersion`). CI runs `ci/check-version.sh` on every PR.
+2. Right after it merges, tag that commit on `main` and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+   Until the tag's image exists, the chart on `main` points at an image tag that is not there yet.
+3. `release.yml` checks that the tag matches both files and that neither the image nor the chart version exists,
+   then pushes the image as `X.Y.Z` and `X.Y` (linux/amd64 and linux/arm64), pushes the chart to
+   `oci://ghcr.io/honeybee-studio/charts` and creates a GitHub release whose notes group merged PRs by label
+   (`.github/release.yml`). An existing image or chart version is never overwritten: if a later job fails, use
+   "Re-run failed jobs"; to redo a release, cut the next patch version.
+
+`main` publishes only the image tags `latest` and `sha-<short>`. The chart's default image tag is its `appVersion`.
+
 ## Styleguides
 
 ### Git Commit Messages

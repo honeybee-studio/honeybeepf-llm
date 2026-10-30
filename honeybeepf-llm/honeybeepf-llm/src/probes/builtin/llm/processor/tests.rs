@@ -86,8 +86,11 @@ fn test_lost_fragment_counts_response_as_unparsed() {
     for lost in [1, 3] {
         let mut p = StreamProcessor::new();
         let out = outcomes(&mut p, &h1_response(20200), Some((1, lost)));
-        let unparsed = out.iter().filter(|o| **o == Outcome::Unparsed).count();
-        assert_eq!(unparsed, 1, "fragment {lost}: {out:?}");
+        assert_eq!(
+            unparsed(&out),
+            [UnparsedReason::CaptureLost],
+            "fragment {lost}: {out:?}"
+        );
         assert!(
             !out.contains(&Outcome::Recorded),
             "fragment {lost}: {out:?}"
@@ -106,7 +109,7 @@ fn test_read_over_capture_limit_is_unparsed() {
     let joined = reads.drain(1..).flatten().collect::<Vec<u8>>();
     reads.push(joined);
     let out = outcomes(&mut p, &reads, None);
-    assert!(out.contains(&Outcome::Unparsed), "{out:?}");
+    assert_eq!(unparsed(&out), [UnparsedReason::CaptureLost], "{out:?}");
     assert!(!out.contains(&Outcome::Recorded), "{out:?}");
 }
 
@@ -153,6 +156,15 @@ fn count(out: &[Outcome], want: Outcome) -> usize {
     out.iter().filter(|o| **o == want).count()
 }
 
+fn unparsed(out: &[Outcome]) -> Vec<UnparsedReason> {
+    out.iter()
+        .filter_map(|o| match o {
+            Outcome::Unparsed(reason) => Some(*reason),
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn test_messages_after_count_tokens_is_recorded() {
     let mut p = StreamProcessor::new();
@@ -168,7 +180,7 @@ fn test_messages_after_count_tokens_is_recorded() {
         &h1("application/json", MESSAGES_RESPONSE),
     ));
     assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
-    assert_eq!(count(&out, Outcome::Unparsed), 0, "{out:?}");
+    assert!(unparsed(&out).is_empty(), "{out:?}");
 }
 
 #[test]
@@ -193,7 +205,7 @@ fn test_responses_compact_after_input_tokens_is_recorded() {
     out.extend(send(&mut p, LlmDirection::Write, compact, None));
     out.extend(send(&mut p, LlmDirection::Read, &compacted, None));
     assert_eq!(count(&out, Outcome::Recorded), 2, "{out:?}");
-    assert_eq!(count(&out, Outcome::Unparsed), 0, "{out:?}");
+    assert!(unparsed(&out).is_empty(), "{out:?}");
 }
 
 #[test]
@@ -274,11 +286,7 @@ fn test_calls_after_upload_are_recorded() {
             2,
             "{expect_continue}: {out:?}"
         );
-        assert_eq!(
-            count(&out, Outcome::Unparsed),
-            0,
-            "{expect_continue}: {out:?}"
-        );
+        assert!(unparsed(&out).is_empty(), "{expect_continue}: {out:?}");
     }
 }
 
@@ -303,7 +311,7 @@ fn test_response_without_usage_is_unparsed_when_next_request_starts() {
         MESSAGES_REQUEST,
         &h1("application/json", MESSAGES_RESPONSE),
     ));
-    assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
+    assert_eq!(unparsed(&out), [UnparsedReason::NextRequest], "{out:?}");
     assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
 }
@@ -323,7 +331,7 @@ fn test_body_after_100_continue_is_recorded() {
     for r in &h1_response(3000) {
         out.extend(send(&mut p, LlmDirection::Read, r, None));
     }
-    assert_eq!(count(&out, Outcome::Unparsed), 0, "{out:?}");
+    assert!(unparsed(&out).is_empty(), "{out:?}");
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
 }
 
@@ -342,7 +350,7 @@ fn test_write_before_whole_response_keeps_streaming_response() {
                  data: {\"model\":\"gpt-4o\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\n\
                  data: [DONE]\n\n";
     out.extend(send(&mut p, LlmDirection::Read, tail, None));
-    assert_eq!(count(&out, Outcome::Unparsed), 0, "{out:?}");
+    assert!(unparsed(&out).is_empty(), "{out:?}");
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
 }
 
@@ -372,7 +380,7 @@ fn test_unparsed_response_after_100_continue_frees_next_request() {
         MESSAGES_REQUEST,
         &h1("application/json", MESSAGES_RESPONSE),
     ));
-    assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
+    assert_eq!(unparsed(&out), [UnparsedReason::NextRequest], "{out:?}");
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
 }
 
@@ -396,7 +404,7 @@ fn test_streamed_response_after_100_continue_is_recorded() {
     ] {
         out.extend(send(&mut p, LlmDirection::Read, r, None));
     }
-    assert_eq!(count(&out, Outcome::Unparsed), 0, "{out:?}");
+    assert!(unparsed(&out).is_empty(), "{out:?}");
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
 }
 
@@ -447,7 +455,7 @@ fn test_chunked_response_with_trailers_frees_next_request() {
         MESSAGES_REQUEST,
         &h1("application/json", MESSAGES_RESPONSE),
     ));
-    assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
+    assert_eq!(unparsed(&out), [UnparsedReason::NextRequest], "{out:?}");
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
 }
 
@@ -465,8 +473,144 @@ fn test_chunk_larger_than_response_buffer_frees_next_request() {
             MESSAGES_REQUEST,
             &h1("application/json", MESSAGES_RESPONSE),
         ));
-        assert_eq!(count(&out, Outcome::Unparsed), 1, "{size}: {out:?}");
+        assert_eq!(
+            unparsed(&out),
+            [UnparsedReason::NextRequest],
+            "{size}: {out:?}"
+        );
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{size}: {out:?}");
+    }
+}
+
+/// `h1_response` grown or shrunk to exactly `total` bytes.
+fn h1_response_of_size(total: usize) -> Vec<Vec<u8>> {
+    let mut body_len = total;
+    loop {
+        let reads = h1_response(body_len);
+        let len: usize = reads.iter().map(Vec::len).sum();
+        if len == total {
+            return reads;
+        }
+        body_len = body_len + total - len;
+    }
+}
+
+/// A chat completion with `before` bytes of text ahead of its usage and `after` bytes behind it.
+fn chat_json(before: usize, after: usize) -> Vec<u8> {
+    let (x, y) = ("x".repeat(before), "y".repeat(after));
+    format!(r#"{{"model":"gpt-4o","choices":[{{"message":{{"content":"{x}"}}}}],"usage":{{"prompt_tokens":11,"completion_tokens":4}},"id":"{y}"}}"#).into_bytes()
+}
+
+/// The response in 16 KB reads; chunked in 8191-byte chunks, so chunks and reads never line up.
+fn h1_reads(headers: &str, body: &[u8]) -> Vec<Vec<u8>> {
+    let headers = headers.replace("{len}", &body.len().to_string());
+    let mut framed = Vec::with_capacity(body.len() * 2);
+    if headers.contains("chunked") {
+        for c in body.chunks(8191) {
+            framed.extend_from_slice(format!("{:x}\r\n", c.len()).as_bytes());
+            framed.extend_from_slice(c);
+            framed.extend_from_slice(b"\r\n");
+        }
+        framed.extend_from_slice(b"0\r\n\r\n");
+    } else {
+        framed.extend_from_slice(body);
+    }
+    let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{headers}\r\n\r\n");
+    let mut reads = vec![head.into_bytes()];
+    reads.extend(framed.chunks(16384).map(<[u8]>::to_vec));
+    reads
+}
+
+#[test]
+fn test_response_over_buffer_limit_without_usage_at_its_ends_is_unparsed() {
+    let size = MAX_RESPONSE_BUFFER_SIZE + (1 << 20);
+    let middle = chat_json(size / 2, size / 2);
+    // Never decoded: an encoded body is dropped as soon as it passes the limit.
+    let encoded = chat_json(size, 0);
+    for (n, reads) in [
+        h1_reads("Content-Length: {len}", &middle),
+        h1_reads("Transfer-Encoding: chunked", &middle),
+        h1_reads("Content-Encoding: gzip\r\nContent-Length: {len}", &encoded),
+        h1_reads("Connection: close", &encoded),
+        openai_sse_reads(100_000),
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert!(reads.iter().map(Vec::len).sum::<usize>() > MAX_RESPONSE_BUFFER_SIZE);
+        let mut p = StreamProcessor::new();
+        let mut out = outcomes(&mut p, reads, None);
+        out.extend(outcomes(&mut p, &h1_response(3000), None));
+        assert_eq!(unparsed(&out), [UnparsedReason::ResponseTooLarge], "{n}");
+        assert_eq!(count(&out, Outcome::Recorded), 1, "{n}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{n}");
+    }
+}
+
+#[test]
+fn test_json_response_over_buffer_limit_is_recorded() {
+    let mut cases = vec![
+        h1_response_of_size(MAX_RESPONSE_BUFFER_SIZE),
+        h1_response_of_size(MAX_RESPONSE_BUFFER_SIZE + 1),
+    ];
+    for body_len in [20 << 20, 40 << 20] {
+        let body = chat_json(body_len, 0);
+        cases.push(h1_reads("Content-Length: {len}", &body));
+        cases.push(h1_reads("Transfer-Encoding: chunked", &body));
+    }
+    for reads in cases {
+        let total: usize = reads.iter().map(Vec::len).sum();
+        let mut p = StreamProcessor::new();
+        let out = outcomes(&mut p, &reads, None);
+        assert!(unparsed(&out).is_empty(), "{total}: {out:?}");
+        assert_eq!(count(&out, Outcome::Recorded), 1, "{total}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{total}");
+        // Past the limit only the two ends are kept, whatever the size.
+        assert!(total <= MAX_RESPONSE_BUFFER_SIZE || p.read_buf.capacity() == 0);
+
+        let next = outcomes(&mut p, &h1_response(3000), None);
+        assert_eq!(next.last(), Some(&Outcome::Recorded), "{total}: {next:?}");
+    }
+}
+
+#[test]
+fn test_json_response_over_buffer_limit_missing_a_read_ends_at_the_next_request() {
+    // A whole read lost before the ringbuf (no gap seen): the length walk never reaches 0 on its own.
+    let mut reads = h1_reads("Content-Length: {len}", &chat_json(20 << 20, 0));
+    reads.remove(reads.len() - 10);
+    let mut p = StreamProcessor::new();
+    let mut out = outcomes(&mut p, &reads, None);
+    out.extend(outcomes(&mut p, &h1_response(3000), None));
+    out.extend(outcomes(&mut p, &h1_response(3000), None));
+    assert_eq!(unparsed(&out), [UnparsedReason::NextRequest], "{out:?}");
+    assert_eq!(count(&out, Outcome::Recorded), 2);
+}
+
+#[test]
+fn test_request_over_buffer_limit_is_unparsed() {
+    let chunk = [b' '; MAX_SSL_BUF_SIZE];
+    let too_large = [UnparsedReason::RequestTooLarge];
+    for (body, want) in [
+        (MAX_REQUEST_BUFFER_SIZE - REQUEST.len(), &[][..]),
+        (MAX_REQUEST_BUFFER_SIZE - REQUEST.len() + 1, &too_large),
+        (MAX_REQUEST_BUFFER_SIZE + 100_000, &too_large),
+    ] {
+        let mut p = StreamProcessor::new();
+        let mut out = send(&mut p, LlmDirection::Write, REQUEST, None);
+        let mut left = body;
+        while left > 0 {
+            let n = left.min(chunk.len());
+            out.extend(send(&mut p, LlmDirection::Write, &chunk[..n], None));
+            left -= n;
+        }
+        for r in &h1_response(3000) {
+            out.extend(send(&mut p, LlmDirection::Read, r, None));
+        }
+        assert_eq!(unparsed(&out), want, "{body}");
+        assert_eq!(count(&out, Outcome::Recorded), 1 - want.len(), "{body}");
+
+        let next = outcomes(&mut p, &h1_response(3000), None);
+        assert_eq!(next.last(), Some(&Outcome::Recorded), "{body}: {next:?}");
     }
 }
 
@@ -507,8 +651,185 @@ fn test_stream_after_a_lost_fragment_is_parsed_from_its_own_start() {
     let short = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n";
     let mut out = outcomes(&mut p, &lossy, Some((40, 1)));
     out.extend(outcomes(&mut p, &[short.to_vec()], None));
-    assert_eq!(count(&out, Outcome::Unparsed), 1, "{out:?}");
+    assert_eq!(unparsed(&out), [UnparsedReason::CaptureLost], "{out:?}");
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+}
+
+#[test]
+fn test_call_after_a_lost_response_head_read_is_recorded() {
+    // Whole SSL_reads lost in the kernel leave no gap in the fragment offsets.
+    let mut short_first_read = h1_response(3000);
+    let head = short_first_read.remove(0);
+    short_first_read.splice(0..0, [head[..5].to_vec(), head[5..].to_vec()]);
+    for (n, (mut reads, lost)) in [
+        (h1_response(3000), 0),
+        (h1_response(40000), 0),
+        (openai_sse_reads(5), 0),
+        (vec![h1("application/json", MESSAGES_RESPONSE)], 0),
+        // `HTTP/` alone passes as a status line; the request head after it shows the loss.
+        (short_first_read, 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        reads.remove(lost);
+        let mut p = StreamProcessor::new();
+        let mut out = outcomes(&mut p, &h1_response(3000), None);
+        out.extend(outcomes(&mut p, &reads, None));
+        out.extend(outcomes(&mut p, &h1_response(3000), None));
+        assert_eq!(
+            unparsed(&out),
+            [UnparsedReason::CaptureLost],
+            "{n}: {out:?}"
+        );
+        assert_eq!(count(&out, Outcome::Recorded), 2, "{n}: {out:?}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{n}: {out:?}");
+    }
+}
+
+#[test]
+fn test_call_after_a_lost_last_response_read_is_recorded() {
+    let sse = openai_sse_reads(5);
+    let json = h1_response(40000);
+    for (n, (reads, lost)) in [
+        (sse.clone(), 1),
+        (sse.clone(), 2),
+        (json.clone(), 1),
+        (json.clone(), 2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let kept = &reads[..reads.len() - lost];
+        let mut p = StreamProcessor::new();
+        let mut out = outcomes(&mut p, &sse, None);
+        out.extend(outcomes(&mut p, kept, None));
+        out.extend(outcomes(&mut p, &sse, None));
+        out.extend(outcomes(&mut p, &json, None));
+        assert_eq!(
+            unparsed(&out),
+            [UnparsedReason::CaptureLost],
+            "{n}: {out:?}"
+        );
+        assert_eq!(count(&out, Outcome::Recorded), 3, "{n}: {out:?}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{n}: {out:?}");
+    }
+}
+
+#[test]
+fn test_newest_request_is_resumed_after_two_lost_responses() {
+    let sse = openai_sse_reads(5);
+    let mut p = StreamProcessor::new();
+    let mut out = outcomes(&mut p, &sse[..sse.len() - 1], None);
+    // The second request's whole response is lost too.
+    out.extend(send(&mut p, LlmDirection::Write, MESSAGES_REQUEST, None));
+    out.extend(outcomes(&mut p, &sse, None));
+    out.extend(outcomes(&mut p, &h1_response(3000), None));
+    assert_eq!(
+        unparsed(&out),
+        [UnparsedReason::CaptureLost, UnparsedReason::CaptureLost],
+        "{out:?}"
+    );
+    assert_eq!(count(&out, Outcome::Recorded), 2, "{out:?}");
+    assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+}
+
+#[test]
+fn test_truncated_status_line_read_after_a_lost_tail_is_not_parsed() {
+    let sse = openai_sse_reads(5);
+    let mut p = StreamProcessor::new();
+    let mut out = outcomes(&mut p, &sse[..sse.len() - 1], None);
+    // One SSL_read over the 16 KB capture limit: its tail is missing, so it cannot be framed.
+    out.extend(send(&mut p, LlmDirection::Write, REQUEST, None));
+    out.extend(send(
+        &mut p,
+        LlmDirection::Read,
+        &h1_response(40000).concat(),
+        None,
+    ));
+    out.extend(outcomes(&mut p, &h1_response(3000), None));
+    assert_eq!(unparsed(&out), [UnparsedReason::CaptureLost], "{out:?}");
+    assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+    assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+}
+
+#[test]
+fn test_non_llm_request_after_a_lost_last_read_is_skipped() {
+    let sse = openai_sse_reads(5);
+    let count_tokens = b"POST /v1/messages/count_tokens HTTP/1.1\r\nHost: api.anthropic.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"claude-opus-5-5\",\"messages\":[]}";
+    let mut p = StreamProcessor::new();
+    let mut out = outcomes(&mut p, &sse[..sse.len() - 1], None);
+    out.extend(exchange(
+        &mut p,
+        count_tokens,
+        &h1("application/json", r#"{"input_tokens":14}"#),
+    ));
+    out.extend(exchange(
+        &mut p,
+        MESSAGES_REQUEST,
+        &h1("application/json", MESSAGES_RESPONSE),
+    ));
+    assert_eq!(unparsed(&out), [UnparsedReason::CaptureLost], "{out:?}");
+    assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+    assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+}
+
+#[test]
+fn test_read_starting_with_status_line_text_mid_stream_is_recorded() {
+    let mut reads = openai_sse_reads(5);
+    let ev = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"HTTP/1.1 200 OK\"}}]}\n\n";
+    let chunk = format!("{:x}\r\n{ev}\r\n", ev.len()).into_bytes();
+    let Some(at) = chunk.windows(7).position(|w| w == b"HTTP/1.") else {
+        panic!("the event carries the status-line text");
+    };
+    reads.splice(3..3, [chunk[..at].to_vec(), chunk[at..].to_vec()]);
+    // Also with the next request written first, as a pipelining client does.
+    for pipelined in [false, true] {
+        let mut p = StreamProcessor::new();
+        let mut out = send(&mut p, LlmDirection::Write, REQUEST, None);
+        for (n, r) in reads.iter().enumerate() {
+            if pipelined && n == 4 {
+                out.extend(send(&mut p, LlmDirection::Write, MESSAGES_REQUEST, None));
+            }
+            out.extend(send(&mut p, LlmDirection::Read, r, None));
+        }
+        assert!(unparsed(&out).is_empty(), "{pipelined}: {out:?}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{pipelined}: {out:?}");
+    }
+}
+
+#[test]
+fn test_first_read_of_partial_status_line_is_recorded() {
+    for split in 1..=8 {
+        let mut reads = h1_response(3000);
+        let head = reads.remove(0);
+        reads.splice(0..0, [head[..split].to_vec(), head[split..].to_vec()]);
+        let mut p = StreamProcessor::new();
+        let out = outcomes(&mut p, &reads, None);
+        assert!(unparsed(&out).is_empty(), "{split}: {out:?}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{split}: {out:?}");
+    }
+}
+
+#[test]
+fn test_response_after_empty_lines_is_recorded() {
+    let ok = h1("application/json", MESSAGES_RESPONSE);
+    for lead in [&b"\r\n"[..], b"\n", b"\r\n\r\n"] {
+        let mut p = StreamProcessor::new();
+        let mut out = send(&mut p, LlmDirection::Write, MESSAGES_REQUEST, None);
+        out.extend(send(
+            &mut p,
+            LlmDirection::Read,
+            &[lead, &ok].concat(),
+            None,
+        ));
+        // The empty line in a read of its own, as a server that ends the previous response with it.
+        out.extend(send(&mut p, LlmDirection::Write, MESSAGES_REQUEST, None));
+        out.extend(send(&mut p, LlmDirection::Read, lead, None));
+        out.extend(send(&mut p, LlmDirection::Read, &ok, None));
+        assert!(unparsed(&out).is_empty(), "{lead:?}: {out:?}");
+        assert_eq!(count(&out, Outcome::Recorded), 2, "{lead:?}: {out:?}");
+    }
 }
 
 fn fastest(mut run: impl FnMut()) -> std::time::Duration {

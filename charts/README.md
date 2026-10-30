@@ -130,6 +130,7 @@ Since the agent pushes metrics via OTLP, you must have an OTel Collector running
 | **Service Name** | (Internal template) | `OTEL_SERVICE_NAME` |
 | **LLM Probe** | `builtinProbes.llm.enabled` | `BUILTIN_PROBES__LLM` |
 | **LLM Probe: executables with built-in OpenSSL (Node.js)** | `builtinProbes.llm.executables` | `BUILTIN_PROBES__LLM_EXECUTABLES` |
+| **LLM metrics: pod labels copied as `target_pod_label_<name>`** | `builtinProbes.llm.podLabels` | `BUILTIN_PROBES__LLM_POD_LABELS` (comma separated) |
 
 ---
 

@@ -53,6 +53,10 @@ terraform.rc
 !docs/grafana/*.json
 # Built-in price table compiled into the agent
 !honeybeepf-llm/honeybeepf-llm-core/src/prices.json
+# Price tables the core tests load
+!honeybeepf-llm/honeybeepf-llm-core/tests/fixtures/*.json
+# Built-in provider list compiled into the agent
+!honeybeepf-llm/honeybeepf-llm-core/src/providers/default_providers.json
 check-status.ps1
 install.bat
 

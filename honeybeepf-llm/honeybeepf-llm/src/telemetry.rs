@@ -23,7 +23,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 #[cfg(feature = "k8s")]
-use crate::k8s::PodInfo;
+use crate::k8s::{PodInfo, UNATTRIBUTED};
 
 /// Metric export interval in seconds
 const METRIC_EXPORT_INTERVAL_SECS: u64 = 30;
@@ -47,6 +47,9 @@ fn active_probes_map() -> &'static RwLock<HashMap<String, u64>> {
     ACTIVE_PROBES.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
+/// Labels of `llm_provider_config_info`, set once when the LLM probe starts.
+static PROVIDER_CONFIG: OnceLock<Vec<KeyValue>> = OnceLock::new();
+
 /// honeybeepf-llm metrics collection
 pub struct HoneyBeeMetrics {
     pub block_io_events: Counter<u64>,
@@ -55,7 +58,7 @@ pub struct HoneyBeeMetrics {
     pub network_latency_ns: Histogram<u64>,
     pub gpu_open_events: Counter<u64>,
     pub process_exit_total: Counter<u64>,
-    pub process_lifetime_seconds: Histogram<u64>,
+    pub process_lifetime_seconds: Histogram<f64>,
     pub file_access_events: Counter<u64>,
     pub llm_requests_total: Counter<u64>,
     pub llm_tokens_total: Counter<u64>,
@@ -103,7 +106,7 @@ impl HoneyBeeMetrics {
                 .with_description("Total number of process exits")
                 .build(),
             process_lifetime_seconds: meter
-                .u64_histogram("process_lifetime_seconds")
+                .f64_histogram("process_lifetime_seconds")
                 .with_description("Process lifetime in seconds")
                 .with_unit("s")
                 .build(),
@@ -151,9 +154,7 @@ impl HoneyBeeMetrics {
                 .build(),
             llm_responses_unparsed_total: meter
                 .u64_counter("llm_responses_unparsed_total")
-                .with_description(
-                    "LLM responses not recorded because bytes were lost in capture or a complete response had no usage",
-                )
+                .with_description("LLM calls not recorded because no usage could be read, by reason")
                 .with_unit("responses")
                 .build(),
             // No unit: the Prometheus exporter would append it to the name.
@@ -168,7 +169,7 @@ impl HoneyBeeMetrics {
                 )
                 .with_unit("tokens")
                 .build(),
-            prices: load_prices(),
+            prices: load_prices(custom_prices().as_deref()),
         }
     }
 
@@ -241,29 +242,56 @@ impl HoneyBeeMetrics {
                 .add(usage.completion_tokens, &comp_attrs);
         }
     }
+
+    fn record_unparsed(&self, reason: &'static str, mut attrs: Vec<KeyValue>) {
+        attrs.push(KeyValue::new("reason", reason));
+        self.llm_responses_unparsed_total.add(1, &attrs);
+    }
 }
 
-/// Load the built-in price table; if it is rejected the agent runs on without cost metrics.
-fn load_prices() -> Option<(PriceTable, KeyValue)> {
-    match PriceTable::builtin() {
-        Ok(table) => {
-            for s in table.sources() {
-                info!(
-                    "Price table {}: {} prices from {} (checked {})",
-                    table.version(),
-                    s.provider,
-                    s.url,
-                    s.checked
-                );
-            }
-            let version = KeyValue::new("price_table_version", Arc::<str>::from(table.version()));
-            Some((table, version))
-        }
-        Err(e) => {
-            log::warn!("Built-in price table rejected, LLM cost not recorded: {e}");
-            None
+/// A user price file from `LLM_PRICES_CONFIG_FILE`, else inline JSON in `LLM_PRICES_CONFIG` (chart).
+fn custom_prices() -> Option<String> {
+    if let Ok(path) = std::env::var("LLM_PRICES_CONFIG_FILE") {
+        match std::fs::read_to_string(&path) {
+            Ok(json) => return Some(json),
+            Err(e) => log::warn!("Custom price file {path} not read: {e}"),
         }
     }
+    std::env::var("LLM_PRICES_CONFIG")
+        .ok()
+        .filter(|json| !json.is_empty())
+}
+
+/// Load the built-in price table and merge user prices over it; a rejected user file keeps the built-in one.
+fn load_prices(custom: Option<&str>) -> Option<(PriceTable, KeyValue)> {
+    let mut table = match PriceTable::builtin() {
+        Ok(table) => table,
+        Err(e) => {
+            log::warn!("Built-in price table rejected, LLM cost not recorded: {e}");
+            return None;
+        }
+    };
+    if let Some(json) = custom {
+        match table.merge_custom(json) {
+            Ok(o) => info!(
+                "Custom prices: replaced [{}], added [{}]",
+                o.replaced.join(", "),
+                o.added.join(", ")
+            ),
+            Err(e) => log::warn!("Custom price table rejected, using built-in prices only: {e}"),
+        }
+    }
+    for s in table.sources() {
+        info!(
+            "Price table {}: {} prices from {} (checked {})",
+            table.version(),
+            s.provider,
+            s.url,
+            s.checked
+        );
+    }
+    let version = KeyValue::new("price_table_version", Arc::<str>::from(table.version()));
+    Some((table, version))
 }
 
 /// Priority:
@@ -353,10 +381,55 @@ pub fn init_metrics() -> Result<()> {
         })
         .build();
 
+    register_provider_config_info(&meter, &PROVIDER_CONFIG);
+
     let _ = METRICS.set(HoneyBeeMetrics::new(&meter));
 
     info!("OpenTelemetry metrics initialized successfully");
     Ok(())
+}
+
+/// A constant 1 whose labels name the provider set, so a config change shows as a new series.
+fn register_provider_config_info(meter: &Meter, labels: &'static OnceLock<Vec<KeyValue>>) {
+    let _gauge = meter
+        .u64_observable_gauge("llm_provider_config_info")
+        .with_description("LLM provider set the agent matches calls with; always 1, see the labels")
+        .with_callback(move |observer| {
+            if let Some(labels) = labels.get() {
+                observer.observe(1, labels);
+            }
+        })
+        .build();
+}
+
+/// Record the provider set the LLM probe runs with, for `llm_provider_config_info`.
+pub fn record_provider_config(config_hash: &str, providers: &str, count: usize, replaced: &str) {
+    let _ = PROVIDER_CONFIG.set(provider_config_labels(
+        config_hash,
+        providers,
+        count,
+        replaced,
+    ));
+}
+
+fn provider_config_labels(
+    config_hash: &str,
+    providers: &str,
+    count: usize,
+    replaced: &str,
+) -> Vec<KeyValue> {
+    // Prometheus drops an empty label, which would read as "label missing" rather than "nothing replaced".
+    let replaced = if replaced.is_empty() {
+        "none"
+    } else {
+        replaced
+    };
+    vec![
+        KeyValue::new("config_hash", config_hash.to_string()),
+        KeyValue::new("providers", providers.to_string()),
+        KeyValue::new("provider_count", count.to_string()),
+        KeyValue::new("replaced_builtins", replaced.to_string()),
+    ]
 }
 
 pub fn metrics() -> Option<&'static HoneyBeeMetrics> {
@@ -418,28 +491,49 @@ pub fn record_llm_request(
 
         // Only add pod info if k8s feature is enabled
         #[cfg(feature = "k8s")]
-        if let Some(pod) = pod_info {
-            attrs.push(KeyValue::new("target.namespace", pod.namespace.clone()));
-            attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
-        }
+        push_pod_attrs(&mut attrs, pod_info);
 
         m.record_llm(usage, latency_secs, is_error, attrs);
     }
 }
 
-/// Count an LLM response that lost bytes in capture and so has no usage to record.
-pub fn record_llm_unparsed(#[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>) {
+/// Count an LLM call that has no usage to record, by `reason`.
+pub fn record_llm_unparsed(
+    reason: &'static str,
+    #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
+) {
     if let Some(m) = metrics() {
         #[allow(unused_mut)]
         let mut attrs = Vec::new();
 
         #[cfg(feature = "k8s")]
-        if let Some(pod) = pod_info {
-            attrs.push(KeyValue::new("target.namespace", pod.namespace.clone()));
-            attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
-        }
+        push_pod_attrs(&mut attrs, pod_info);
 
-        m.llm_responses_unparsed_total.add(1, &attrs);
+        m.record_unparsed(reason, attrs);
+    }
+}
+
+/// Target labels of an LLM call; the workload is a function of the pod, so it adds no series.
+#[cfg(feature = "k8s")]
+fn push_pod_attrs(attrs: &mut Vec<KeyValue>, pod_info: Option<&std::sync::Arc<PodInfo>>) {
+    let Some(pod) = pod_info else { return };
+    let or_unattributed = |v: &Option<String>| {
+        let v = v.as_deref().filter(|s| !s.is_empty());
+        v.unwrap_or(UNATTRIBUTED).to_string()
+    };
+    attrs.push(KeyValue::new("target.namespace", pod.namespace.clone()));
+    attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
+    attrs.push(KeyValue::new(
+        "target.workload.kind",
+        or_unattributed(&pod.workload_kind),
+    ));
+    attrs.push(KeyValue::new(
+        "target.workload.name",
+        or_unattributed(&pod.workload_name),
+    ));
+    // Only allowlisted labels: each one multiplies the series by its distinct values.
+    for (attr, value) in &pod.pod_labels {
+        attrs.push(KeyValue::new(attr.clone(), value.clone()));
     }
 }
 
@@ -456,7 +550,7 @@ pub fn shutdown_metrics() {
     }
 }
 
-pub fn record_process_exit(cause: &str, exit_code: u32, lifetime_secs: u64, cgroup_id: u64) {
+pub fn record_process_exit(cause: &str, exit_code: u32, lifetime_secs: f64, cgroup_id: u64) {
     if let Some(m) = metrics() {
         let attrs = [
             KeyValue::new("cause", cause.to_string()),
@@ -478,6 +572,42 @@ mod tests {
         InstrumentKind, ManualReader, MetricResult, Pipeline, Temporality,
     };
     use serial_test::serial;
+
+    #[cfg(feature = "k8s")]
+    #[test]
+    fn test_pod_attrs_never_leave_workload_empty() {
+        let un = Some(UNATTRIBUTED);
+        for (kind, name, want) in [
+            (Some("CronJob"), Some("r"), [Some("CronJob"), Some("r")]),
+            (None, None, [un, un]),
+            (Some(""), Some(""), [un, un]),
+        ] {
+            let pod = Arc::new(PodInfo {
+                pod_name: "p-1".to_string(),
+                namespace: "team-a".to_string(),
+                workload_kind: kind.map(str::to_string),
+                workload_name: name.map(str::to_string),
+                pod_labels: vec![("target.pod.label.variant".into(), "b".into())],
+            });
+            let mut attrs = Vec::new();
+            push_pod_attrs(&mut attrs, Some(&pod));
+            let labels: Vec<_> = attrs.iter().map(|kv| kv.value.to_string()).collect();
+            assert_eq!(labels[..2], ["team-a", "p-1"]);
+            assert_eq!(
+                labels[2..4]
+                    .iter()
+                    .map(|v| Some(v.as_str()))
+                    .collect::<Vec<_>>(),
+                want
+            );
+            let variant = attrs.last().map(|kv| format!("{}={}", kv.key, kv.value));
+            assert_eq!(variant.as_deref(), Some("target.pod.label.variant=b"));
+        }
+
+        let mut attrs = Vec::new();
+        push_pod_attrs(&mut attrs, None);
+        assert!(attrs.is_empty());
+    }
 
     #[test]
     #[serial]
@@ -536,6 +666,58 @@ mod tests {
         fn temporality(&self, kind: InstrumentKind) -> Temporality {
             self.0.temporality(kind)
         }
+    }
+
+    #[test]
+    fn provider_config_info_is_one_series_with_the_config_labels() -> Result<()> {
+        static LABELS: OnceLock<Vec<KeyValue>> = OnceLock::new();
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        register_provider_config_info(&provider.meter("test"), &LABELS);
+        let collect = || -> Result<Vec<(u64, Vec<String>)>> {
+            let mut rm = ResourceMetrics {
+                resource: Resource::empty(),
+                scope_metrics: vec![],
+            };
+            reader.collect(&mut rm)?;
+            Ok(rm
+                .scope_metrics
+                .iter()
+                .flat_map(|s| &s.metrics)
+                .filter(|m| m.name == "llm_provider_config_info")
+                .filter_map(|m| m.data.as_any().downcast_ref::<data::Gauge<u64>>())
+                .flat_map(|g| &g.data_points)
+                .map(|p| {
+                    let mut labels: Vec<String> = p
+                        .attributes
+                        .iter()
+                        .map(|kv| format!("{}={}", kv.key, kv.value))
+                        .collect();
+                    labels.sort();
+                    (p.value, labels)
+                })
+                .collect())
+        };
+
+        // Nothing until the LLM probe has reported its providers.
+        assert!(collect()?.is_empty());
+
+        let _ = LABELS.set(provider_config_labels("00ff", "openai,anthropic", 2, ""));
+        assert_eq!(
+            collect()?,
+            [(
+                1,
+                vec![
+                    "config_hash=00ff".to_string(),
+                    "provider_count=2".to_string(),
+                    "providers=openai,anthropic".to_string(),
+                    "replaced_builtins=none".to_string(),
+                ]
+            )]
+        );
+        Ok(())
     }
 
     #[test]
@@ -619,6 +801,60 @@ mod tests {
     }
 
     #[test]
+    fn llm_unparsed_calls_are_counted_by_reason() -> Result<()> {
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"));
+        let pod = || vec![KeyValue::new("target.namespace", "team-a")];
+        metrics.record_unparsed("response_too_large", pod());
+        metrics.record_unparsed("next_request", pod());
+        metrics.record_unparsed("next_request", pod());
+
+        let mut rm = ResourceMetrics {
+            resource: Resource::empty(),
+            scope_metrics: vec![],
+        };
+        reader.collect(&mut rm)?;
+        let sum = rm
+            .scope_metrics
+            .iter()
+            .flat_map(|s| &s.metrics)
+            .find(|m| m.name == "llm_responses_unparsed_total")
+            .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
+            .context("llm_responses_unparsed_total counter not collected")?;
+        let mut points: Vec<(Vec<String>, u64)> = sum
+            .data_points
+            .iter()
+            .map(|p| {
+                let mut kv: Vec<String> = p
+                    .attributes
+                    .iter()
+                    .map(|kv| format!("{}={}", kv.key, kv.value))
+                    .collect();
+                kv.sort();
+                (kv, p.value)
+            })
+            .collect();
+        points.sort();
+        let labels = |reason: &str| {
+            vec![
+                format!("reason={reason}"),
+                "target.namespace=team-a".to_string(),
+            ]
+        };
+        assert_eq!(
+            points,
+            [
+                (labels("next_request"), 2),
+                (labels("response_too_large"), 1)
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn llm_cost_is_priced_per_call_and_unknown_models_stay_unpriced() -> Result<()> {
         let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
         let provider = SdkMeterProvider::builder()
@@ -683,7 +919,7 @@ mod tests {
             ]
         );
         assert!(cost.data_points.iter().all(|p| {
-            label(&p.attributes, "price_table_version").as_deref() == Some("2026-10-26")
+            label(&p.attributes, "price_table_version").as_deref() == Some("2026-10-28")
         }));
         let unpriced = find("llm_unpriced_tokens_total")?
             .data
@@ -697,5 +933,15 @@ mod tests {
             .collect();
         assert_eq!(points, [(kind("unknown_model"), 42)]);
         Ok(())
+    }
+
+    #[test]
+    fn custom_prices_merge_over_the_builtin_table_or_are_ignored() {
+        let json = r#"{"version": "acme", "providers": [{"name": "vllm", "source": "s",
+            "checked": "2026-10-01", "models": {"my-vllm-llama": {"input": 1}}}]}"#;
+        let version = |custom| load_prices(custom).map(|(_, v)| v.value.to_string());
+        let builtin = version(None).expect("built-in table loads");
+        assert_eq!(version(Some("{")), Some(builtin.clone()));
+        assert!(version(Some(json)).is_some_and(|v| v.starts_with(&format!("{builtin}+custom-"))));
     }
 }
