@@ -27,7 +27,7 @@ struct ProviderUrls {
 #[test]
 fn test_default_providers() {
     let registry = ProviderRegistry::with_defaults();
-    assert_eq!(registry.providers.len(), 6);
+    assert_eq!(registry.providers.len(), 7);
 }
 
 // `with_defaults` panics only on a parse error, and serde skips unknown keys, so a key typo would go unnoticed.
@@ -83,7 +83,7 @@ fn test_default_provider_hosts() {
         "aiplatform.googleapis.com",
         "aiplatform.*.rep.googleapis.com",
     ];
-    let expected: [&[&str]; 6] = [
+    let expected: [&[&str]; 7] = [
         &openai,
         &openai,
         &[
@@ -95,6 +95,7 @@ fn test_default_provider_hosts() {
         ],
         &["generativelanguage.googleapis.com", vertex[0], vertex[1]],
         &vertex,
+        &["bedrock-runtime.*.amazonaws.com"],
         &["bedrock-runtime.*.amazonaws.com"],
     ];
     let registry = ProviderRegistry::with_defaults();
@@ -286,6 +287,7 @@ fn test_user_providers_are_added_to_the_defaults() {
             "gemini",
             "anthropic",
             "bedrock",
+            "bedrock",
             "ollama",
             "vllm"
         ]
@@ -324,6 +326,7 @@ fn test_user_provider_replaces_defaults_with_its_name_in_their_place() {
             "anthropic",
             "anthropic",
             "gemini",
+            "bedrock",
             "bedrock",
             "ollama"
         ]
