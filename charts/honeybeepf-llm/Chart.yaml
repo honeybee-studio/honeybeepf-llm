@@ -11,5 +11,8 @@ keywords:
   - rust
   - aya
 home: https://github.com/honeybee-studio/honeybeepf-llm
+# The first source becomes the OCI source annotation, which links the ghcr chart package to this repository.
+sources:
+  - https://github.com/honeybee-studio/honeybeepf-llm
 
 # maintainers (hope to add more in the future)
