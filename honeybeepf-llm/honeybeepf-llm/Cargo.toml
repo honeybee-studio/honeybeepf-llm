@@ -14,6 +14,7 @@ honeybeepf-llm-common = { path = "../honeybeepf-llm-common", features = ["user"]
 honeybeepf-llm-core = { path = "../honeybeepf-llm-core" }
 
 anyhow = { workspace = true, default-features = true }
+arc-swap = "1.7"
 aya = { workspace = true }
 aya-log = { workspace = true }
 libc = { workspace = true }

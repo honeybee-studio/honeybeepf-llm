@@ -68,6 +68,11 @@ spec:
                   fieldPath: metadata.name
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: "service.namespace={{ .Release.Namespace }},deployment.environment={{ .Release.Namespace }},k8s.node.name=$(K8S_NODE_NAME),k8s.pod.name=$(K8S_POD_NAME)"
+            {{- if .Values.builtinProbes.llm.prices }}
+            # Kubelet refreshes a mounted ConfigMap in place (env does not), so the agent rereads prices without a restart.
+            - name: LLM_PRICES_CONFIG_FILE
+              value: /etc/honeybeepf-llm/prices/prices.json
+            {{- end }}
 
               
           envFrom:
@@ -87,6 +92,11 @@ spec:
             - mountPath: /host
               name: host-root
               readOnly: true
+            {{- if .Values.builtinProbes.llm.prices }}
+            - mountPath: /etc/honeybeepf-llm/prices
+              name: prices
+              readOnly: true
+            {{- end }}
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -104,3 +114,11 @@ spec:
           hostPath:
             path: /
             type: Directory
+        {{- if .Values.builtinProbes.llm.prices }}
+        - name: prices
+          configMap:
+            name: {{ include "honeybeepf-llm.fullname" . }}
+            items:
+              - key: LLM_PRICES_CONFIG
+                path: prices.json
+        {{- end }}
