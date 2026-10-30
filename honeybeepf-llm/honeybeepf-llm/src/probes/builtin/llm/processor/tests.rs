@@ -503,6 +503,10 @@ fn chat_json(before: usize, after: usize) -> Vec<u8> {
 
 /// The response in 16 KB reads; chunked in 8191-byte chunks, so chunks and reads never line up.
 fn h1_reads(headers: &str, body: &[u8]) -> Vec<Vec<u8>> {
+    typed_reads("application/json", headers, body)
+}
+
+fn typed_reads(content_type: &str, headers: &str, body: &[u8]) -> Vec<Vec<u8>> {
     let headers = headers.replace("{len}", &body.len().to_string());
     let mut framed = Vec::with_capacity(body.len() * 2);
     if headers.contains("chunked") {
@@ -515,7 +519,7 @@ fn h1_reads(headers: &str, body: &[u8]) -> Vec<Vec<u8>> {
     } else {
         framed.extend_from_slice(body);
     }
-    let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{headers}\r\n\r\n");
+    let head = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{headers}\r\n\r\n");
     let mut reads = vec![head.into_bytes()];
     reads.extend(framed.chunks(16384).map(<[u8]>::to_vec));
     reads
@@ -532,7 +536,11 @@ fn test_response_over_buffer_limit_without_usage_at_its_ends_is_unparsed() {
         h1_reads("Transfer-Encoding: chunked", &middle),
         h1_reads("Content-Encoding: gzip\r\nContent-Length: {len}", &encoded),
         h1_reads("Connection: close", &encoded),
-        openai_sse_reads(100_000),
+        typed_reads(
+            "text/event-stream",
+            "Content-Encoding: gzip\r\nTransfer-Encoding: chunked",
+            &openai_sse_body(70_000),
+        ),
     ]
     .iter()
     .enumerate()
@@ -639,6 +647,80 @@ fn openai_sse_reads(events: usize) -> Vec<Vec<u8>> {
     last.extend_from_slice(b"0\r\n\r\n");
     reads.push(last);
     reads
+}
+
+/// An OpenAI chat stream of ~300-byte deltas whose text looks like stream ends and usage.
+fn openai_sse_body(events: usize) -> Vec<u8> {
+    let mut body = Vec::with_capacity(events * 320);
+    for i in 0..events {
+        body.extend_from_slice(format!(
+            "data: {{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o\",\
+             \"system_fingerprint\":\"fp\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\" t{i} data: [DONE] \
+             \\\"usage\\\":{{\\\"prompt_tokens\\\":99}}\"}},\"logprobs\":null,\"finish_reason\":null}}],\"usage\":null}}\n\n"
+        ).as_bytes());
+    }
+    body.extend_from_slice(format!(
+        "data: {{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[],\
+         \"usage\":{{\"prompt_tokens\":11,\"completion_tokens\":{events}}}}}\n\ndata: [DONE]\n\n"
+    ).as_bytes());
+    body
+}
+
+/// An SSE response with a Content-Length that is exactly `total` bytes, padded by a comment line.
+fn sse_reads_of_size(total: usize) -> Vec<Vec<u8>> {
+    let body = openai_sse_body(total / 330);
+    let base: usize = typed_reads("text/event-stream", "Content-Length: {len}", &body)
+        .iter()
+        .map(Vec::len)
+        .sum();
+    let padded = [b": ", &b"x".repeat(total - base - 3)[..], b"\n", &body].concat();
+    typed_reads("text/event-stream", "Content-Length: {len}", &padded)
+}
+
+#[test]
+fn test_sse_response_over_buffer_limit_is_recorded() {
+    let body = openai_sse_body(70_000);
+    let mut cases = vec![
+        sse_reads_of_size(MAX_RESPONSE_BUFFER_SIZE),
+        sse_reads_of_size(MAX_RESPONSE_BUFFER_SIZE + 1),
+        openai_sse_reads(100_000),
+    ];
+    for headers in [
+        "Transfer-Encoding: chunked",
+        "Content-Length: {len}",
+        "Connection: close",
+    ] {
+        cases.push(typed_reads("text/event-stream", headers, &body));
+    }
+    for (n, reads) in cases.iter().enumerate() {
+        let total: usize = reads.iter().map(Vec::len).sum();
+        let mut p = StreamProcessor::new();
+        let out = outcomes(&mut p, reads, None);
+        assert!(unparsed(&out).is_empty(), "{n} {total}");
+        assert_eq!(count(&out, Outcome::Recorded), 1, "{n} {total}");
+        assert!(total <= MAX_RESPONSE_BUFFER_SIZE || p.read_buf.capacity() == 0);
+
+        let next = outcomes(&mut p, &h1_response(3000), None);
+        assert_eq!(next.last(), Some(&Outcome::Recorded), "{n}: {next:?}");
+    }
+}
+
+#[test]
+fn test_sse_response_over_buffer_limit_missing_a_read_is_unparsed_once() {
+    // A whole read lost before the ringbuf: the chunk walk loses its place.
+    let mut reads = typed_reads(
+        "text/event-stream",
+        "Transfer-Encoding: chunked",
+        &openai_sse_body(70_000),
+    );
+    reads.remove(reads.len() - 10);
+    let mut p = StreamProcessor::new();
+    let out = outcomes(&mut p, &reads, None);
+    assert_eq!(count(&out, Outcome::Recorded), 0);
+    let mut next = outcomes(&mut p, &h1_response(3000), None);
+    next.extend(outcomes(&mut p, &h1_response(3000), None));
+    assert_eq!(unparsed(&out).len() + unparsed(&next).len(), 1, "{next:?}");
+    assert_eq!(count(&next, Outcome::Recorded), 2);
 }
 
 #[test]

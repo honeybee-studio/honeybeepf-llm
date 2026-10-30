@@ -170,6 +170,12 @@ pub(super) fn plain_body(buffer: &[u8]) -> Option<(Framing, &[u8])> {
     (!head.is_sse && !encoding::is_encoded(head.headers())).then_some((head.framing, head.body))
 }
 
+/// Framing and body of a final SSE response sent without a content coding.
+pub(super) fn plain_sse_body(buffer: &[u8]) -> Option<(Framing, &[u8])> {
+    let head = final_head(buffer)?;
+    (head.is_sse && !encoding::is_encoded(head.headers())).then_some((head.framing, head.body))
+}
+
 fn header_contains(headers: &[httparse::Header], name: &str, pattern: &[u8]) -> bool {
     headers.iter().any(|h| {
         h.name.eq_ignore_ascii_case(name) && byte_utils::contains_pattern(h.value, pattern)

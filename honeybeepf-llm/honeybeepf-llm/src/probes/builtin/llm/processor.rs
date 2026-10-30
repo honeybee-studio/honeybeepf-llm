@@ -95,8 +95,8 @@ pub struct StreamProcessor {
     read_buf: Vec<u8>,
     /// What parsing already read of `read_buf`; cleared with it.
     read_progress: http::ResponseProgress,
-    /// A JSON response past the buffer limit, kept by its ends instead of `read_buf`.
-    json_ends: Option<Box<http::JsonEnds>>,
+    /// A response past the buffer limit, followed instead of kept in `read_buf`.
+    past_limit: Option<Box<PastLimit>>,
     last_activity: Instant,
     /// Offset the next fragment of the SSL call in progress must have; 0 between calls.
     frag_next: u32,
@@ -119,7 +119,7 @@ impl StreamProcessor {
             write_buf: Vec::new(),
             read_buf: Vec::new(),
             read_progress: http::ResponseProgress::default(),
-            json_ends: None,
+            past_limit: None,
             last_activity: Instant::now(),
             frag_next: 0,
             frag_dir: LlmDirection::Unknown,
@@ -230,10 +230,10 @@ impl StreamProcessor {
     /// Whether a whole HTTP/1.1 response without usage is buffered, so the next Write starts a new request.
     fn awaits_http11_response(&self) -> bool {
         match &self.state {
-            // A Write before that is a request body sent after `100 Continue`; a JSON body past 16 MB is
+            // A Write before that is a request body sent after `100 Continue`; a body past 16 MB is
             // long past it, and a lost read would otherwise let its walk run into the next response.
             ProcessorState::ProcessingResponse { parser, .. } => {
-                self.json_ends.is_some()
+                self.past_limit.is_some()
                     || !parser.writes_during_response()
                         && http::Http11Parser::is_complete_response(&self.read_buf)
             }
@@ -244,7 +244,7 @@ impl StreamProcessor {
     /// Whether an HTTP/1.1 response is in progress, so a Write now is pipelined or follows a lost read.
     fn mid_http11_response(&self) -> bool {
         matches!(&self.state, ProcessorState::ProcessingResponse { parser, .. }
-            if !parser.writes_during_response() && self.json_ends.is_none())
+            if !parser.writes_during_response() && self.past_limit.is_none())
     }
 
     /// Whether a new status line answers the request written mid-response: the response's last reads were lost.
@@ -420,8 +420,8 @@ impl StreamProcessor {
             | ProcessorState::ProcessingResponse { start_time, parser } => {
                 // Parse once the SSL call's last fragment is in, not on a partial record
                 if complete
-                    && let Some(usage) = match &mut self.json_ends {
-                        Some(ends) => ends.usage.take(),
+                    && let Some(usage) = match &mut self.past_limit {
+                        Some(followed) => followed.take_usage(),
                         None => parser.parse_response_from(&self.read_buf, &mut self.read_progress),
                     }
                 {
@@ -472,15 +472,15 @@ impl StreamProcessor {
             }
             _ => {}
         }
-        if self.json_ends.is_none() && self.read_buf.len() + data.len() > MAX_RESPONSE_BUFFER_SIZE {
-            // A plain JSON body has model near its start and usage at its end, so the middle can go.
-            let ends =
-                http::JsonEnds::start(&self.read_buf).ok_or(UnparsedReason::ResponseTooLarge)?;
-            self.json_ends = Some(Box::new(ends));
+        if self.past_limit.is_none() && self.read_buf.len() + data.len() > MAX_RESPONSE_BUFFER_SIZE
+        {
+            let followed =
+                PastLimit::start(&self.read_buf).ok_or(UnparsedReason::ResponseTooLarge)?;
+            self.past_limit = Some(Box::new(followed));
             self.read_buf = Vec::new();
         }
-        match &mut self.json_ends {
-            Some(ends) => ends
+        match &mut self.past_limit {
+            Some(followed) => followed
                 .feed(data)
                 .then_some(true)
                 .ok_or(UnparsedReason::ResponseTooLarge),
@@ -529,8 +529,38 @@ impl StreamProcessor {
         self.write_buf.clear();
         self.read_buf.clear();
         self.read_progress = http::ResponseProgress::default();
-        self.json_ends = None;
+        self.past_limit = None;
         self.next_request = None;
+    }
+}
+
+/// How a response past the buffer limit is followed without keeping its body.
+enum PastLimit {
+    /// A plain JSON body has model near its start and usage at its end, so the middle can go.
+    Json(http::JsonEnds),
+    /// SSE usage is in its last events, read as they pass.
+    Sse(http::SseStream),
+}
+
+impl PastLimit {
+    fn start(buffer: &[u8]) -> Option<Self> {
+        http::JsonEnds::start(buffer)
+            .map(Self::Json)
+            .or_else(|| http::SseStream::start(buffer).map(Self::Sse))
+    }
+
+    fn feed(&mut self, data: &[u8]) -> bool {
+        match self {
+            Self::Json(ends) => ends.feed(data),
+            Self::Sse(stream) => stream.feed(data),
+        }
+    }
+
+    fn take_usage(&mut self) -> Option<UsageInfo> {
+        match self {
+            Self::Json(ends) => ends.usage.take(),
+            Self::Sse(stream) => stream.usage.take(),
+        }
     }
 }
 
