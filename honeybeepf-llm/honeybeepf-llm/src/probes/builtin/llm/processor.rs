@@ -101,6 +101,8 @@ pub struct StreamProcessor {
     /// Offset the next fragment of the SSL call in progress must have; 0 between calls.
     frag_next: u32,
     frag_dir: LlmDirection,
+    /// A request head written before the HTTP/1.1 response ended: where it starts in `write_buf`, and when.
+    next_request: Option<(usize, Instant)>,
 }
 
 impl Default for StreamProcessor {
@@ -121,6 +123,7 @@ impl StreamProcessor {
             last_activity: Instant::now(),
             frag_next: 0,
             frag_dir: LlmDirection::Unknown,
+            next_request: None,
         }
     }
 
@@ -158,16 +161,17 @@ impl StreamProcessor {
         self.frag_next = if complete { 0 } else { end };
         self.frag_dir = direction;
 
+        let resync = offset == 0 && !gap && self.lost_http11_tail(direction, data);
         let reason = if gap {
             Some(UnparsedReason::CaptureLost)
         } else if direction == LlmDirection::Write && self.awaits_http11_response() {
             Some(UnparsedReason::NextRequest)
-        } else if offset == 0 && self.lost_http11_head(direction, data) {
+        } else if resync || (offset == 0 && self.lost_http11_head(direction, data)) {
             Some(UnparsedReason::CaptureLost)
         } else {
             None
         };
-        let dropped = match reason {
+        let mut dropped = match reason {
             None => Outcome::Pending,
             Some(reason) => {
                 #[cfg(feature = "k8s")]
@@ -177,6 +181,23 @@ impl StreamProcessor {
                 dropped
             }
         };
+        if resync {
+            self.resume_next_request(
+                pid,
+                #[cfg(feature = "k8s")]
+                pod_info.as_ref(),
+            );
+        } else if offset == 0 && direction == LlmDirection::Write {
+            let noted = self.note_next_request(
+                data,
+                pid,
+                #[cfg(feature = "k8s")]
+                pod_info.as_ref(),
+            );
+            if matches!(noted, Outcome::Unparsed(_)) {
+                dropped = noted;
+            }
+        }
         if out_of_order && offset != 0 {
             return dropped;
         }
@@ -220,6 +241,70 @@ impl StreamProcessor {
         }
     }
 
+    /// Whether an HTTP/1.1 response is in progress, so a Write now is pipelined or follows a lost read.
+    fn mid_http11_response(&self) -> bool {
+        matches!(&self.state, ProcessorState::ProcessingResponse { parser, .. }
+            if !parser.writes_during_response() && self.json_ends.is_none())
+    }
+
+    /// Whether a new status line answers the request written mid-response: the response's last reads were lost.
+    fn lost_http11_tail(&self, direction: LlmDirection, data: &[u8]) -> bool {
+        direction == LlmDirection::Read
+            && self.next_request.is_some()
+            && self.mid_http11_response()
+            && http::Http11Parser::starts_with_response_head(skip_empty_lines(data))
+    }
+
+    /// Remember a request head written mid-response; one already remembered never got its response.
+    fn note_next_request(
+        &mut self,
+        data: &[u8],
+        pid: u32,
+        #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
+    ) -> Outcome {
+        if !self.mid_http11_response() || !http::Http11Parser::is_request_head(data) {
+            return Outcome::Pending;
+        }
+        // The next status line answers the newest request, since clients do not pipeline.
+        let skipped = self
+            .next_request
+            .replace((self.write_buf.len(), Instant::now()));
+        if skipped.is_none() {
+            return Outcome::Pending;
+        }
+        Self::count_unparsed(
+            pid,
+            UnparsedReason::CaptureLost,
+            #[cfg(feature = "k8s")]
+            pod_info,
+        )
+    }
+
+    /// Start over from the request written mid-response, so this Read is parsed as its response.
+    fn resume_next_request(
+        &mut self,
+        pid: u32,
+        #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
+    ) {
+        let Some((at, start_time)) = self.next_request.take() else {
+            return;
+        };
+        self.write_buf.drain(..at.min(self.write_buf.len()));
+        self.read_buf.clear();
+        self.read_progress = http::ResponseProgress::default();
+        // Detected again, so a non-LLM request after the loss is skipped like any other.
+        self.state = match self.detect(
+            pid,
+            #[cfg(feature = "k8s")]
+            pod_info,
+        ) {
+            ProcessorState::ProcessingRequest { parser, .. } => {
+                ProcessorState::ProcessingRequest { start_time, parser }
+            }
+            other => other,
+        };
+    }
+
     /// Whether the HTTP/1.1 response lost its status line before the ringbuf, so it can never be framed.
     fn lost_http11_head(&self, direction: LlmDirection, data: &[u8]) -> bool {
         const STATUS: &[u8] = b"HTTP/1.";
@@ -253,6 +338,21 @@ impl StreamProcessor {
         if !self.is_llm() {
             return Outcome::Pending;
         }
+        self.state = ProcessorState::Finished;
+        Self::count_unparsed(
+            pid,
+            reason,
+            #[cfg(feature = "k8s")]
+            pod_info,
+        )
+    }
+
+    /// Count one LLM call as unparsed, in the metric and the log.
+    fn count_unparsed(
+        pid: u32,
+        reason: UnparsedReason,
+        #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
+    ) -> Outcome {
         crate::telemetry::record_llm_unparsed(
             reason.as_str(),
             #[cfg(feature = "k8s")]
@@ -268,7 +368,6 @@ impl StreamProcessor {
             "LLM UNPARSED | PID: {} | {}, not recorded{}",
             pid, reason, pod_str
         );
-        self.state = ProcessorState::Finished;
         Outcome::Unparsed(reason)
     }
 
@@ -431,6 +530,7 @@ impl StreamProcessor {
         self.read_buf.clear();
         self.read_progress = http::ResponseProgress::default();
         self.json_ends = None;
+        self.next_request = None;
     }
 }
 

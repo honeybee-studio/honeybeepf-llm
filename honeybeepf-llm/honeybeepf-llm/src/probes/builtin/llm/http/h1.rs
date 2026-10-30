@@ -89,6 +89,12 @@ impl Http11Parser {
     pub fn is_complete_response(buffer: &[u8]) -> bool {
         final_head(buffer).is_some_and(|head| head.framing.ended(head.body))
     }
+
+    /// Whether the buffer starts with a final response head that has headers; body text that merely starts with
+    /// `HTTP/1.` parses with none, since SSE and JSON bodies have raw newlines only between events.
+    pub fn starts_with_response_head(buffer: &[u8]) -> bool {
+        final_head(buffer).is_some_and(|head| head.header_count > 0)
+    }
 }
 
 /// How the end of a response body is found.
