@@ -1,6 +1,6 @@
 use aya_ebpf::{
     macros::map,
-    maps::{HashMap, LruHashMap, PerCpuArray, RingBuf},
+    maps::{HashMap, LruHashMap, PerCpuArray, ProgramArray, RingBuf},
 };
 use honeybeepf_llm_common::LLM_STAT_COUNT;
 
@@ -31,3 +31,7 @@ pub static SSL_CLASS: LruHashMap<[u64; 2], u64> =
 /// Event pipeline counters, indexed by `honeybeepf_llm_common::LLM_STAT_*`.
 #[map]
 pub static LLM_STATS: PerCpuArray<u64> = PerCpuArray::with_max_entries(LLM_STAT_COUNT as u32, 0);
+
+/// Always empty; a program with a tail call gets no per-CPU private stack from the verifier (6.13+).
+#[map]
+pub static NO_PRIV_STACK: ProgramArray = ProgramArray::with_max_entries(1, 0);

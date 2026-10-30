@@ -10,6 +10,7 @@ mod encoding;
 mod h1;
 mod h2;
 mod json_ends;
+mod provider_report;
 mod registry;
 mod sse;
 
@@ -17,6 +18,7 @@ mod sse;
 pub use h1::{Http11Parser, ResponseProgress};
 pub use h2::Http2Parser;
 pub use json_ends::JsonEnds;
+pub use provider_report::report_provider_config;
 
 use honeybeepf_llm_core::types::UsageInfo;
 

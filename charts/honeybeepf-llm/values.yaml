@@ -3,8 +3,9 @@ fullnameOverride: ""
 
 image:
   repository: "ghcr.io/honeybee-studio/honeybeepf-llm"
-  tag: "latest"
-  pullPolicy: Always
+  # Empty runs the image released with this chart (appVersion); "latest" with pullPolicy Always follows main.
+  tag: ""
+  pullPolicy: IfNotPresent
 imagePullSecrets: [] 
 podAnnotations: {}
 

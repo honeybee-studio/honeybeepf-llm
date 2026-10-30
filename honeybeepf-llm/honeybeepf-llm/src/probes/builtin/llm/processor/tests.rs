@@ -688,6 +688,117 @@ fn test_call_after_a_lost_response_head_read_is_recorded() {
 }
 
 #[test]
+fn test_call_after_a_lost_last_response_read_is_recorded() {
+    let sse = openai_sse_reads(5);
+    let json = h1_response(40000);
+    for (n, (reads, lost)) in [
+        (sse.clone(), 1),
+        (sse.clone(), 2),
+        (json.clone(), 1),
+        (json.clone(), 2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let kept = &reads[..reads.len() - lost];
+        let mut p = StreamProcessor::new();
+        let mut out = outcomes(&mut p, &sse, None);
+        out.extend(outcomes(&mut p, kept, None));
+        out.extend(outcomes(&mut p, &sse, None));
+        out.extend(outcomes(&mut p, &json, None));
+        assert_eq!(
+            unparsed(&out),
+            [UnparsedReason::CaptureLost],
+            "{n}: {out:?}"
+        );
+        assert_eq!(count(&out, Outcome::Recorded), 3, "{n}: {out:?}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{n}: {out:?}");
+    }
+}
+
+#[test]
+fn test_newest_request_is_resumed_after_two_lost_responses() {
+    let sse = openai_sse_reads(5);
+    let mut p = StreamProcessor::new();
+    let mut out = outcomes(&mut p, &sse[..sse.len() - 1], None);
+    // The second request's whole response is lost too.
+    out.extend(send(&mut p, LlmDirection::Write, MESSAGES_REQUEST, None));
+    out.extend(outcomes(&mut p, &sse, None));
+    out.extend(outcomes(&mut p, &h1_response(3000), None));
+    assert_eq!(
+        unparsed(&out),
+        [UnparsedReason::CaptureLost, UnparsedReason::CaptureLost],
+        "{out:?}"
+    );
+    assert_eq!(count(&out, Outcome::Recorded), 2, "{out:?}");
+    assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+}
+
+#[test]
+fn test_truncated_status_line_read_after_a_lost_tail_is_not_parsed() {
+    let sse = openai_sse_reads(5);
+    let mut p = StreamProcessor::new();
+    let mut out = outcomes(&mut p, &sse[..sse.len() - 1], None);
+    // One SSL_read over the 16 KB capture limit: its tail is missing, so it cannot be framed.
+    out.extend(send(&mut p, LlmDirection::Write, REQUEST, None));
+    out.extend(send(
+        &mut p,
+        LlmDirection::Read,
+        &h1_response(40000).concat(),
+        None,
+    ));
+    out.extend(outcomes(&mut p, &h1_response(3000), None));
+    assert_eq!(unparsed(&out), [UnparsedReason::CaptureLost], "{out:?}");
+    assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+    assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+}
+
+#[test]
+fn test_non_llm_request_after_a_lost_last_read_is_skipped() {
+    let sse = openai_sse_reads(5);
+    let count_tokens = b"POST /v1/messages/count_tokens HTTP/1.1\r\nHost: api.anthropic.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"claude-opus-5-5\",\"messages\":[]}";
+    let mut p = StreamProcessor::new();
+    let mut out = outcomes(&mut p, &sse[..sse.len() - 1], None);
+    out.extend(exchange(
+        &mut p,
+        count_tokens,
+        &h1("application/json", r#"{"input_tokens":14}"#),
+    ));
+    out.extend(exchange(
+        &mut p,
+        MESSAGES_REQUEST,
+        &h1("application/json", MESSAGES_RESPONSE),
+    ));
+    assert_eq!(unparsed(&out), [UnparsedReason::CaptureLost], "{out:?}");
+    assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+    assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+}
+
+#[test]
+fn test_read_starting_with_status_line_text_mid_stream_is_recorded() {
+    let mut reads = openai_sse_reads(5);
+    let ev = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"HTTP/1.1 200 OK\"}}]}\n\n";
+    let chunk = format!("{:x}\r\n{ev}\r\n", ev.len()).into_bytes();
+    let Some(at) = chunk.windows(7).position(|w| w == b"HTTP/1.") else {
+        panic!("the event carries the status-line text");
+    };
+    reads.splice(3..3, [chunk[..at].to_vec(), chunk[at..].to_vec()]);
+    // Also with the next request written first, as a pipelining client does.
+    for pipelined in [false, true] {
+        let mut p = StreamProcessor::new();
+        let mut out = send(&mut p, LlmDirection::Write, REQUEST, None);
+        for (n, r) in reads.iter().enumerate() {
+            if pipelined && n == 4 {
+                out.extend(send(&mut p, LlmDirection::Write, MESSAGES_REQUEST, None));
+            }
+            out.extend(send(&mut p, LlmDirection::Read, r, None));
+        }
+        assert!(unparsed(&out).is_empty(), "{pipelined}: {out:?}");
+        assert_eq!(out.last(), Some(&Outcome::Recorded), "{pipelined}: {out:?}");
+    }
+}
+
+#[test]
 fn test_first_read_of_partial_status_line_is_recorded() {
     for split in 1..=8 {
         let mut reads = h1_response(3000);

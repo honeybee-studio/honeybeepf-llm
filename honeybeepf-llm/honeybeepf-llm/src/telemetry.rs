@@ -47,6 +47,9 @@ fn active_probes_map() -> &'static RwLock<HashMap<String, u64>> {
     ACTIVE_PROBES.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
+/// Labels of `llm_provider_config_info`, set once when the LLM probe starts.
+static PROVIDER_CONFIG: OnceLock<Vec<KeyValue>> = OnceLock::new();
+
 /// honeybeepf-llm metrics collection
 pub struct HoneyBeeMetrics {
     pub block_io_events: Counter<u64>,
@@ -378,10 +381,55 @@ pub fn init_metrics() -> Result<()> {
         })
         .build();
 
+    register_provider_config_info(&meter, &PROVIDER_CONFIG);
+
     let _ = METRICS.set(HoneyBeeMetrics::new(&meter));
 
     info!("OpenTelemetry metrics initialized successfully");
     Ok(())
+}
+
+/// A constant 1 whose labels name the provider set, so a config change shows as a new series.
+fn register_provider_config_info(meter: &Meter, labels: &'static OnceLock<Vec<KeyValue>>) {
+    let _gauge = meter
+        .u64_observable_gauge("llm_provider_config_info")
+        .with_description("LLM provider set the agent matches calls with; always 1, see the labels")
+        .with_callback(move |observer| {
+            if let Some(labels) = labels.get() {
+                observer.observe(1, labels);
+            }
+        })
+        .build();
+}
+
+/// Record the provider set the LLM probe runs with, for `llm_provider_config_info`.
+pub fn record_provider_config(config_hash: &str, providers: &str, count: usize, replaced: &str) {
+    let _ = PROVIDER_CONFIG.set(provider_config_labels(
+        config_hash,
+        providers,
+        count,
+        replaced,
+    ));
+}
+
+fn provider_config_labels(
+    config_hash: &str,
+    providers: &str,
+    count: usize,
+    replaced: &str,
+) -> Vec<KeyValue> {
+    // Prometheus drops an empty label, which would read as "label missing" rather than "nothing replaced".
+    let replaced = if replaced.is_empty() {
+        "none"
+    } else {
+        replaced
+    };
+    vec![
+        KeyValue::new("config_hash", config_hash.to_string()),
+        KeyValue::new("providers", providers.to_string()),
+        KeyValue::new("provider_count", count.to_string()),
+        KeyValue::new("replaced_builtins", replaced.to_string()),
+    ]
 }
 
 pub fn metrics() -> Option<&'static HoneyBeeMetrics> {
@@ -611,6 +659,58 @@ mod tests {
         fn temporality(&self, kind: InstrumentKind) -> Temporality {
             self.0.temporality(kind)
         }
+    }
+
+    #[test]
+    fn provider_config_info_is_one_series_with_the_config_labels() -> Result<()> {
+        static LABELS: OnceLock<Vec<KeyValue>> = OnceLock::new();
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        register_provider_config_info(&provider.meter("test"), &LABELS);
+        let collect = || -> Result<Vec<(u64, Vec<String>)>> {
+            let mut rm = ResourceMetrics {
+                resource: Resource::empty(),
+                scope_metrics: vec![],
+            };
+            reader.collect(&mut rm)?;
+            Ok(rm
+                .scope_metrics
+                .iter()
+                .flat_map(|s| &s.metrics)
+                .filter(|m| m.name == "llm_provider_config_info")
+                .filter_map(|m| m.data.as_any().downcast_ref::<data::Gauge<u64>>())
+                .flat_map(|g| &g.data_points)
+                .map(|p| {
+                    let mut labels: Vec<String> = p
+                        .attributes
+                        .iter()
+                        .map(|kv| format!("{}={}", kv.key, kv.value))
+                        .collect();
+                    labels.sort();
+                    (p.value, labels)
+                })
+                .collect())
+        };
+
+        // Nothing until the LLM probe has reported its providers.
+        assert!(collect()?.is_empty());
+
+        let _ = LABELS.set(provider_config_labels("00ff", "openai,anthropic", 2, ""));
+        assert_eq!(
+            collect()?,
+            [(
+                1,
+                vec![
+                    "config_hash=00ff".to_string(),
+                    "provider_count=2".to_string(),
+                    "providers=openai,anthropic".to_string(),
+                    "replaced_builtins=none".to_string(),
+                ]
+            )]
+        );
+        Ok(())
     }
 
     #[test]
