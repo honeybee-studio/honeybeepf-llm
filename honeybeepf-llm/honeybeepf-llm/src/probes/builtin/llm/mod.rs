@@ -1,3 +1,4 @@
+mod background;
 mod conn_filter;
 pub mod http;
 pub mod processor;
@@ -13,6 +14,7 @@ use aya::{
     Ebpf,
     maps::{MapData, PerCpuArray},
 };
+use background::BackgroundCalls;
 use conn_filter::{ConnFilter, payload};
 use honeybeepf_llm_common::{LLM_STAT_COUNT, LLM_STAT_NAMES, LlmEvent};
 use honeybeepf_llm_core::types::LlmDirection;
@@ -294,10 +296,13 @@ impl DynamicProbe for LlmProbe {
 /// (pid, SSL*): one stream per TLS connection, whichever threads read and write it.
 type StreamKey = (u32, u64);
 type StreamMap = Arc<Mutex<HashMap<StreamKey, StreamProcessor>>>;
+/// Locked after the StreamMap whenever both are held.
+type BackgroundMap = Arc<Mutex<BackgroundCalls>>;
 
 /// Feed one ringbuf event to its connection's stream, or end the stream on SSL_free.
 fn route_event(
     streams: &mut HashMap<StreamKey, StreamProcessor>,
+    background: &mut BackgroundCalls,
     event: &LlmEvent,
     // Called only for events that use it: a pod lookup miss reads /proc.
     #[cfg(feature = "k8s")] pod_info: impl FnOnce() -> Option<Arc<crate::k8s::PodInfo>>,
@@ -323,6 +328,7 @@ fn route_event(
         event.offset,
         event.len,
         event.truncated != 0,
+        background,
         event.metadata.pid,
         #[cfg(feature = "k8s")]
         pod_info(),
@@ -375,7 +381,9 @@ impl Probe for LlmProbe {
         }
 
         let state: StreamMap = Arc::new(Mutex::new(HashMap::new()));
+        let background: BackgroundMap = Arc::default();
         let handler_state = state.clone();
+        let handler_background = background.clone();
         let mut conn_filter = ConnFilter::new(bpf)?;
 
         spawn_ringbuf_handler(bpf, "SSL_EVENTS", move |event: LlmEvent| {
@@ -384,8 +392,10 @@ impl Probe for LlmProbe {
             }
 
             let mut map = handler_state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut calls = handler_background.lock().unwrap_or_else(|e| e.into_inner());
             route_event(
                 &mut map,
+                &mut calls,
                 &event,
                 #[cfg(feature = "k8s")]
                 || _resolver.resolve_pod(event.metadata.pid, event.metadata.cgroup_id),
@@ -393,23 +403,33 @@ impl Probe for LlmProbe {
         })?;
 
         start_stats_log_task(state.clone());
-        start_cleanup_task(state);
+        start_cleanup_task(state, background);
 
         Ok(())
     }
 }
 
-fn start_cleanup_task(state: StreamMap) {
+fn start_cleanup_task(state: StreamMap, background: BackgroundMap) {
     let shutdown = crate::probes::shutdown_flag();
     std::thread::spawn(move || {
         while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             std::thread::sleep(Duration::from_secs(CLEANUP_INTERVAL_SECS));
-            let mut map = state.lock().unwrap_or_else(|e| e.into_inner());
             let now = std::time::Instant::now();
-
-            map.retain(|_, v| {
-                now.duration_since(v.last_activity()).as_secs() < CONNECTION_RETENTION_SECS
-            });
+            state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|_, v| {
+                    now.duration_since(v.last_activity()).as_secs() < CONNECTION_RETENTION_SECS
+                });
+            // Counted after both locks are released: the ringbuf handler waits on them.
+            let expired: Vec<_> = background
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .expire(now)
+                .collect();
+            for call in expired {
+                processor::give_up(call);
+            }
         }
     });
 }
@@ -487,11 +507,13 @@ mod tests {
 
     fn route_all(events: &[LlmEvent]) -> Vec<Outcome> {
         let mut streams = HashMap::new();
+        let mut background = BackgroundCalls::default();
         events
             .iter()
             .map(|e| {
                 route_event(
                     &mut streams,
+                    &mut background,
                     e,
                     #[cfg(feature = "k8s")]
                     || None,
@@ -570,6 +592,7 @@ mod tests {
         ] {
             route_event(
                 &mut streams,
+                &mut BackgroundCalls::default(),
                 &e,
                 #[cfg(feature = "k8s")]
                 || None,

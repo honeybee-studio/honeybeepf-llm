@@ -11,10 +11,49 @@ pub(super) fn is_responses_event(val: &Value) -> bool {
     val.get("usage").is_none() && val.get("response").is_some_and(Value::is_object)
 }
 
-/// Try all providers on a response JSON string. Returns first match.
-pub(super) fn parse_response_json(json_str: &str) -> Option<UsageInfo> {
+/// Where a Responses call made with `"background": true` stands, as one response object shows it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BackgroundState {
+    /// Queued or in progress: its usage comes in a later GET of this response id.
+    Running(Box<str>),
+    /// Completed, incomplete or failed: this object is the call's result.
+    Ended,
+    /// Cancelled, which may end before any usage exists.
+    Cancelled,
+}
+
+/// Try all providers on a response JSON string, and note a background call's state in `background`.
+pub(super) fn parse_response_json(
+    json_str: &str,
+    background: &mut Option<BackgroundState>,
+) -> Option<UsageInfo> {
     let val: Value = serde_json::from_str(json_str).ok()?;
+    *background = background_state(&val);
     parse_response_json_value(&val)
+}
+
+fn background_state(val: &Value) -> Option<BackgroundState> {
+    if val.get("background").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    match val.get("status").and_then(Value::as_str)? {
+        "queued" | "in_progress" => val
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| is_response_id(id))
+            .map(|id| BackgroundState::Running(id.into())),
+        "completed" | "incomplete" | "failed" => Some(BackgroundState::Ended),
+        "cancelled" => Some(BackgroundState::Cancelled),
+        _ => None,
+    }
+}
+
+/// Whether `id` has the shape of an id (`resp_…`, `chatcmpl-…`); bounds what a map key may hold.
+pub(super) fn is_response_id(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 pub(super) fn parse_response_json_value(val: &Value) -> Option<UsageInfo> {
@@ -180,6 +219,49 @@ mod tests {
         let info = Http11Parser.parse_response(resp.as_bytes()).expect("usage");
         assert_eq!((info.prompt_tokens, info.completion_tokens), (30, 9));
         assert_eq!(info.thoughts_tokens, Some(2));
+    }
+
+    #[test]
+    fn background_state_reads_only_a_background_response_object() {
+        use super::BackgroundState::{Cancelled, Ended, Running};
+        let running = || Some(Running("resp_1".into()));
+        for (json, want) in [
+            (
+                r#"{"id":"resp_1","status":"queued","background":true}"#,
+                running(),
+            ),
+            (
+                r#"{"id":"resp_1","status":"in_progress","background":true}"#,
+                running(),
+            ),
+            (
+                r#"{"id":"resp_1","status":"completed","background":true}"#,
+                Some(Ended),
+            ),
+            (
+                r#"{"id":"resp_1","status":"cancelled","background":true}"#,
+                Some(Cancelled),
+            ),
+            (
+                r#"{"id":"resp_1","status":"queued","background":false}"#,
+                None,
+            ),
+            (r#"{"id":"resp_1","status":"queued"}"#, None),
+            (
+                r#"{"id":"resp 1","status":"queued","background":true}"#,
+                None,
+            ),
+            (r#"{"status":"queued","background":true}"#, None),
+            (
+                r#"{"id":"resp_1","status":"queued","background":"true"}"#,
+                None,
+            ),
+            (r#"{"error":{"message":"x"},"background":true}"#, None),
+        ] {
+            let mut state = None;
+            super::parse_response_json(json, &mut state);
+            assert_eq!(state, want, "{json}");
+        }
     }
 
     #[test]

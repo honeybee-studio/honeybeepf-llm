@@ -10,6 +10,16 @@ fn send(
     call: &[u8],
     skip: Option<usize>,
 ) -> Vec<Outcome> {
+    send_with(p, &mut BackgroundCalls::default(), dir, call, skip)
+}
+
+fn send_with(
+    p: &mut StreamProcessor,
+    bg: &mut BackgroundCalls,
+    dir: LlmDirection,
+    call: &[u8],
+    skip: Option<usize>,
+) -> Vec<Outcome> {
     let limit = capture_limit(dir);
     let truncated = call.len() > limit;
     let mut out = Vec::new();
@@ -28,6 +38,7 @@ fn send(
             offset as u32,
             call.len() as u32,
             truncated,
+            bg,
             1,
             #[cfg(feature = "k8s")]
             None,
@@ -139,15 +150,24 @@ fn h1(content_type: &str, body: &str) -> Vec<u8> {
 
 /// One request and its response on the same stream; the response head and body are read separately.
 fn exchange(p: &mut StreamProcessor, request: &[u8], response: &[u8]) -> Vec<Outcome> {
-    let mut out = send(p, LlmDirection::Write, request, None);
+    exchange_with(p, &mut BackgroundCalls::default(), request, response)
+}
+
+fn exchange_with(
+    p: &mut StreamProcessor,
+    bg: &mut BackgroundCalls,
+    request: &[u8],
+    response: &[u8],
+) -> Vec<Outcome> {
+    let mut out = send_with(p, bg, LlmDirection::Write, request, None);
     let split = response
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
         .map_or(response.len(), |i| i + 4);
     let (head, body) = response.split_at(split);
-    out.extend(send(p, LlmDirection::Read, head, None));
+    out.extend(send_with(p, bg, LlmDirection::Read, head, None));
     if !body.is_empty() {
-        out.extend(send(p, LlmDirection::Read, body, None));
+        out.extend(send_with(p, bg, LlmDirection::Read, body, None));
     }
     out
 }
@@ -922,4 +942,268 @@ fn test_credentials_stay_out_of_logs() {
         assert!(logs.contains("[LLM] Detected"), "{logs}");
         assert!(!logs.contains("HBTEST"), "{logs}");
     }
+}
+
+const BG_CREATE: &[u8] = b"POST /v1/responses HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"o3-pro\",\"background\":true,\"input\":\"hi\"}";
+const BG_POLL: &[u8] = b"GET /v1/responses/resp_bg1 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
+const BG_RESUME: &[u8] =
+    b"GET /v1/responses/resp_bg1?stream=true&starting_after=2 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
+const BG_USAGE: &str = r#"{"input_tokens":40,"input_tokens_details":{"cached_tokens":0},"output_tokens":120,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":160}"#;
+
+/// Background call `resp_bg1` at `status`, as a create or poll returns it.
+fn bg_object(status: &str, usage: &str) -> String {
+    format!(
+        r#"{{"id":"resp_bg1","object":"response","model":"o3-pro","status":"{status}","background":true,"error":null,"usage":{usage}}}"#
+    )
+}
+
+fn bg_response(status: &str, usage: &str) -> Vec<u8> {
+    h1("application/json", &bg_object(status, usage))
+}
+
+/// A started background call on its own connection.
+fn bg_created(bg: &mut BackgroundCalls) -> Vec<Outcome> {
+    let out = exchange_with(
+        &mut StreamProcessor::new(),
+        bg,
+        BG_CREATE,
+        &bg_response("queued", "null"),
+    );
+    assert_eq!(out.last(), Some(&Outcome::Deferred), "{out:?}");
+    out
+}
+
+#[test]
+fn test_background_call_is_recorded_once_from_polls_on_any_connection() {
+    let mut bg = BackgroundCalls::default();
+    let mut out = bg_created(&mut bg);
+    let (mut a, mut b) = (StreamProcessor::new(), StreamProcessor::new());
+    out.extend(exchange_with(
+        &mut b,
+        &mut bg,
+        BG_POLL,
+        &bg_response("in_progress", "null"),
+    ));
+    out.extend(exchange_with(
+        &mut a,
+        &mut bg,
+        BG_POLL,
+        &bg_response("completed", BG_USAGE),
+    ));
+    // A poll after the result is not detected.
+    out.extend(exchange_with(
+        &mut b,
+        &mut bg,
+        BG_POLL,
+        &bg_response("completed", BG_USAGE),
+    ));
+    assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+    assert!(unparsed(&out).is_empty(), "{out:?}");
+    assert!(!bg.contains("resp_bg1"));
+}
+
+#[test]
+fn test_two_polls_in_flight_record_the_result_once() {
+    use LlmDirection::{Read, Write};
+    let mut bg = BackgroundCalls::default();
+    let mut out = bg_created(&mut bg);
+    let (mut a, mut b) = (StreamProcessor::new(), StreamProcessor::new());
+    let done = bg_response("completed", BG_USAGE);
+    out.extend(send_with(&mut a, &mut bg, Write, BG_POLL, None));
+    out.extend(send_with(&mut b, &mut bg, Write, BG_POLL, None));
+    out.extend(send_with(&mut a, &mut bg, Read, &done, None));
+    out.extend(send_with(&mut b, &mut bg, Read, &done, None));
+    assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+}
+
+#[test]
+fn test_resumed_stream_records_the_background_call() {
+    let in_progress = format!(
+        "event: response.in_progress\ndata: {{\"type\":\"response.in_progress\",\"sequence_number\":3,\"response\":{}}}\n\n",
+        bg_object("in_progress", "null")
+    );
+    let completed = format!(
+        "event: response.completed\ndata: {{\"type\":\"response.completed\",\"sequence_number\":4,\"response\":{}}}\n\n",
+        bg_object("completed", BG_USAGE)
+    );
+    let mut bg = BackgroundCalls::default();
+    let mut out = bg_created(&mut bg);
+    // Cut before the end: the call stays pending, nothing is counted.
+    let mut cut = StreamProcessor::new();
+    out.extend(send_with(
+        &mut cut,
+        &mut bg,
+        LlmDirection::Write,
+        BG_RESUME,
+        None,
+    ));
+    let head = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+    out.extend(send_with(&mut cut, &mut bg, LlmDirection::Read, head, None));
+    out.extend(send_with(
+        &mut cut,
+        &mut bg,
+        LlmDirection::Read,
+        in_progress.as_bytes(),
+        None,
+    ));
+    out.push(cut.close(
+        1,
+        #[cfg(feature = "k8s")]
+        None,
+    ));
+    assert!(
+        bg.contains("resp_bg1") && unparsed(&out).is_empty(),
+        "{out:?}"
+    );
+    // The whole stream in one read.
+    let stream = h1("text/event-stream", &format!("{in_progress}{completed}"));
+    let mut resumed = StreamProcessor::new();
+    out.extend(send_with(
+        &mut resumed,
+        &mut bg,
+        LlmDirection::Write,
+        BG_RESUME,
+        None,
+    ));
+    out.extend(send_with(
+        &mut resumed,
+        &mut bg,
+        LlmDirection::Read,
+        &stream,
+        None,
+    ));
+    assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+    assert!(!bg.contains("resp_bg1"));
+}
+
+#[test]
+fn test_poll_error_keeps_the_call_and_cancel_without_usage_is_one_failed_call() {
+    let mut bg = BackgroundCalls::default();
+    let mut out = bg_created(&mut bg);
+    let error = r#"{"error":{"message":"server error","type":"server_error"}}"#;
+    let server_error = format!(
+        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{error}",
+        error.len()
+    );
+    let mut p = StreamProcessor::new();
+    out.extend(exchange_with(
+        &mut p,
+        &mut bg,
+        BG_POLL,
+        server_error.as_bytes(),
+    ));
+    assert!(
+        bg.contains("resp_bg1") && count(&out, Outcome::Recorded) == 0,
+        "{out:?}"
+    );
+    out.extend(exchange_with(
+        &mut p,
+        &mut bg,
+        BG_POLL,
+        &bg_response("cancelled", "null"),
+    ));
+    assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+    assert!(
+        unparsed(&out).is_empty() && !bg.contains("resp_bg1"),
+        "{out:?}"
+    );
+    // Only a cancel may end without usage; other ends are counted, not recorded as 0 tokens.
+    for status in ["completed", "incomplete"] {
+        let mut bg = BackgroundCalls::default();
+        bg_created(&mut bg);
+        let out = exchange_with(&mut p, &mut bg, BG_POLL, &bg_response(status, "null"));
+        assert_eq!(
+            unparsed(&out),
+            [UnparsedReason::BackgroundUnfinished],
+            "{status}"
+        );
+        assert!(!bg.contains("resp_bg1"), "{status}");
+    }
+}
+
+#[test]
+fn test_poll_result_in_any_framing_is_recorded_on_the_creating_connection() {
+    use std::io::Write as _;
+    let completed = bg_object("completed", BG_USAGE);
+    let sse = format!(
+        "event: response.completed\ndata: {{\"type\":\"response.completed\",\"response\":{completed}}}\n\n"
+    );
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gz.write_all(sse.as_bytes()).expect("gzip");
+    let gz = gz.finish().expect("gzip");
+    let mut gzip_sse = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+        gz.len()
+    )
+    .into_bytes();
+    gzip_sse.extend(gz);
+    // Past the 16 MB buffer only the body's two ends are kept, with no background state.
+    let filler = format!(r#""output":"{}","usage""#, "x".repeat(17 << 20));
+    let big = completed.replacen(r#""usage""#, &filler, 1);
+    for (case, reads) in [
+        ("json", vec![bg_response("completed", BG_USAGE)]),
+        (
+            "chunked",
+            h1_reads("Transfer-Encoding: chunked", completed.as_bytes()),
+        ),
+        ("gzip sse", vec![gzip_sse]),
+        (
+            "past 16 MB",
+            h1_reads("Content-Length: {len}", big.as_bytes()),
+        ),
+    ] {
+        let (mut bg, mut p) = (BackgroundCalls::default(), StreamProcessor::new());
+        let mut out = exchange_with(&mut p, &mut bg, BG_CREATE, &bg_response("queued", "null"));
+        out.extend(exchange_with(
+            &mut p,
+            &mut bg,
+            BG_POLL,
+            &bg_response("in_progress", "null"),
+        ));
+        out.extend(send_with(
+            &mut p,
+            &mut bg,
+            LlmDirection::Write,
+            BG_POLL,
+            None,
+        ));
+        for r in &reads {
+            out.extend(send_with(&mut p, &mut bg, LlmDirection::Read, r, None));
+        }
+        // The connection goes on with an ordinary call.
+        out.extend(outcomes(&mut p, &h1_response(3000), None));
+        assert_eq!(count(&out, Outcome::Recorded), 2, "{case}: {out:?}");
+        assert!(
+            unparsed(&out).is_empty() && !bg.contains("resp_bg1"),
+            "{case}: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn test_only_a_queued_background_object_defers_its_call() {
+    let mut bg = BackgroundCalls::default();
+    let create = b"POST /v1/responses HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{\"model\":\"o3-pro\",\"input\":\"hi\"}";
+    // Model text that looks like a background object, in a response without usage.
+    let lookalike = r#"{"id":"resp_2","object":"response","status":"completed","error":null,"output":[{"content":[{"text":"{\"id\":\"resp_x\",\"background\":true,\"status\":\"queued\"}"}]}],"usage":null}"#;
+    let mut p = StreamProcessor::new();
+    let mut out = exchange_with(&mut p, &mut bg, create, &h1("application/json", lookalike));
+    // A stored (not background) response fetched by id after it was recorded.
+    let stored =
+        bg_object("completed", BG_USAGE).replace(r#""background":true"#, r#""background":false"#);
+    out.extend(exchange_with(
+        &mut p,
+        &mut bg,
+        create,
+        &h1("application/json", &stored),
+    ));
+    out.extend(exchange_with(
+        &mut p,
+        &mut bg,
+        BG_POLL,
+        &h1("application/json", &stored),
+    ));
+    assert_eq!(unparsed(&out), [UnparsedReason::NextRequest], "{out:?}");
+    assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+    assert_eq!(count(&out, Outcome::Deferred), 0, "{out:?}");
 }
