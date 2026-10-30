@@ -59,24 +59,23 @@ harness without root. `--cases` runs a subset; `--help` lists the flags.
 
 ## Results
 
-### 2026-10-27, agent at main 9e17302
+### v0.2.0 (f8970f3), measured 2026-10-30
 
-- Kernel 7.0.0-34-generic (Ubuntu 26.04.1 LTS), multipass VM: 4 vCPU of an Intel Core Ultra 5 225H, 7.7 GiB memory;
-  CPU steal 0.0%; Python 3.14.4, OpenSSL 3.5.5; release build, defaults as above
+- Kernel 7.0.0-38-generic (Ubuntu 26.04.1 LTS), multipass VM: 4 vCPU of an Intel Core Ultra 5 225H, 7.7 GiB memory;
+  CPU steal 0.0%; Python 3.14.4, OpenSSL 3.5.5; release build of tag v0.2.0, defaults as above except 5 rounds
 
 | Case | req/s off | req/s on | p50 ms off | p50 ms on | p99 ms off | p99 ms on |
 |---|---|---|---|---|---|---|
-| `llm` | 200.13 | 200.13 | 0.74 | 0.76 | 2.12 | 2.75 |
-| `non-llm` | 200.12 | 200.13 | 0.90 | 0.62 | 2.34 | 1.98 |
-| `max` | 11,261 | 10,578 (−6.1%) | 0.33 | 0.35 | 0.78 | 1.02 |
+| `llm` | 200.12 | 200.13 | 0.81 | 0.89 | 1.90 | 2.47 |
+| `non-llm` | 200.13 | 200.12 | 0.80 | 0.77 | 1.92 | 2.06 |
+| `max` | 11,612 | 10,861 (−6.5%) | 0.32 | 0.34 | 0.76 | 0.99 |
 
 | Case | CPU s / 1k req | RSS anon MB | RSS file MB | PSS MB | BPF maps MB | Tokens recorded |
 |---|---|---|---|---|---|---|
-| `llm` | 0.073 | 29.4 | 26.1 | 45.1 | 17.9 | 100% |
-| `non-llm` | 0.050 | 29.4 | 26.0 | 45.0 | 17.9 | 100% |
-| `max` | 0.008 | 42.7 | 25.9 | 58.2 | 17.9 | 93.50% |
+| `llm` | 0.067 | 4.2 | 26.8 | 20.6 | 18.8 | 100% |
+| `non-llm` | 0.048 | 4.2 | 26.7 | 20.6 | 18.8 | 100% |
+| `max` | 0.008 | 4.2 | 26.7 | 20.5 | 18.8 | 100% |
 
-Startup with 1,000 idle processes took 0.20 s. At 200 requests/s the latency differences are a few tenths of a millisecond and go both ways (the run with the
-agent is sometimes faster), so they are noise at this resolution. In `max` (about 10,600 LLM calls/s) the agent missed 6.5% of the tokens (47–96% recorded over ten other runs).
-No event was lost to a full ring buffer (`reserve_fail=0`), but a few whole SSL calls per run are; when one is a
-response head, the rest of that connection goes unrecorded until a buffer limit or close. A fix is tracked apart.
+Startup with 1,000 idle processes took 0.12 s. At 200 requests/s the latency differences are a few tenths of a
+millisecond and go both ways (the run with the agent is sometimes faster), so they are noise at this resolution. In
+`max` (about 10,900 LLM calls/s) every token was recorded in all five runs.
