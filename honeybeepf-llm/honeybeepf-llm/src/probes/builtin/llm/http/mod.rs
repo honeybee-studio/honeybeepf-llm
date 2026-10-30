@@ -93,6 +93,36 @@ pub(crate) mod test_support {
         es_message(&headers, payload.as_bytes())
     }
 
+    /// An invoke stream `chunk` wrapping one model-native event, with the padding Bedrock adds.
+    pub(crate) fn es_chunk(model_event: &str) -> Vec<u8> {
+        let bytes = base64(model_event.as_bytes());
+        es_event(
+            "chunk",
+            &format!("{{\"bytes\":\"{bytes}\",\"p\":\"abcdefghij\"}}"),
+        )
+    }
+
+    pub(crate) fn base64(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for group in bytes.chunks(3) {
+            let n = group
+                .iter()
+                .enumerate()
+                .fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+            for i in 0..4 {
+                let sextet = (n >> (18 - 6 * i)) & 63;
+                out.push(if i <= group.len() {
+                    char::from(ALPHABET[sextet as usize])
+                } else {
+                    '='
+                });
+            }
+        }
+        out
+    }
+
     /// Usage Gemini sends when nothing was generated: no `candidatesTokenCount`.
     pub(super) const GEMINI_ZERO_USAGE: &str = "\"usageMetadata\":{\"promptTokenCount\":1,\"totalTokenCount\":1,\
         \"promptTokensDetails\":[{\"modality\":\"TEXT\",\"tokenCount\":1}],\"serviceTier\":\"standard\"}";

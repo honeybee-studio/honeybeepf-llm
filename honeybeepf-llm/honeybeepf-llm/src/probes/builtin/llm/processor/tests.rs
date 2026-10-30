@@ -832,9 +832,10 @@ fn test_response_after_empty_lines_is_recorded() {
     }
 }
 
-use crate::probes::builtin::llm::http::test_support::es_event;
+use crate::probes::builtin::llm::http::test_support::{es_chunk, es_event, es_message};
 
 const CONVERSE_STREAM_REQUEST: &[u8] = b"POST /model/anthropic.claude-sonnet-5-5-v1%3A0/converse-stream HTTP/1.1\r\nHost: bedrock-runtime.us-east-1.amazonaws.com\r\nContent-Type: application/json\r\n\r\n{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hi\"}]}]}";
+const INVOKE_STREAM_REQUEST: &[u8] = b"POST /model/amazon.titan-text-express-v1/invoke-with-response-stream HTTP/1.1\r\nHost: bedrock-runtime.us-east-1.amazonaws.com\r\nContent-Type: application/json\r\n\r\n{\"inputText\":\"hi\"}";
 
 /// A Bedrock stream in reads: the head, then one message per chunk and read, `last` closing the body.
 fn bedrock_stream_reads(deltas: usize, delta_len: usize, last: &[u8]) -> Vec<Vec<u8>> {
@@ -878,13 +879,34 @@ fn test_bedrock_streams_after_count_tokens_are_recorded() {
         CONVERSE_STREAM_REQUEST,
         &bedrock_stream_reads(5, 20, &converse_metadata()),
     ));
+    let metrics = es_chunk(
+        r#"{"outputText":"","completionReason":"FINISH","amazon-bedrock-invocationMetrics":{"inputTokenCount":12,"outputTokenCount":40}}"#,
+    );
+    out.extend(bedrock_call(
+        &mut p,
+        INVOKE_STREAM_REQUEST,
+        &bedrock_stream_reads(5, 20, &metrics),
+    ));
+    // A throttled stream is a failed call, and the connection goes on.
+    let throttled = es_message(
+        &[
+            (":exception-type", "throttlingException"),
+            (":message-type", "exception"),
+        ],
+        br#"{"message":"Too many requests"}"#,
+    );
+    out.extend(bedrock_call(
+        &mut p,
+        INVOKE_STREAM_REQUEST,
+        &bedrock_stream_reads(2, 20, &throttled),
+    ));
     out.extend(bedrock_call(
         &mut p,
         CONVERSE_STREAM_REQUEST,
         &bedrock_stream_reads(0, 0, &converse_metadata()),
     ));
     assert!(unparsed(&out).is_empty(), "{out:?}");
-    assert_eq!(count(&out, Outcome::Recorded), 2, "{out:?}");
+    assert_eq!(count(&out, Outcome::Recorded), 4, "{out:?}");
 }
 
 #[test]

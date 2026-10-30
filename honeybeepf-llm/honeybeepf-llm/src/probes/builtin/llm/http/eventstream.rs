@@ -1,7 +1,11 @@
-//! AWS event stream bodies (Bedrock `converse-stream`): CRC-checked binary messages.
+//! AWS event stream bodies (Bedrock `converse-stream`, `invoke-with-response-stream`): CRC-checked binary messages.
 
+use std::borrow::Cow;
+
+use serde::Deserialize;
 use serde_json::Value;
 
+use honeybeepf_llm_core::byte_utils;
 use honeybeepf_llm_core::types::UsageInfo;
 
 use super::body::parse_response_json_value;
@@ -13,6 +17,8 @@ const CRC_LEN: usize = 4;
 /// Largest message the format allows (AWS SDKs reject longer ones).
 const MAX_MESSAGE_LEN: usize = 16 * 1024 * 1024;
 const HEADER_STRING: u8 = 7;
+/// On the last `chunk` of an invoke stream, for every model.
+const INVOCATION_METRICS: &str = "amazon-bedrock-invocationMetrics";
 
 /// Where the stream stands after the messages read so far.
 #[derive(Default, PartialEq, Eq)]
@@ -32,9 +38,18 @@ enum Progress {
 pub(super) struct EventStreamCursor {
     /// Bytes of a message the reads so far have not completed.
     partial: Vec<u8>,
+    /// A `chunk` payload's base64 decoded, reused across messages.
+    decoded: Vec<u8>,
     progress: Progress,
     /// Usage-bearing events merged in order, as for SSE.
     acc: Option<Value>,
+}
+
+/// An invoke stream `chunk` payload: the model's own event, base64-encoded.
+#[derive(Deserialize)]
+struct Chunk<'a> {
+    #[serde(borrow)]
+    bytes: Cow<'a, str>,
 }
 
 pub(super) fn parse_event_stream_body(body: &[u8]) -> Option<UsageInfo> {
@@ -61,6 +76,7 @@ impl EventStreamCursor {
         }
         if self.progress != Progress::Open {
             self.partial = Vec::new();
+            self.decoded = Vec::new();
         }
     }
 
@@ -102,10 +118,52 @@ impl EventStreamCursor {
             self.progress = Progress::Failed;
             return;
         }
-        // converse-stream: `metadata` is the last event, and the only one with usage.
-        if header(headers, ":event-type") == Some(b"metadata") {
-            if let Ok(event) = serde_json::from_slice::<Value>(payload) {
-                merge_usage_event(&mut self.acc, event);
+        match header(headers, ":event-type") {
+            Some(b"chunk") => self.read_chunk(payload),
+            // converse-stream: the last event, and the only one with usage.
+            Some(b"metadata") => {
+                if let Ok(event) = serde_json::from_slice::<Value>(payload) {
+                    merge_usage_event(&mut self.acc, event);
+                }
+                self.progress = Progress::Ended;
+            }
+            _ => {}
+        }
+    }
+
+    fn read_chunk(&mut self, payload: &[u8]) {
+        let Ok(chunk) = serde_json::from_slice::<Chunk>(payload) else {
+            return;
+        };
+        if !decode_base64(chunk.bytes.as_bytes(), &mut self.decoded) {
+            return;
+        }
+        // Most chunks are text deltas: only one naming usage or the metrics is parsed as JSON.
+        if !byte_utils::contains_pattern(&self.decoded, b"usage")
+            && !byte_utils::contains_pattern(&self.decoded, INVOCATION_METRICS.as_bytes())
+        {
+            return;
+        }
+        let Ok(mut event) = serde_json::from_slice::<Value>(&self.decoded) else {
+            return;
+        };
+        let metrics = event
+            .as_object_mut()
+            .and_then(|e| e.remove(INVOCATION_METRICS));
+        let has_usage = event.get("usage").is_some()
+            || event
+                .get("message")
+                .is_some_and(|m| m.get("usage").is_some());
+        if has_usage {
+            merge_usage_event(&mut self.acc, event);
+        }
+        // Put back at the root: unwrapping a `message` or `response` member must not drop it.
+        if let Some(metrics) = metrics {
+            let acc = self
+                .acc
+                .get_or_insert_with(|| Value::Object(Default::default()));
+            if let Some(acc) = acc.as_object_mut() {
+                acc.insert(INVOCATION_METRICS.to_owned(), metrics);
             }
             self.progress = Progress::Ended;
         }
@@ -192,6 +250,30 @@ fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = flate2::Crc::new();
     crc.update(bytes);
     crc.sum()
+}
+
+/// Standard padded base64 into `out`; false on a byte outside the alphabet.
+fn decode_base64(text: &[u8], out: &mut Vec<u8>) -> bool {
+    out.clear();
+    out.reserve(text.len() / 4 * 3);
+    let (mut bits, mut held) = (0u32, 0u32);
+    for &c in text.iter().take_while(|&&c| c != b'=') {
+        let sextet = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return false,
+        };
+        bits = bits << 6 | u32::from(sextet);
+        held += 6;
+        if held >= 8 {
+            held -= 8;
+            out.push((bits >> held) as u8);
+        }
+    }
+    true
 }
 
 #[cfg(test)]

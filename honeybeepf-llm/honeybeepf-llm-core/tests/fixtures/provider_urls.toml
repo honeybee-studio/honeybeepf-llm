@@ -58,6 +58,8 @@ bedrock = [
   { url = "bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-sonnet-20240229-v1:0/converse", reason = "Converse" },
   { url = "bedrock-runtime.us-east-1.amazonaws.com/model/us.anthropic.claude-3-5-sonnet-20240620-v1%3A0/invoke", reason = "InvokeModel, Anthropic model, encoded colon" },
   { url = "bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-x/converse-stream", reason = "ConverseStream, eventstream" },
+  { url = "bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-x/invoke-with-response-stream", reason = "InvokeModelWithResponseStream, eventstream" },
+  { url = "bedrock-runtime.us-east-1.amazonaws.com/model/amazon.titan-text-express-v1/invoke-with-response-stream", reason = "streamed non-Anthropic model: invocationMetrics" },
 ]
 
 gemini = [
@@ -81,7 +83,6 @@ none = [
   { url = "bedrock-mantle.us-east-1.api.aws/anthropic/v1/messages/count_tokens", reason = "token counting" },
   { url = "bedrock-mantle.us-east-1.api.aws/v1/models", reason = "model list" },
   { url = "aws-external-anthropic.us-west-2.api.aws/v1/messages/batches", reason = "batches" },
-  { url = "bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-x/invoke-with-response-stream", reason = "binary eventstream" },
   { url = "bedrock-runtime.us-east-1.amazonaws.com/model/amazon.titan-text-express-v1/invoke", reason = "non-Anthropic InvokeModel body" },
   { url = "bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-x/count-tokens", reason = "token counting" },
   { url = "us-east5-aiplatform.googleapis.com/v1/projects/p/locations/us-east5/publishers/anthropic/models/count-tokens:rawPredict", reason = "Vertex Claude token counting" },

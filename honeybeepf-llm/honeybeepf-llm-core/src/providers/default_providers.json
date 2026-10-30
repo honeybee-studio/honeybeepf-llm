@@ -125,7 +125,7 @@
     },
     {
       "name": "bedrock",
-      "note": "Bedrock Runtime Converse and InvokeModel. Converse inputTokens leaves out cache tokens; ConverseStream (binary eventstream) has the same usage in its last metadata event. InvokeModel returns the model's own body, so only Anthropic models (read by the anthropic entry) are matched; invoke-with-response-stream stays out.",
+      "note": "Bedrock Runtime Converse and InvokeModel. Converse inputTokens leaves out cache tokens; ConverseStream (binary eventstream) has the same usage in its last metadata event. InvokeModel returns the model's own body, so only Anthropic models (read by the anthropic entry) are matched.",
       "hosts": ["bedrock-runtime.*.amazonaws.com"],
       "paths": ["/converse$", "/converse-stream$", "anthropic.*/invoke$"],
       "response": {
@@ -134,6 +134,22 @@
         "completion_tokens": "outputTokens",
         "cache_read_tokens": "cacheReadInputTokens",
         "cache_write_tokens": "cacheWriteInputTokens",
+        "prompt_excludes_cache": true,
+        "model_path": "model"
+      },
+      "request_extractor": "messages"
+    },
+    {
+      "name": "bedrock",
+      "note": "Bedrock Runtime InvokeModelWithResponseStream, every model: the last eventstream chunk carries amazon-bedrock-invocationMetrics. Anthropic models are read by the anthropic entry first, from the merged message_start and message_delta usage.",
+      "hosts": ["bedrock-runtime.*.amazonaws.com"],
+      "paths": ["/invoke-with-response-stream$"],
+      "response": {
+        "usage_path": "amazon-bedrock-invocationMetrics",
+        "prompt_tokens": "inputTokenCount",
+        "completion_tokens": "outputTokenCount",
+        "cache_read_tokens": "cacheReadInputTokenCount",
+        "cache_write_tokens": "cacheWriteInputTokenCount",
         "prompt_excludes_cache": true,
         "model_path": "model"
       },
