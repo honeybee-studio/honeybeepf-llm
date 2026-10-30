@@ -692,6 +692,9 @@ fn test_sse_response_over_buffer_limit_is_recorded() {
     ] {
         cases.push(typed_reads("text/event-stream", headers, &body));
     }
+    let mut continued = typed_reads("text/event-stream", "Transfer-Encoding: chunked", &body);
+    continued[0].splice(0..0, *b"HTTP/1.1 100 Continue\r\n\r\n");
+    cases.push(continued);
     for (n, reads) in cases.iter().enumerate() {
         let total: usize = reads.iter().map(Vec::len).sum();
         let mut p = StreamProcessor::new();
@@ -703,6 +706,23 @@ fn test_sse_response_over_buffer_limit_is_recorded() {
         let next = outcomes(&mut p, &h1_response(3000), None);
         assert_eq!(next.last(), Some(&Outcome::Recorded), "{n}: {next:?}");
     }
+}
+
+#[test]
+fn test_sse_response_over_buffer_limit_without_usage_is_unparsed_at_the_next_request() {
+    let mut body = String::from_utf8(openai_sse_body(70_000)).expect("UTF-8");
+    body.truncate(body.rfind("data: {").expect("usage event"));
+    let reads = typed_reads(
+        "text/event-stream",
+        "Content-Length: {len}",
+        body.as_bytes(),
+    );
+    let mut p = StreamProcessor::new();
+    let mut out = outcomes(&mut p, &reads, None);
+    assert!(out.iter().all(|o| *o == Outcome::Pending));
+    out.extend(outcomes(&mut p, &h1_response(3000), None));
+    assert_eq!(unparsed(&out), [UnparsedReason::NextRequest]);
+    assert_eq!(out.last(), Some(&Outcome::Recorded));
 }
 
 #[test]

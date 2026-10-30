@@ -11,8 +11,6 @@ use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
 pub struct SseStream {
     walk: BodyWalk,
     events: SseCursor,
-    /// Set once the events read so far hold final usage.
-    pub usage: Option<UsageInfo>,
 }
 
 impl SseStream {
@@ -28,19 +26,20 @@ impl SseStream {
         let mut stream = Self {
             walk: BodyWalk::new(length),
             events: SseCursor::default(),
-            usage: None,
         };
         stream.feed(body).then_some(stream)
     }
 
     /// Reads more body bytes; false once the framing broke or one line outgrew the buffer limit.
     pub fn feed(&mut self, data: &[u8]) -> bool {
-        let Self { walk, events, .. } = self;
+        let Self { walk, events } = self;
         let followed = walk.feed(data, &mut |data| events.feed(data));
-        if self.usage.is_none() {
-            self.usage = self.events.usage();
-        }
-        followed && self.events.partial_len() <= MAX_RESPONSE_BUFFER_SIZE
+        followed && events.partial_len() <= MAX_RESPONSE_BUFFER_SIZE
+    }
+
+    /// The merged usage once the events read so far ended the stream.
+    pub fn usage(&self) -> Option<UsageInfo> {
+        self.events.usage()
     }
 }
 
@@ -86,13 +85,13 @@ mod tests {
             let first = [HEAD.as_bytes(), &body[..split]].concat();
             let mut stream = SseStream::start(&first).expect("SSE");
             assert!(stream.feed(&body[split..]), "{split}");
-            assert_eq!(tokens(stream.usage), want, "{split}");
+            assert_eq!(tokens(stream.usage()), want, "{split}");
         }
         // The last event cut off: never ended, so no usage.
         let cut = chunked(&EVENTS.as_bytes()[..EVENTS.len() - 5], 7);
         let mut stream = SseStream::start(HEAD.as_bytes()).expect("SSE");
         assert!(stream.feed(&cut));
-        assert_eq!(tokens(stream.usage), None);
+        assert_eq!(tokens(stream.usage()), None);
     }
 
     #[test]
@@ -104,7 +103,7 @@ mod tests {
         let (first, rest) = framed.split_at(MAX_RESPONSE_BUFFER_SIZE);
         let mut stream = SseStream::start(&[HEAD.as_bytes(), first].concat()).expect("SSE");
         assert!(rest.chunks(16384).all(|read| stream.feed(read)));
-        assert_eq!(tokens(stream.usage), Some((25, 15)));
+        assert_eq!(tokens(stream.usage()), Some((25, 15)));
         assert!(stream.events.partial_len() < delta.len());
     }
 

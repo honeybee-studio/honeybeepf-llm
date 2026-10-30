@@ -478,6 +478,7 @@ impl StreamProcessor {
                 PastLimit::start(&self.read_buf).ok_or(UnparsedReason::ResponseTooLarge)?;
             self.past_limit = Some(Box::new(followed));
             self.read_buf = Vec::new();
+            self.read_progress = http::ResponseProgress::default();
         }
         match &mut self.past_limit {
             Some(followed) => followed
@@ -559,7 +560,7 @@ impl PastLimit {
     fn take_usage(&mut self) -> Option<UsageInfo> {
         match self {
             Self::Json(ends) => ends.usage.take(),
-            Self::Sse(stream) => stream.usage.take(),
+            Self::Sse(stream) => stream.usage(),
         }
     }
 }
