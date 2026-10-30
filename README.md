@@ -239,9 +239,10 @@ Kubernetes, see [running the binary](honeybeepf-llm/docs/BINARY_DEPLOYMENT.md).
 
 ## Roadmap
 
-- HTTP/2
-- Amazon Bedrock streaming responses
-- TLS libraries other than OpenSSL
+![Roadmap: released in v0.2.0, v0.3.0 next, and the backlog, with the issue for each item](docs/images/roadmap.svg)
+
+Each section is a milestone: [v0.2.0](https://github.com/honeybee-studio/honeybeepf-llm/milestone/1) · [v0.3.0](https://github.com/honeybee-studio/honeybeepf-llm/milestone/2) · [Backlog](https://github.com/honeybee-studio/honeybeepf-llm/milestone/3). The milestones have no dates yet;
+open them for the current progress.
 
 ## Contributing
 
