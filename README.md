@@ -124,6 +124,31 @@ Ollama or vLLM) is not.
 | WebSocket (e.g. OpenAI Realtime) | ❌ |
 | HTTP/3 (QUIC) | ❌ |
 
+Node.js 26 negotiates HTTP/2 by default: its built-in `fetch` (undici 8) picks HTTP/2 whenever the server offers
+it, and the official OpenAI and Anthropic Node SDKs call that `fetch`, so their calls are not recorded yet
+([#87](https://github.com/honeybee-studio/honeybeepf-llm/issues/87)). Node.js 24 (undici 7) uses HTTP/1.1 and is
+recorded. Either of these switches the calls back to HTTP/1.1; both were checked with Node.js 26.13.0,
+`undici` 8.12.2, `openai` 7.39.0 and `@anthropic-ai/sdk` 0.135.0, JSON and streaming:
+
+- Without changing the application: add the `undici` package and preload a file that replaces the global
+  dispatcher, for example with `NODE_OPTIONS="--import ./force-h1.mjs"`:
+
+  ```js
+  // force-h1.mjs
+  import { Agent, setGlobalDispatcher } from 'undici';
+  setGlobalDispatcher(new Agent({ allowH2: false }));
+  ```
+
+- Per client: pass the dispatcher to the SDK client or to `fetch`:
+
+  ```js
+  import { Agent } from 'undici';
+  const dispatcher = new Agent({ allowH2: false });
+  const openai = new OpenAI({ fetchOptions: { dispatcher } });
+  const anthropic = new Anthropic({ fetchOptions: { dispatcher } });
+  const res = await fetch(url, { dispatcher });
+  ```
+
 **Kernels:** CI loads and attaches the probes and detects an LLM request on 5.10, 5.15, 6.1, 6.6, 6.12, 6.18
 and 7.2, and on the RHEL 8.10 (4.18), 9.6 and 9.7 (5.14) kernels
 ([kernel matrix](.github/workflows/kernel-matrix.yml)); other RHEL minor releases are not tested. Token counts
