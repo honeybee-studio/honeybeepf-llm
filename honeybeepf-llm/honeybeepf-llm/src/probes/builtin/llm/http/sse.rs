@@ -51,18 +51,23 @@ fn read_lines(cursor: &mut SseCursor, bytes: &[u8]) {
         if !is_usage_event {
             continue;
         }
-        let Ok(mut val) = serde_json::from_str::<Value>(data) else {
+        let Ok(val) = serde_json::from_str::<Value>(data) else {
             continue;
         };
-        if val.get("message").is_some_and(|m| m.get("usage").is_some()) {
-            val = val["message"].take();
-        } else if is_responses_event(&val) {
-            val = val["response"].take();
-        }
-        match cursor.acc.as_mut() {
-            Some(prev) => merge_sse_event(prev, val),
-            None => cursor.acc = Some(val),
-        }
+        merge_usage_event(&mut cursor.acc, val);
+    }
+}
+
+/// Merge a usage-bearing event into `acc`, unwrapping Anthropic `message_start` or a Responses event.
+pub(super) fn merge_usage_event(acc: &mut Option<Value>, mut val: Value) {
+    if val.get("message").is_some_and(|m| m.get("usage").is_some()) {
+        val = val["message"].take();
+    } else if is_responses_event(&val) {
+        val = val["response"].take();
+    }
+    match acc.as_mut() {
+        Some(prev) => merge_sse_event(prev, val),
+        None => *acc = Some(val),
     }
 }
 
