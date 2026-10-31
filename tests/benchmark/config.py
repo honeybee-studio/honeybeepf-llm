@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from load_generator import LoadProfile
 
-DIRECT_URL = "http://localhost:8080"
+DIRECT_URL = "https://localhost:8443"
 PROXY_URL = "http://localhost:4000"
 CONTAINER_NAMES = ["benchmark-mock-llm-1", "benchmark-litellm-1"]
 
