@@ -101,6 +101,11 @@ impl SseCursor {
         self.partial.extend_from_slice(rest);
     }
 
+    /// Bytes held of a line that has not ended yet.
+    pub(super) fn partial_len(&self) -> usize {
+        self.partial.len()
+    }
+
     /// The merged usage once an end marker or `[DONE]` has been read.
     pub(super) fn usage(&self) -> Option<UsageInfo> {
         if !self.ended {
