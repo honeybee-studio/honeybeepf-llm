@@ -6,6 +6,7 @@
 
 pub mod byte_utils;
 pub mod chunked;
+pub mod h2;
 pub mod pricing;
 pub mod providers;
 pub mod types;
