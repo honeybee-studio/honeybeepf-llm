@@ -89,7 +89,7 @@ const WALK_RULES: ChunkRules = ChunkRules {
 };
 
 /// Follows the body framing as the bytes stream past, so the end is known without keeping the body.
-struct BodyWalk {
+pub(super) struct BodyWalk {
     /// Content-Length bytes still due, or `None` for a chunked body.
     length: Option<usize>,
     chunks: ChunkWalk,
@@ -98,7 +98,7 @@ struct BodyWalk {
 }
 
 impl BodyWalk {
-    fn new(length: Option<usize>) -> Self {
+    pub(super) fn new(length: Option<usize>) -> Self {
         Self {
             length,
             chunks: ChunkWalk::new(WALK_RULES),
@@ -110,7 +110,7 @@ impl BodyWalk {
         self.length == Some(0) || self.chunks.state() == ChunkState::Ended
     }
 
-    fn feed(&mut self, mut data: &[u8], keep: &mut impl FnMut(&[u8])) -> bool {
+    pub(super) fn feed(&mut self, mut data: &[u8], keep: &mut impl FnMut(&[u8])) -> bool {
         let Self {
             length,
             chunks,
