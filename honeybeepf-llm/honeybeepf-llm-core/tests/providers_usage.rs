@@ -31,7 +31,7 @@ fn gemini_config() -> ProviderConfig {
             },
             identity: IdentityConfig {
                 model_path: "modelVersion".to_string(),
-                required_field: None,
+                ..IdentityConfig::default()
             },
             ..ResponseConfig::default()
         },
@@ -199,6 +199,112 @@ fn test_anthropic_prompt_adds_cache_read_and_write() {
     assert_eq!(usage.completion_tokens, 300);
     assert_eq!(usage.cache_read_tokens, Some(100_000));
     assert_eq!(usage.cache_write_tokens, Some(2000));
+    assert!(usage.iterations.is_empty());
+}
+
+// Server-side fallback example from the refusals-and-fallback docs: Fable 5 declined, Opus 4.8 served.
+#[test]
+fn test_anthropic_fallback_bills_the_declined_attempt_under_its_model() {
+    let provider = default_provider("api.anthropic.com", "/v1/messages");
+    let response = json!({
+        "type": "message",
+        "model": "claude-opus-4-8",
+        "usage": {
+            "input_tokens": 412, "output_tokens": 264,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+            "iterations": [
+                {"type": "message", "model": "claude-fable-5",
+                 "input_tokens": 535, "output_tokens": 0,
+                 "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                {"type": "fallback_message", "model": "claude-opus-4-8",
+                 "input_tokens": 412, "output_tokens": 264,
+                 "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+            ]
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    // Top-level counts the served attempt only; the declined one must not be summed in.
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (412, 264));
+    assert_eq!(usage.model.as_deref(), Some("claude-opus-4-8"));
+    assert_eq!(usage.iterations.len(), 1);
+    let declined = &usage.iterations[0];
+    assert_eq!(
+        (declined.prompt_tokens, declined.completion_tokens),
+        (535, 0)
+    );
+    assert_eq!(declined.model.as_deref(), Some("claude-fable-5"));
+}
+
+// Sticky routing sends a later turn straight to the fallback model: one iteration, nothing extra.
+#[test]
+fn test_anthropic_single_iteration_adds_no_declined_attempt() {
+    let provider = default_provider("api.anthropic.com", "/v1/messages");
+    let response = json!({
+        "type": "message",
+        "model": "claude-opus-4-8",
+        "usage": {
+            "input_tokens": 412, "output_tokens": 264,
+            "iterations": [
+                {"type": "fallback_message", "model": "claude-opus-4-8",
+                 "input_tokens": 412, "output_tokens": 264}
+            ]
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (412, 264));
+    assert!(usage.iterations.is_empty());
+}
+
+// Threshold compaction also uses usage.iterations, but its last entry is `message`, not
+// `fallback_message`, and the top level excludes the compaction tokens. Only a fallback is handled
+// here, so this response engages nothing and records just the served total (compaction is out of scope).
+#[test]
+fn test_anthropic_compaction_iterations_are_left_alone() {
+    let provider = default_provider("api.anthropic.com", "/v1/messages");
+    let response = json!({
+        "type": "message",
+        "model": "claude-opus-4-8",
+        "usage": {
+            "input_tokens": 23000, "output_tokens": 1000,
+            "iterations": [
+                {"type": "compaction", "input_tokens": 180000, "output_tokens": 3500},
+                {"type": "message", "input_tokens": 23000, "output_tokens": 1000}
+            ]
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!(
+        (usage.prompt_tokens, usage.completion_tokens),
+        (23000, 1000)
+    );
+    assert!(usage.iterations.is_empty());
+}
+
+// The advisor tool sums its executor `message` entries into the top level and ends on a `message`
+// entry, so billing them again would double-count. Only a fallback (last entry `fallback_message`)
+// is handled, so this records just the served total.
+#[test]
+fn test_anthropic_advisor_iterations_are_not_double_counted() {
+    let provider = default_provider("api.anthropic.com", "/v1/messages");
+    let response = json!({
+        "type": "message",
+        "model": "claude-sonnet-5-5",
+        "usage": {
+            "input_tokens": 412, "output_tokens": 1701,
+            "iterations": [
+                {"type": "message", "model": "claude-sonnet-5-5", "input_tokens": 412, "output_tokens": 89},
+                {"type": "advisor_message", "model": "claude-opus-5-5", "input_tokens": 823, "output_tokens": 1612},
+                {"type": "message", "model": "claude-sonnet-5-5", "input_tokens": 0, "output_tokens": 1612}
+            ]
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (412, 1701));
+    assert!(usage.iterations.is_empty());
 }
 
 #[test]
@@ -525,6 +631,7 @@ fn test_custom_provider_reads_every_flat_field() -> Result<(), serde_json::Error
         service_tier: Some("flex".to_string()),
         speed: Some("fast".to_string()),
         inference_geo: Some("us".to_string()),
+        iterations: Vec::new(),
     };
     assert_eq!(format!("{usage:?}"), format!("{expected:?}"));
 

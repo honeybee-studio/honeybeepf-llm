@@ -22,6 +22,9 @@ pub struct UsageInfo {
     pub speed: Option<String>,
     /// Where inference ran (Anthropic `global`, `us`).
     pub inference_geo: Option<String>,
+    /// Earlier billed attempts of a server-side fallback response, each under its own model;
+    /// empty unless the response carried `usage.iterations`.
+    pub iterations: Vec<UsageInfo>,
 }
 
 /// Lightweight struct for SSE chunk detection (only checks if usage field exists)

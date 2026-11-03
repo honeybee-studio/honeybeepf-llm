@@ -181,6 +181,31 @@ mod tests {
         assert_eq!(tokens(info), Some((25, 15)));
     }
 
+    #[test]
+    fn anthropic_mid_output_fallback_sse_reads_served_model_from_the_iteration() {
+        // Mid-output decline: message_start named the REQUESTED (declined) model, so the served
+        // model must come from the fallback_message entry, not from the root.
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"claude-fable-5\",",
+            "\"usage\":{\"input_tokens\":412,\"output_tokens\":0}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"part\"}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":412,\"output_tokens\":264,",
+            "\"iterations\":[{\"type\":\"message\",\"model\":\"claude-fable-5\",\"input_tokens\":535,\"output_tokens\":40},",
+            "{\"type\":\"fallback_message\",\"model\":\"claude-opus-4-8\",\"input_tokens\":412,\"output_tokens\":264}]}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        let info = Http11Parser
+            .parse_response(&http11_sse(body))
+            .expect("usage");
+        assert_eq!(info.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (412, 264));
+        assert_eq!(info.iterations.len(), 1);
+        assert_eq!(info.iterations[0].model.as_deref(), Some("claude-fable-5"));
+    }
+
     const DONE_IN_TEXT: &str = "The stream ends with data: [DONE]";
 
     #[test]

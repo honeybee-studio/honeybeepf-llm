@@ -133,6 +133,27 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_fallback_json_keeps_served_total_and_bills_declined_attempt() {
+        // Server-side fallback: Fable 5 declined, Opus 4.8 served; usage.iterations records both.
+        let resp = concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n",
+            "{\"type\":\"message\",\"model\":\"claude-opus-4-8\",\"content\":[],",
+            "\"usage\":{\"input_tokens\":412,\"output_tokens\":264,",
+            "\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0,\"iterations\":[",
+            "{\"type\":\"message\",\"model\":\"claude-fable-5\",\"input_tokens\":535,\"output_tokens\":0,",
+            "\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0},",
+            "{\"type\":\"fallback_message\",\"model\":\"claude-opus-4-8\",\"input_tokens\":412,\"output_tokens\":264,",
+            "\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}]}}",
+        );
+        let info = Http11Parser.parse_response(resp.as_bytes()).expect("usage");
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (412, 264));
+        assert_eq!(info.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(info.iterations.len(), 1);
+        assert_eq!(info.iterations[0].model.as_deref(), Some("claude-fable-5"));
+        assert_eq!(info.iterations[0].prompt_tokens, 535);
+    }
+
+    #[test]
     fn gemini_json_zero_output_is_recorded() {
         for finish in ["MAX_TOKENS", "STOP"] {
             let resp = format!(
