@@ -174,6 +174,15 @@ jobs:
             echo "/dev/kvm absent — qemu runs under TCG emulation"
           fi
 
+      # lvh's own dependency step runs `kvm-ok`, which exits non-zero on a
+      # KVM-less runner and fails the job before the VM boots. There is no input
+      # to skip just that check, so install qemu here and set
+      # install-dependencies: false; lvh itself falls back to TCG without KVM.
+      - name: Install qemu (arm64)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-utils
+
       # arm64 lvh disk images are not self-booting (no firmware, Bootable()=false),
       # so a matching host kernel is pulled from the multi-arch
       # quay.io/lvh-images/kernel-images and passed to qemu with --kernel.
@@ -187,5 +196,6 @@ jobs:
           # Leave empty so lvh uses "-cpu max" (valid under TCG); "host" needs KVM.
           cpu-kind: ''
           host-mount: ./
-          install-dependencies: 'true'
+          # qemu is installed above; this skips lvh's kvm-ok dependency step.
+          install-dependencies: 'false'
           cmd: bash /host/ci/smoke.sh
