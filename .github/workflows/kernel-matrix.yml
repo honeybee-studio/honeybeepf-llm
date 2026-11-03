@@ -179,9 +179,11 @@ jobs:
       # to skip just that check, so install qemu here and set
       # install-dependencies: false; lvh itself falls back to TCG without KVM.
       - name: Install qemu (arm64)
+        # ipxe-qemu ships the virtio-net option ROM (efi-virtio.rom) qemu needs;
+        # it is only a Recommends of qemu-system-*, so name it explicitly here.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-utils
+          sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-utils ipxe-qemu
 
       # arm64 lvh disk images are not self-booting (no firmware, Bootable()=false),
       # so a matching host kernel is pulled from the multi-arch
