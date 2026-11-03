@@ -219,7 +219,7 @@ fn test_entry_larger_than_the_table_empties_it_and_memory_cap_forgets() {
     let mut d = Decoder::new();
     d.set_limit(1 << 20);
     let mut block = vec![0x3f, 0xe1, 0xff, 0x3f]; // size update to 1 MiB
-    for c in [b'x', b'y', b'z'] {
+    for &c in b"xyz" {
         block.extend([0x40, 0x01, c, 0x7f, 0xb1, 0xe9, 0x01]); // value length 30,000
         block.extend(vec![c; 30_000]);
     }
