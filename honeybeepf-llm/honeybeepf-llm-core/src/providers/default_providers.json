@@ -125,9 +125,9 @@
     },
     {
       "name": "bedrock",
-      "note": "Bedrock Runtime Converse and InvokeModel. Converse inputTokens leaves out cache tokens. InvokeModel returns the model's own body, so only Anthropic models (read by the anthropic entry) are matched. The -stream variants are binary eventstream and stay out.",
+      "note": "Bedrock Runtime Converse and InvokeModel. Converse inputTokens leaves out cache tokens; ConverseStream (binary eventstream) has the same usage in its last metadata event. InvokeModel returns the model's own body, so only Anthropic models (read by the anthropic entry) are matched; invoke-with-response-stream stays out.",
       "hosts": ["bedrock-runtime.*.amazonaws.com"],
-      "paths": ["/converse$", "anthropic.*/invoke$"],
+      "paths": ["/converse$", "/converse-stream$", "anthropic.*/invoke$"],
       "response": {
         "usage_path": "usage",
         "prompt_tokens": "inputTokens",
