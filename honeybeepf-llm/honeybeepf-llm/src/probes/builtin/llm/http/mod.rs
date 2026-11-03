@@ -13,6 +13,7 @@ mod json_ends;
 mod provider_report;
 mod registry;
 mod sse;
+mod sse_stream;
 
 // Re-export main types
 pub use h1::{Http11Parser, ResponseProgress};
@@ -20,6 +21,7 @@ pub use h2::Http2Parser;
 pub(crate) use h2::{H2Conn, H2Event, starts_preface};
 pub use json_ends::JsonEnds;
 pub use provider_report::report_provider_config;
+pub use sse_stream::SseStream;
 
 use honeybeepf_llm_core::types::UsageInfo;
 
