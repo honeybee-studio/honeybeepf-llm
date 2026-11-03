@@ -52,6 +52,8 @@ EOF
 export BUILTIN_PROBES__LLM=true
 export BUILTIN_PROBES__INTERVAL=2
 export RUST_LOG=info
+# Opt into the plaintext (#89) BTF probe so the matrix records offset support per kernel.
+export HONEYBEEPF_PLAINTEXT_BTF_CHECK=1
 
 ./bin/honeybeepf-llm --verbose > /tmp/boot.log 2>&1 &
 AGENT_PID=$!
@@ -93,3 +95,9 @@ fi
 grep -qE 'Attaching LLM \(SSL\) probes to detected library' /tmp/boot.log
 grep -qE 'Active probe registered: llm' /tmp/boot.log
 grep -qE '\[LLM\] Detected HTTP' /tmp/boot.log
+
+# Plaintext capture (#89) reads kernel struct fields via BTF-resolved offsets; record whether
+# this kernel resolves them. The capture path is not wired yet, so a miss warns, never fails CI.
+if ! grep -qE '\[plaintext\] kernel BTF supported' /tmp/boot.log; then
+  echo "::warning::plaintext BTF offsets unresolved on $(uname -r): $(grep -oE '\[plaintext\].*' /tmp/boot.log)"
+fi

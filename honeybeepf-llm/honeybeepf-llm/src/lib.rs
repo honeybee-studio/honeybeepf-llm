@@ -1,3 +1,4 @@
+pub mod btf_offsets;
 pub mod settings;
 pub mod telemetry;
 
@@ -68,6 +69,13 @@ impl HoneyBeeEngine {
         if settings.builtin_probes.llm.unwrap_or(false) {
             let executables = settings.builtin_probes.llm_executables.unwrap_or(true);
             dynamic_probes.push(Box::new(LlmProbe::new(executables)));
+            // Plaintext capture (#89) resolves BTF offsets at load time; this parses
+            // /sys/kernel/btf/vmlinux, so gate it behind an env flag until PR 2's port setting.
+            if std::env::var("HONEYBEEPF_PLAINTEXT_BTF_CHECK").as_deref() == Ok("1") {
+                let t = std::time::Instant::now();
+                let support = btf_offsets::detect_plaintext_support();
+                info!("{} (resolved in {:?})", support.summary(), t.elapsed());
+            }
         }
 
         let resolver = IdentityResolver::none();
