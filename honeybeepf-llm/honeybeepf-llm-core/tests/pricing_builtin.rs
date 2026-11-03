@@ -9,7 +9,7 @@ const NOV_30: u32 = 20_787; // 2026-11-30
 #[test]
 fn test_builtin_prices_match_the_pricing_pages() {
     let table = PriceTable::builtin().expect("built-in table loads");
-    assert_eq!(table.version(), "2026-10-28");
+    assert_eq!(table.version(), "2026-11-03");
     let sources: Vec<_> = table
         .sources()
         .iter()
@@ -19,7 +19,7 @@ fn test_builtin_prices_match_the_pricing_pages() {
         sources,
         [
             ("anthropic", "2026-10-26"),
-            ("openai", "2026-10-28"),
+            ("openai", "2026-11-03"),
             ("gemini", "2026-10-26")
         ]
     );
@@ -79,6 +79,14 @@ fn test_builtin_prices_match_the_pricing_pages() {
         // These models have no cached-input price and no Flex tier.
         (NOV_30, call("gpt-3.5-turbo", 1000, 0).read(500), MISSING),
         (NOV_30, million("gpt-4-0613").tier("flex"), UNSUPPORTED),
+        // OpenAI special text models (added 2026-11-03). Codex Fast is the `priority` tier.
+        (NOV_30, million("gpt-5.3-codex"), Ok(1.75)),
+        (NOV_30, million("gpt-5.3-codex-2026-10-30"), Ok(1.75)),
+        (NOV_30, call("gpt-5.3-codex", 10000, 2000).read(4000), Ok(0.0392)),
+        (NOV_30, million("gpt-5.3-codex").tier("fast"), Ok(3.5)),
+        (NOV_30, million("gpt-5.3-codex").tier("priority"), Ok(3.5)),
+        (NOV_30, million("chat-latest"), Ok(5.0)),
+        (NOV_30, million("gpt-5-search-api"), Ok(1.25)),
     ];
     for (day, call, want) in cases {
         assert_eq!(table.cost_on(&call, day).map(total), want, "{call:?}");
