@@ -20,6 +20,14 @@ pub struct ResponseProgress {
     events: EventStreamCursor,
 }
 
+#[cfg(test)]
+impl ResponseProgress {
+    /// Bytes of an unfinished SSE line held for the next read.
+    pub fn held_line_len(&self) -> usize {
+        self.sse.partial_len()
+    }
+}
+
 /// Chunk decoding resumed across reads; passes on the bytes `byte_utils::decode_chunked_body` would return.
 #[derive(Default)]
 struct Dechunker {
@@ -179,6 +187,12 @@ pub(super) fn plain_body(buffer: &[u8]) -> Option<(Framing, &[u8])> {
     let head = final_head(buffer)?;
     (!head.is_sse && !head.is_eventstream && !encoding::is_encoded(head.headers()))
         .then_some((head.framing, head.body))
+}
+
+/// Framing and body of a final SSE response sent without a content coding.
+pub(super) fn plain_sse_body(buffer: &[u8]) -> Option<(Framing, &[u8])> {
+    let head = final_head(buffer)?;
+    (head.is_sse && !encoding::is_encoded(head.headers())).then_some((head.framing, head.body))
 }
 
 fn header_contains(headers: &[httparse::Header], name: &str, pattern: &[u8]) -> bool {
