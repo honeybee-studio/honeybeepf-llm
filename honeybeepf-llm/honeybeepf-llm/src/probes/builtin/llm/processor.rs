@@ -51,6 +51,18 @@ pub enum Outcome {
     Unparsed(UnparsedReason),
 }
 
+/// What a captured gap means for an HTTP/2 direction's next feed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum H2Gap {
+    /// No gap; read the bytes as a continuation.
+    None,
+    /// A known count of lost bytes to skip inside the current frame before reading; if they do not fall
+    /// within it, the reader re-anchors instead.
+    Skip(usize),
+    /// A gap of unknown size or structure; re-anchor the reader.
+    Resync,
+}
+
 /// Why a call has no usage to record; a fixed set, so the metric label stays small.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnparsedReason {
@@ -113,9 +125,9 @@ pub struct StreamProcessor {
     next_request: Option<(usize, Instant)>,
     /// Response id of the background call this request polls.
     continuation: Option<Box<str>>,
-    /// An HTTP/2 direction (client=Write, server=Read) that lost bytes and must re-anchor on its next feed.
-    h2_lost_client: bool,
-    h2_lost_server: bool,
+    /// A captured gap pending for an HTTP/2 direction (client=Write, server=Read), applied on its next feed.
+    h2_gap_client: H2Gap,
+    h2_gap_server: H2Gap,
 }
 
 impl Default for StreamProcessor {
@@ -138,8 +150,8 @@ impl StreamProcessor {
             frag_dir: LlmDirection::Unknown,
             next_request: None,
             continuation: None,
-            h2_lost_client: false,
-            h2_lost_server: false,
+            h2_gap_client: H2Gap::None,
+            h2_gap_server: H2Gap::None,
         }
     }
 
@@ -185,13 +197,13 @@ impl StreamProcessor {
             if matches!(self.state, ProcessorState::Detecting) {
                 self.state = ProcessorState::Http2(Box::new(http::H2Conn::new()));
             }
-            let lost = self.h2_loss(direction, offset, out_of_order, truncated);
+            let gap = self.h2_loss(direction, offset, len, data.len(), truncated);
             self.frag_next = if complete { 0 } else { end };
             self.frag_dir = direction;
             return self.feed_http2(
                 direction,
                 data,
-                lost,
+                gap,
                 pid,
                 #[cfg(feature = "k8s")]
                 pod_info,
@@ -210,15 +222,15 @@ impl StreamProcessor {
                 info!("[LLM] Detected HTTP/2 (mid-stream join) (PID: {})", pid);
                 self.write_buf = Vec::new();
                 self.state = ProcessorState::Http2(Box::new(http::H2Conn::new_midjoin()));
-                self.h2_lost_client = true;
-                self.h2_lost_server = true;
+                self.h2_gap_client = H2Gap::Resync;
+                self.h2_gap_server = H2Gap::Resync;
                 self.frag_next = if complete { 0 } else { end };
                 self.frag_dir = direction;
-                let lost = self.take_h2_lost(direction);
+                let gap = self.take_h2_gap(direction);
                 return self.feed_http2(
                     direction,
                     &client,
-                    lost,
+                    gap,
                     pid,
                     #[cfg(feature = "k8s")]
                     pod_info,
@@ -286,13 +298,13 @@ impl StreamProcessor {
         }
     }
 
-    /// Feed one fragment to the HTTP/2 connection, recording each stream whose response ended. `lost` tells
-    /// the connection this direction's bytes are discontinuous, so it re-anchors its frame reader first.
+    /// Feed one fragment to the HTTP/2 connection, recording each stream whose response ended. `gap` tells
+    /// the connection how this direction's bytes are discontinuous, so it skips a known gap or re-anchors.
     fn feed_http2(
         &mut self,
         direction: LlmDirection,
         data: &[u8],
-        lost: bool,
+        gap: H2Gap,
         pid: u32,
         #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
     ) -> Outcome {
@@ -301,7 +313,7 @@ impl StreamProcessor {
             return Outcome::Pending;
         };
         let mut outcome = Outcome::Pending;
-        conn.feed(direction, data, lost, |event| match event {
+        conn.feed(direction, data, gap, |event| match event {
             http::H2Event::Detected { path } => {
                 #[cfg(feature = "k8s")]
                 let pod_str = fmt_pod(&pod_info);
@@ -345,42 +357,48 @@ impl StreamProcessor {
         outcome
     }
 
-    /// Whether this HTTP/2 direction's bytes are discontinuous with what its reader has, so it must
-    /// re-anchor. A dropped middle fragment breaks the current direction now; a truncated call or a new
-    /// call starting while the previous was unfinished loses a direction's tail, marked for its next feed.
+    /// The gap this HTTP/2 fragment must act on before its bytes are read. A dropped middle fragment and a
+    /// truncated tail both have an exact size, so they are skipped within the current frame when they fit; a
+    /// new call starting while the previous was unfinished loses a tail of unknown size, so it re-anchors.
     fn h2_loss(
         &mut self,
         direction: LlmDirection,
         offset: u32,
-        out_of_order: bool,
+        len: u32,
+        data_len: usize,
         truncated: bool,
-    ) -> bool {
+    ) -> H2Gap {
         if offset == 0 && self.frag_next != 0 {
-            self.mark_h2_lost(self.frag_dir);
+            self.set_h2_gap(self.frag_dir, H2Gap::Resync);
         }
-        if out_of_order && offset != 0 {
-            self.mark_h2_lost(direction);
-        }
-        let lost = self.take_h2_lost(direction);
+        // A dropped middle fragment: exactly `offset - frag_next` bytes are missing, here and now.
+        let now = if offset != 0 && offset > self.frag_next {
+            H2Gap::Skip((offset - self.frag_next) as usize)
+        } else {
+            self.take_h2_gap(direction)
+        };
         if truncated {
-            self.mark_h2_lost(direction);
+            let lost = (len as usize).saturating_sub(offset as usize + data_len);
+            if lost > 0 {
+                self.set_h2_gap(direction, H2Gap::Skip(lost));
+            }
         }
-        lost
+        now
     }
 
-    fn mark_h2_lost(&mut self, direction: LlmDirection) {
+    fn set_h2_gap(&mut self, direction: LlmDirection, gap: H2Gap) {
         match direction {
-            LlmDirection::Write => self.h2_lost_client = true,
-            LlmDirection::Read => self.h2_lost_server = true,
+            LlmDirection::Write => self.h2_gap_client = gap,
+            LlmDirection::Read => self.h2_gap_server = gap,
             _ => {}
         }
     }
 
-    fn take_h2_lost(&mut self, direction: LlmDirection) -> bool {
+    fn take_h2_gap(&mut self, direction: LlmDirection) -> H2Gap {
         match direction {
-            LlmDirection::Write => std::mem::take(&mut self.h2_lost_client),
-            LlmDirection::Read => std::mem::take(&mut self.h2_lost_server),
-            _ => false,
+            LlmDirection::Write => std::mem::replace(&mut self.h2_gap_client, H2Gap::None),
+            LlmDirection::Read => std::mem::replace(&mut self.h2_gap_server, H2Gap::None),
+            _ => H2Gap::None,
         }
     }
 
@@ -743,8 +761,8 @@ impl StreamProcessor {
         self.past_limit = None;
         self.next_request = None;
         self.continuation = None;
-        self.h2_lost_client = false;
-        self.h2_lost_server = false;
+        self.h2_gap_client = H2Gap::None;
+        self.h2_gap_server = H2Gap::None;
     }
 
     /// Record, defer or drop the call once its response parsed to `usage` and `state`; None keeps waiting.

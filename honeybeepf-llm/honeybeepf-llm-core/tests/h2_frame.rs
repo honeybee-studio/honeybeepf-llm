@@ -21,6 +21,12 @@ fn frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
     [&len[1..], &[kind, flags], &stream.to_be_bytes(), payload].concat()
 }
 
+/// A 9-byte frame head declaring `len` payload bytes, without the payload (for gap-skip tests).
+fn frame_head(kind: u8, flags: u8, stream: u32, len: u32) -> Vec<u8> {
+    let l = len.to_be_bytes();
+    [&l[1..], &[kind, flags], &stream.to_be_bytes()].concat()
+}
+
 /// Record one frame as an event; consecutive DATA of one stream are merged.
 fn push_ev(evs: &mut Vec<Ev>, f: Frame<'_>) {
     match (f, evs.last_mut()) {
@@ -295,6 +301,39 @@ fn looks_like_http2_spots_a_frame_run_but_not_http11_or_the_preface() {
     // The preface itself is not frames, and nothing is not a run.
     assert!(!looks_like_http2(PREFACE));
     assert!(!looks_like_http2(b""));
+}
+
+#[test]
+fn skip_gap_skips_inside_a_data_payload_and_stays_aligned() {
+    let d = |s: &[u8]| s.to_vec();
+    let mut r = FrameReader::server();
+    let mut evs = Vec::new();
+    // A DATA frame on stream 1 declaring 20 payload bytes; feed its head and first 8.
+    let head_plus_8 = [&frame_head(0, 0, 1, 20)[..], b"AAAAAAAA"].concat();
+    r.read(&head_plus_8, |f| push_ev(&mut evs, f));
+    // 5 bytes were lost inside the payload; skip them exactly and stay aligned.
+    assert!(r.skip_gap(5));
+    // The remaining 7 payload bytes finish the frame, then the next frame reads normally.
+    let rest = [b"BBBBBBB".as_slice(), &frame(0, 0x1, 1, b"cc")].concat();
+    r.read(&rest, |f| push_ev(&mut evs, f));
+    assert_eq!(
+        (evs, r.broken()),
+        (vec![Ev::Data(1, d(b"AAAAAAAABBBBBBBcc")), Ev::End(1)], None)
+    );
+}
+
+#[test]
+fn skip_gap_refuses_outside_a_data_payload_or_past_its_end() {
+    // Not mid-payload (Head state) → refused.
+    let mut r = FrameReader::server();
+    assert!(!r.skip_gap(4));
+    // Mid a HEADERS payload → refused (its HPACK updates would be lost).
+    r.read(&frame_head(1, 0, 1, 20), |_| {});
+    assert!(!r.skip_gap(4));
+    // More than the current DATA frame's remaining payload → refused.
+    let mut r2 = FrameReader::server();
+    r2.read(&[&frame_head(0, 0, 1, 10)[..], b"AA"].concat(), |_| {});
+    assert!(!r2.skip_gap(100));
 }
 
 #[test]

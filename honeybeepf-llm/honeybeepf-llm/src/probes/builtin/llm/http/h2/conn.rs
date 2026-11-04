@@ -10,7 +10,7 @@ use honeybeepf_llm_core::types::{LlmDirection, UsageInfo};
 
 use super::super::registry::PROVIDER_REGISTRY;
 use super::stream::H2Stream;
-use crate::probes::builtin::llm::processor::UnparsedReason;
+use crate::probes::builtin::llm::processor::{H2Gap, UnparsedReason};
 
 /// Streams tracked at once; a connection rarely runs many in parallel (SETTINGS_MAX_CONCURRENT_STREAMS ~100).
 const MAX_STREAMS: usize = 128;
@@ -94,13 +94,14 @@ impl H2Conn {
     }
 
     /// Read one direction's bytes, emitting an event as each matched stream is detected and finished.
-    /// `lost` means bytes were dropped before `data`, so the reader re-anchors and the HPACK table, now
-    /// out of sync, is forgotten (later indexed fields decode as unknown until a fresh literal).
+    /// `gap` says how the bytes are discontinuous: a known lost count is skipped inside the current frame
+    /// when it fits, keeping the HPACK table; otherwise the reader re-anchors and that table, now out of
+    /// sync, is forgotten (later indexed fields decode as unknown until a fresh literal).
     pub(crate) fn feed(
         &mut self,
         direction: LlmDirection,
         data: &[u8],
-        lost: bool,
+        gap: H2Gap,
         mut on: impl FnMut(H2Event),
     ) {
         let Self {
@@ -114,7 +115,14 @@ impl H2Conn {
         let request = direction == LlmDirection::Write;
         // Disjoint borrows: the reader walks frames while the callback holds the decoder and stream map.
         let Dir { reader, decoder } = if request { client } else { server };
-        if lost {
+        // A gap whose exact size fits inside the current DATA frame is skipped, keeping framing and the HPACK
+        // table; anything else re-anchors and forgets the table.
+        let resync = match gap {
+            H2Gap::None => false,
+            H2Gap::Skip(n) => !reader.skip_gap(n),
+            H2Gap::Resync => true,
+        };
+        if resync {
             reader.resync();
             decoder.forget();
             on(H2Event::Resynced);
@@ -442,10 +450,10 @@ mod tests {
                     recorded += 1;
                 }
             };
-            conn.feed(LlmDirection::Write, PREFACE, false, &mut on);
-            conn.feed(LlmDirection::Write, &req(1), false, &mut on);
+            conn.feed(LlmDirection::Write, PREFACE, H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Write, &req(1), H2Gap::None, &mut on);
             for r in reads {
-                conn.feed(LlmDirection::Read, r, false, &mut on);
+                conn.feed(LlmDirection::Read, r, H2Gap::None, &mut on);
             }
         }
         (recorded, conn.buffered)
@@ -486,10 +494,10 @@ mod tests {
                 H2Event::Unparsed { .. } | H2Event::Resynced => {}
             };
             for chunk in c2s.chunks(step) {
-                conn.feed(LlmDirection::Write, chunk, false, &mut on);
+                conn.feed(LlmDirection::Write, chunk, H2Gap::None, &mut on);
             }
             for chunk in s2c.chunks(step) {
-                conn.feed(LlmDirection::Read, chunk, false, &mut on);
+                conn.feed(LlmDirection::Read, chunk, H2Gap::None, &mut on);
             }
         }
         (detected, recorded)
@@ -529,10 +537,10 @@ mod tests {
                 H2Event::Unparsed { .. } => closed += 1,
                 H2Event::Detected { .. } | H2Event::Resynced => {}
             };
-            conn.feed(LlmDirection::Write, PREFACE, false, &mut on);
-            conn.feed(LlmDirection::Write, &req(1), false, &mut on);
+            conn.feed(LlmDirection::Write, PREFACE, H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Write, &req(1), H2Gap::None, &mut on);
             for (dir, bytes) in reads {
-                conn.feed(*dir, bytes, false, &mut on);
+                conn.feed(*dir, bytes, H2Gap::None, &mut on);
             }
         }
         (rec, closed, big)
@@ -584,10 +592,10 @@ mod tests {
     fn conn_with_open_stream(response: &[&[u8]]) -> H2Conn {
         let mut conn = H2Conn::new();
         let mut on = |_| {};
-        conn.feed(LlmDirection::Write, PREFACE, false, &mut on);
-        conn.feed(LlmDirection::Write, &req(1), false, &mut on);
+        conn.feed(LlmDirection::Write, PREFACE, H2Gap::None, &mut on);
+        conn.feed(LlmDirection::Write, &req(1), H2Gap::None, &mut on);
         for r in response {
-            conn.feed(LlmDirection::Read, r, false, &mut on);
+            conn.feed(LlmDirection::Read, r, H2Gap::None, &mut on);
         }
         conn
     }
@@ -652,11 +660,11 @@ mod tests {
                 H2Event::Resynced => resynced += 1,
                 _ => {}
             };
-            conn.feed(LlmDirection::Write, PREFACE, false, &mut on);
+            conn.feed(LlmDirection::Write, PREFACE, H2Gap::None, &mut on);
             for &s in streams {
-                conn.feed(LlmDirection::Write, &req(s), false, &mut on);
+                conn.feed(LlmDirection::Write, &req(s), H2Gap::None, &mut on);
             }
-            conn.feed(LlmDirection::Read, server, true, &mut on);
+            conn.feed(LlmDirection::Read, server, H2Gap::Resync, &mut on);
         }
         (rec, resynced)
     }
@@ -696,7 +704,7 @@ mod tests {
                     flagged += usize::from(midjoin);
                 }
             };
-            conn.feed(LlmDirection::Read, server, true, &mut on);
+            conn.feed(LlmDirection::Read, server, H2Gap::Resync, &mut on);
         }
         (rec, flagged)
     }
@@ -722,7 +730,7 @@ mod tests {
         let grpc = data_run(1, &[0u8; 300]);
         for _ in 0..50 {
             let mut conn = H2Conn::new_midjoin();
-            conn.feed(LlmDirection::Read, &grpc, true, &mut |_| {});
+            conn.feed(LlmDirection::Read, &grpc, H2Gap::Resync, &mut |_| {});
             assert_eq!((conn.open_streams(), conn.buffered), (0, 0));
         }
         // A JSON-looking (non-usage) body well over the per-connection mid-join cap is held to it, not to the
@@ -737,7 +745,7 @@ mod tests {
             body.extend(frame(0, 0, 1, &chunk));
         }
         let mut conn = H2Conn::new_midjoin();
-        conn.feed(LlmDirection::Read, &body, true, &mut |_| {});
+        conn.feed(LlmDirection::Read, &body, H2Gap::Resync, &mut |_| {});
         assert!(
             conn.buffered < MIDJOIN_CONN_CAP,
             "buffered {}",
@@ -756,8 +764,8 @@ mod tests {
                     rec += 1;
                 }
             };
-            conn.feed(LlmDirection::Write, PREFACE, false, &mut on);
-            conn.feed(LlmDirection::Read, &data_run(1, JSON), false, &mut on);
+            conn.feed(LlmDirection::Write, PREFACE, H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Read, &data_run(1, JSON), H2Gap::None, &mut on);
         }
         assert_eq!(rec, 0);
     }

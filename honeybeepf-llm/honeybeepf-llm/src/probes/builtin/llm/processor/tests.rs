@@ -1431,37 +1431,53 @@ fn test_only_a_queued_background_object_defers_its_call() {
 }
 
 #[test]
-fn h2_loss_flags_a_dropped_middle_fragment_at_once() {
+fn h2_loss_skips_a_dropped_middle_fragment_by_its_exact_size() {
     let mut p = StreamProcessor::new();
     p.frag_next = 16384;
     p.frag_dir = LlmDirection::Read;
-    // A read fragment out of order and not at a call start: a middle fragment of this call was dropped.
-    assert!(p.h2_loss(LlmDirection::Read, 32768, true, false));
+    // A read fragment at 32768 when 16384 was expected: exactly 16384 bytes dropped, skipped here now.
+    assert_eq!(
+        p.h2_loss(LlmDirection::Read, 32768, 49152, 16384, false),
+        H2Gap::Skip(16384)
+    );
 }
 
 #[test]
-fn h2_loss_resyncs_a_truncated_direction_on_its_next_feed_only() {
+fn h2_loss_skips_a_truncated_tail_on_the_next_feed() {
     let mut p = StreamProcessor::new();
-    // A truncated read loses its tail: this feed is fine, the next read must re-anchor.
-    assert!(!p.h2_loss(LlmDirection::Read, 0, false, true));
-    // A write in between is untouched.
-    assert!(!p.h2_loss(LlmDirection::Write, 0, false, false));
-    // The next read re-anchors, and only once.
-    assert!(p.h2_loss(LlmDirection::Read, 0, false, false));
-    assert!(!p.h2_loss(LlmDirection::Read, 0, false, false));
+    // A truncated read: 20000-byte call, 16384 captured, so 3616 bytes are lost after it — pending.
+    assert_eq!(
+        p.h2_loss(LlmDirection::Read, 0, 20000, 16384, true),
+        H2Gap::None
+    );
+    // The next read feed skips exactly that many, once.
+    assert_eq!(
+        p.h2_loss(LlmDirection::Read, 0, 500, 500, false),
+        H2Gap::Skip(3616)
+    );
+    assert_eq!(
+        p.h2_loss(LlmDirection::Read, 0, 500, 500, false),
+        H2Gap::None
+    );
 }
 
 #[test]
-fn h2_loss_marks_the_previous_direction_when_a_new_call_interrupts_it() {
+fn h2_loss_resyncs_the_previous_direction_when_a_new_call_interrupts_it() {
     let mut p = StreamProcessor::new();
-    // A write call is left unfinished when a read call starts: the write lost its tail, not this read.
+    // A write call is left unfinished when a read call starts: the write lost a tail of unknown size.
     p.frag_next = 4096;
     p.frag_dir = LlmDirection::Write;
-    assert!(!p.h2_loss(LlmDirection::Read, 0, true, false));
+    assert_eq!(
+        p.h2_loss(LlmDirection::Read, 0, 500, 500, false),
+        H2Gap::None
+    );
     // The read completed; the write re-anchors on its next feed.
     p.frag_next = 0;
     p.frag_dir = LlmDirection::Read;
-    assert!(p.h2_loss(LlmDirection::Write, 0, false, false));
+    assert_eq!(
+        p.h2_loss(LlmDirection::Write, 0, 100, 100, false),
+        H2Gap::Resync
+    );
 }
 
 /// A minimal HTTP/2 frame (9-byte header + payload), for mid-stream-join detection tests.
