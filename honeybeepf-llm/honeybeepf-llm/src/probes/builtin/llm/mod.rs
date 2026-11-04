@@ -386,8 +386,8 @@ impl Probe for LlmProbe {
         let handler_background = background.clone();
         let mut conn_filter = ConnFilter::new(bpf)?;
 
-        spawn_ringbuf_handler(bpf, "SSL_EVENTS", move |event: LlmEvent| {
-            if event.is_handshake == 1 || conn_filter.skip_if_foreign(&event, &handler_state) {
+        spawn_ringbuf_handler(bpf, "SSL_EVENTS", move |event: &LlmEvent| {
+            if event.is_handshake == 1 || conn_filter.skip_if_foreign(event, &handler_state) {
                 return;
             }
 
@@ -396,7 +396,7 @@ impl Probe for LlmProbe {
             route_event(
                 &mut map,
                 &mut calls,
-                &event,
+                event,
                 #[cfg(feature = "k8s")]
                 || _resolver.resolve_pod(event.metadata.pid, event.metadata.cgroup_id),
             );
