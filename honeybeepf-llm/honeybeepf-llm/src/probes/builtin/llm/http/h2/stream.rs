@@ -54,20 +54,37 @@ pub(super) struct H2Stream {
     body: Body,
     /// Response DATA has begun, so a later HEADERS block is trailers and must not reset the body.
     got_data: bool,
+    /// Tracked without a matched request (mid-join or lost request headers), so its host is unknown.
+    speculative: bool,
 }
 
 impl H2Stream {
+    /// A stream matched to a provider by its request headers.
     pub(super) fn open(start: Instant) -> Self {
         Self {
             start,
             last: start,
             body: Body::plain_json(),
             got_data: false,
+            speculative: false,
+        }
+    }
+
+    /// A stream tracked on its response alone, its request headers never matched; the host is unknown.
+    pub(super) fn open_speculative(start: Instant) -> Self {
+        Self {
+            speculative: true,
+            ..Self::open(start)
         }
     }
 
     pub(super) fn start(&self) -> Instant {
         self.start
+    }
+
+    /// Whether this stream was tracked speculatively (no matched request), so its host is unknown.
+    pub(super) fn speculative(&self) -> bool {
+        self.speculative
     }
 
     pub(super) fn last(&self) -> Instant {

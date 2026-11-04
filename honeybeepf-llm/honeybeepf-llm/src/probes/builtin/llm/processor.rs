@@ -72,6 +72,7 @@ pub enum UnparsedReason {
     RequestTooLarge,
     ResponseTooLarge,
     BackgroundUnfinished,
+    HeadersLost,
 }
 
 impl UnparsedReason {
@@ -84,6 +85,7 @@ impl UnparsedReason {
             Self::RequestTooLarge => "request_too_large",
             Self::ResponseTooLarge => "response_too_large",
             Self::BackgroundUnfinished => "background_unfinished",
+            Self::HeadersLost => "headers_lost",
         }
     }
 }
@@ -105,6 +107,9 @@ impl std::fmt::Display for UnparsedReason {
                 MAX_RESPONSE_BUFFER_SIZE / (1024 * 1024)
             ),
             Self::BackgroundUnfinished => f.write_str("background call's usage was never seen"),
+            Self::HeadersLost => {
+                f.write_str("HTTP/2 request headers were lost, so the stream could not be matched")
+            }
         }
     }
 }

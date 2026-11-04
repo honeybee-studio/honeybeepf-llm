@@ -111,7 +111,6 @@ impl H2Conn {
             buffered,
             midjoin,
         } = self;
-        let midjoin = *midjoin;
         let request = direction == LlmDirection::Write;
         // Disjoint borrows: the reader walks frames while the callback holds the decoder and stream map.
         let Dir { reader, decoder } = if request { client } else { server };
@@ -126,7 +125,13 @@ impl H2Conn {
             reader.resync();
             decoder.forget();
             on(H2Event::Resynced);
+            // A forgotten client table can no longer match requests, so from here the connection tracks
+            // responses speculatively (host unknown), as a mid-stream join does.
+            if request {
+                *midjoin = true;
+            }
         }
+        let midjoin = *midjoin;
         // A normal connection buffers up to the full budget; a mid-join one is held to a small per-connection
         // cap and the node-wide speculative budget, so unmatched (possibly non-LLM) joins cannot pile up.
         let before = *buffered;
@@ -237,7 +242,7 @@ fn on_frame(
                 && streams.len() < MAX_STREAMS
                 && looks_recordable(data)
             {
-                streams.insert(stream, H2Stream::open(Instant::now()));
+                streams.insert(stream, H2Stream::open_speculative(Instant::now()));
             }
             if let Some(s) = streams.get_mut(&stream) {
                 let room = cap.saturating_sub(*buffered);
@@ -250,11 +255,17 @@ fn on_frame(
                     on(H2Event::Recorded {
                         usage: Box::new(usage),
                         start: s.start(),
-                        midjoin,
+                        midjoin: s.speculative(),
                     });
                 } else if s.over_limit() {
                     on(H2Event::Unparsed {
                         reason: UnparsedReason::ResponseTooLarge,
+                    });
+                } else if s.speculative() {
+                    // A response we tracked without its request (lost headers or a mid-join) that carried no
+                    // usage: count it, since it may have been an LLM call we could not identify.
+                    on(H2Event::Unparsed {
+                        reason: UnparsedReason::HeadersLost,
                     });
                 }
                 *buffered = buffered.saturating_sub(s.held());
@@ -768,5 +779,29 @@ mod tests {
             conn.feed(LlmDirection::Read, &data_run(1, JSON), H2Gap::None, &mut on);
         }
         assert_eq!(rec, 0);
+    }
+
+    #[test]
+    fn a_forgotten_client_tracks_later_responses_and_counts_the_unrecordable() {
+        // A client-direction gap forgets the request table, so later responses cannot be matched. They are
+        // tracked speculatively: one carrying usage records host-unknown, one without counts headers_lost.
+        let mut conn = H2Conn::new();
+        let (mut rec, mut headers_lost) = (0, 0);
+        {
+            let mut on = |e| match e {
+                H2Event::Recorded { .. } => rec += 1,
+                H2Event::Unparsed {
+                    reason: UnparsedReason::HeadersLost,
+                } => headers_lost += 1,
+                _ => {}
+            };
+            conn.feed(LlmDirection::Write, PREFACE, H2Gap::None, &mut on);
+            // A gap on the request direction forgets the client HPACK table.
+            conn.feed(LlmDirection::Write, &req(1), H2Gap::Resync, &mut on);
+            conn.feed(LlmDirection::Read, &data_run(5, JSON), H2Gap::None, &mut on);
+            let junk = b"{\"choices\":[]}{\"choices\":[]}{\"choices\":[]}";
+            conn.feed(LlmDirection::Read, &data_run(7, junk), H2Gap::None, &mut on);
+        }
+        assert_eq!((rec, headers_lost), (1, 1));
     }
 }
