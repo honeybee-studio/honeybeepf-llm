@@ -82,6 +82,10 @@ pub struct PricingConfig {
 
     /// Optional: field name for the inference geography within the usage object
     pub inference_geo: Option<String>,
+
+    /// Optional: refusal categories billed even when a server-side fallback attempt declined before
+    /// output; a before-output decline in any other category records tokens but no cost.
+    pub billed_categories: Option<Vec<String>>,
 }
 
 /// Which usage belongs to this provider and which model served it
@@ -128,6 +132,7 @@ struct FlatResponseConfig {
     model_path: String,
     service_tier_path: Option<String>,
     iterations_path: Option<String>,
+    billed_categories: Option<Vec<String>>,
 }
 
 impl From<FlatResponseConfig> for ResponseConfig {
@@ -152,6 +157,7 @@ impl From<FlatResponseConfig> for ResponseConfig {
                 service_tier_path: flat.service_tier_path,
                 speed: flat.speed,
                 inference_geo: flat.inference_geo,
+                billed_categories: flat.billed_categories,
             },
             identity: IdentityConfig {
                 model_path: flat.model_path,

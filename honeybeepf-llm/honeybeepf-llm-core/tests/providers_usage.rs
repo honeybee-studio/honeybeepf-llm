@@ -162,6 +162,28 @@ fn default_provider(host: &str, path: &str) -> ConfigurableProvider {
     ConfigurableProvider::new(registry.find_provider(host, path).unwrap().clone())
 }
 
+// A custom provider that opts into fallback iterations but declares no billed_categories.
+fn provider_without_billed_categories() -> ConfigurableProvider {
+    ConfigurableProvider::new(ProviderConfig {
+        name: "custom".to_string(),
+        hosts: vec![],
+        paths: vec![],
+        response: ResponseConfig {
+            tokens: TokenConfig {
+                prompt_tokens: "input_tokens".to_string(),
+                completion_tokens: "output_tokens".to_string(),
+                ..TokenConfig::default()
+            },
+            identity: IdentityConfig {
+                iterations_path: Some("iterations".to_string()),
+                ..IdentityConfig::default()
+            },
+            ..ResponseConfig::default()
+        },
+        request_extractor: RequestExtractorType::Messages,
+    })
+}
+
 #[test]
 fn test_openai_chat_cached_tokens_are_part_of_prompt() {
     let provider = default_provider("api.openai.com", "/v1/chat/completions");
@@ -209,6 +231,11 @@ fn test_anthropic_fallback_bills_the_declined_attempt_under_its_model() {
     let response = json!({
         "type": "message",
         "model": "claude-opus-4-8",
+        "content": [
+            {"type": "fallback", "from": {"model": "claude-fable-5"}, "to": {"model": "claude-opus-4-8"},
+             "trigger": {"type": "refusal", "category": "cyber"}},
+            {"type": "text", "text": "Hi!"}
+        ],
         "usage": {
             "input_tokens": 412, "output_tokens": 264,
             "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
@@ -234,6 +261,122 @@ fn test_anthropic_fallback_bills_the_declined_attempt_under_its_model() {
         (535, 0)
     );
     assert_eq!(declined.model.as_deref(), Some("claude-fable-5"));
+    // Declined before output under `cyber`, which is not in billed_categories: tokens, no cost.
+    assert!(declined.cost_suppressed);
+}
+
+// A before-output decline whose category is billed (here `bio`) keeps its cost.
+#[test]
+fn test_anthropic_fallback_before_output_in_billed_category_keeps_cost() {
+    let provider = default_provider("api.anthropic.com", "/v1/messages");
+    let response = json!({
+        "type": "message",
+        "model": "claude-opus-4-8",
+        "content": [
+            {"type": "fallback", "from": {"model": "claude-fable-5"}, "to": {"model": "claude-opus-4-8"},
+             "trigger": {"type": "refusal", "category": "bio"}},
+            {"type": "text", "text": "Hi!"}
+        ],
+        "usage": {
+            "input_tokens": 412, "output_tokens": 264,
+            "iterations": [
+                {"type": "message", "model": "claude-fable-5", "input_tokens": 535, "output_tokens": 0},
+                {"type": "fallback_message", "model": "claude-opus-4-8", "input_tokens": 412, "output_tokens": 264}
+            ]
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!(usage.iterations.len(), 1);
+    assert!(!usage.iterations[0].cost_suppressed);
+}
+
+// A mid-output decline (output tokens already spent) always bills, whatever the category.
+#[test]
+fn test_anthropic_fallback_mid_output_decline_always_bills() {
+    let provider = default_provider("api.anthropic.com", "/v1/messages");
+    let response = json!({
+        "type": "message",
+        "model": "claude-opus-4-8",
+        "content": [
+            {"type": "fallback", "from": {"model": "claude-fable-5"}, "to": {"model": "claude-opus-4-8"},
+             "trigger": {"type": "refusal", "category": "cyber"}},
+            {"type": "text", "text": "Hi!"}
+        ],
+        "usage": {
+            "input_tokens": 412, "output_tokens": 264,
+            "iterations": [
+                {"type": "message", "model": "claude-fable-5", "input_tokens": 535, "output_tokens": 40},
+                {"type": "fallback_message", "model": "claude-opus-4-8", "input_tokens": 412, "output_tokens": 264}
+            ]
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!(usage.iterations.len(), 1);
+    assert_eq!(usage.iterations[0].completion_tokens, 40);
+    assert!(!usage.iterations[0].cost_suppressed);
+}
+
+// Block and attempt counts can differ, so the category is matched to the declined model
+// (`from.model`), not by position. Here a mid-output decline has no block, and the billed `bio`
+// block belongs to the later before-output decline.
+#[test]
+fn test_anthropic_fallback_matches_category_to_the_declined_model_not_position() {
+    let provider = default_provider("api.anthropic.com", "/v1/messages");
+    let response = json!({
+        "type": "message",
+        "model": "claude-opus-4-8",
+        "content": [
+            {"type": "fallback", "from": {"model": "claude-sonnet-x"}, "to": {"model": "claude-opus-4-8"},
+             "trigger": {"type": "refusal", "category": "bio"}},
+            {"type": "text", "text": "Hi!"}
+        ],
+        "usage": {
+            "input_tokens": 412, "output_tokens": 264,
+            "iterations": [
+                {"type": "message", "model": "claude-fable-5", "input_tokens": 300, "output_tokens": 40},
+                {"type": "message", "model": "claude-sonnet-x", "input_tokens": 535, "output_tokens": 0},
+                {"type": "fallback_message", "model": "claude-opus-4-8", "input_tokens": 412, "output_tokens": 264}
+            ]
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!(usage.iterations.len(), 2);
+    assert_eq!(usage.iterations[0].model.as_deref(), Some("claude-fable-5"));
+    assert!(!usage.iterations[0].cost_suppressed); // mid-output: always billed
+    assert_eq!(
+        usage.iterations[1].model.as_deref(),
+        Some("claude-sonnet-x")
+    );
+    assert_eq!(usage.iterations[1].completion_tokens, 0);
+    assert!(!usage.iterations[1].cost_suppressed); // before output but `bio` is billed
+}
+
+// Without billed_categories the provider does not opt into the rule, so every declined attempt
+// bills as it did before this feature, even a before-output decline.
+#[test]
+fn test_fallback_without_billed_categories_bills_every_declined_attempt() {
+    let provider = provider_without_billed_categories();
+    let response = json!({
+        "model": "served",
+        "content": [
+            {"type": "fallback", "from": {"model": "declined"}, "to": {"model": "served"},
+             "trigger": {"type": "refusal", "category": "cyber"}}
+        ],
+        "usage": {
+            "input_tokens": 100, "output_tokens": 50,
+            "iterations": [
+                {"type": "message", "model": "declined", "input_tokens": 80, "output_tokens": 0},
+                {"type": "fallback_message", "model": "served", "input_tokens": 100, "output_tokens": 50}
+            ]
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!(usage.iterations.len(), 1);
+    assert!(!usage.iterations[0].cost_suppressed);
 }
 
 // Sticky routing sends a later turn straight to the fallback model: one iteration, nothing extra.
@@ -632,6 +775,7 @@ fn test_custom_provider_reads_every_flat_field() -> Result<(), serde_json::Error
         speed: Some("fast".to_string()),
         inference_geo: Some("us".to_string()),
         iterations: Vec::new(),
+        cost_suppressed: false,
     };
     assert_eq!(format!("{usage:?}"), format!("{expected:?}"));
 

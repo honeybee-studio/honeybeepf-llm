@@ -18,6 +18,10 @@ const SSE_END_MARKERS: [&str; 7] = [
     "\"response.incomplete\"",
 ];
 
+/// Cap on captured fallback blocks per stream; a real fallback chain has a handful, so this only
+/// bounds a hostile stream that sends one per event.
+const MAX_FALLBACK_BLOCKS: usize = 64;
+
 pub(super) fn parse_sse_body(body: &[u8]) -> Option<UsageInfo> {
     let mut cursor = SseCursor::default();
     cursor.feed(body);
@@ -39,6 +43,19 @@ fn read_lines(cursor: &mut SseCursor, bytes: &[u8]) {
             continue;
         }
         let data = &line["data: ".len()..];
+
+        // Rare: a server-side fallback names each declined attempt's refusal category in a
+        // content_block_start fallback block; normal deltas skip the parse on the cheap check.
+        if cursor.fallbacks.len() < MAX_FALLBACK_BLOCKS
+            && data.contains("\"fallback\"")
+            && let Ok(v) = serde_json::from_str::<Value>(data)
+            && v.get("type").and_then(Value::as_str) == Some("content_block_start")
+            && let Some(block) = v
+                .get("content_block")
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("fallback"))
+        {
+            cursor.fallbacks.push(block.clone());
+        }
 
         // A failed Responses stream may end without usage; its status still has to finish the call.
         let is_usage_event = serde_json::from_str::<SseChunkDelta>(data).is_ok_and(|chunk| {
@@ -83,6 +100,9 @@ pub(super) struct SseCursor {
     /// Usage-bearing events merged in order: Anthropic sends input tokens in
     /// message_start and only output tokens in message_delta.
     acc: Option<Value>,
+    /// `fallback` content blocks from content_block_start, attached to the merged body so a
+    /// server-side fallback's declined attempts can be matched to their refusal category.
+    fallbacks: Vec<Value>,
 }
 
 impl SseCursor {
@@ -116,7 +136,20 @@ impl SseCursor {
         if !self.ended {
             return None;
         }
-        self.acc.as_ref().and_then(parse_response_json_value)
+        if self.fallbacks.is_empty() {
+            return self.acc.as_ref().and_then(parse_response_json_value);
+        }
+        // The stream carried fallback blocks; add them to `content` so the parser reads their
+        // categories. Cloned only here, once the stream has ended, never per event.
+        let mut acc = self.acc.clone()?;
+        match acc.get_mut("content").and_then(Value::as_array_mut) {
+            Some(content) => content.extend(self.fallbacks.iter().cloned()),
+            None => {
+                acc.as_object_mut()?
+                    .insert("content".to_string(), Value::Array(self.fallbacks.clone()));
+            }
+        }
+        parse_response_json_value(&acc)
     }
 }
 
@@ -204,6 +237,62 @@ mod tests {
         assert_eq!((info.prompt_tokens, info.completion_tokens), (412, 264));
         assert_eq!(info.iterations.len(), 1);
         assert_eq!(info.iterations[0].model.as_deref(), Some("claude-fable-5"));
+    }
+
+    #[test]
+    fn anthropic_fallback_sse_reads_category_from_content_block_start() {
+        // Declined before output: the refusal category rides a content_block_start fallback block,
+        // which the cursor must capture so a billed category (here `bio`) keeps its cost.
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"claude-fable-5\",\"content\":[],",
+            "\"usage\":{\"input_tokens\":412,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"fallback\",",
+            "\"from\":{\"model\":\"claude-fable-5\"},\"to\":{\"model\":\"claude-opus-4-8\"},",
+            "\"trigger\":{\"type\":\"refusal\",\"category\":\"bio\"}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":412,\"output_tokens\":264,",
+            "\"iterations\":[{\"type\":\"message\",\"model\":\"claude-fable-5\",\"input_tokens\":535,\"output_tokens\":0},",
+            "{\"type\":\"fallback_message\",\"model\":\"claude-opus-4-8\",\"input_tokens\":412,\"output_tokens\":264}]}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        let info = Http11Parser
+            .parse_response(&http11_sse(body))
+            .expect("usage");
+        assert_eq!(info.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(info.iterations.len(), 1);
+        let declined = &info.iterations[0];
+        assert_eq!(declined.model.as_deref(), Some("claude-fable-5"));
+        assert_eq!(declined.completion_tokens, 0);
+        assert!(!declined.cost_suppressed);
+    }
+
+    #[test]
+    fn anthropic_fallback_sse_suppresses_a_non_billed_before_output_decline() {
+        // Same streaming shape, but `cyber` is not billed: the before-output decline keeps its
+        // tokens with cost suppressed, proving the category reaches the rule through the stream.
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"claude-fable-5\",\"content\":[],",
+            "\"usage\":{\"input_tokens\":412,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"fallback\",",
+            "\"from\":{\"model\":\"claude-fable-5\"},\"to\":{\"model\":\"claude-opus-4-8\"},",
+            "\"trigger\":{\"type\":\"refusal\",\"category\":\"cyber\"}}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":412,\"output_tokens\":264,",
+            "\"iterations\":[{\"type\":\"message\",\"model\":\"claude-fable-5\",\"input_tokens\":535,\"output_tokens\":0},",
+            "{\"type\":\"fallback_message\",\"model\":\"claude-opus-4-8\",\"input_tokens\":412,\"output_tokens\":264}]}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        let info = Http11Parser
+            .parse_response(&http11_sse(body))
+            .expect("usage");
+        assert_eq!(info.iterations.len(), 1);
+        assert!(info.iterations[0].cost_suppressed);
     }
 
     const DONE_IN_TEXT: &str = "The stream ends with data: [DONE]";

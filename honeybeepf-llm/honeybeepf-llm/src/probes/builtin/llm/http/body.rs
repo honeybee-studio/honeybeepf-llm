@@ -176,7 +176,9 @@ mod tests {
         // Server-side fallback: Fable 5 declined, Opus 4.8 served; usage.iterations records both.
         let resp = concat!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n",
-            "{\"type\":\"message\",\"model\":\"claude-opus-4-8\",\"content\":[],",
+            "{\"type\":\"message\",\"model\":\"claude-opus-4-8\",\"content\":[",
+            "{\"type\":\"fallback\",\"from\":{\"model\":\"claude-fable-5\"},\"to\":{\"model\":\"claude-opus-4-8\"},",
+            "\"trigger\":{\"type\":\"refusal\",\"category\":\"cyber\"}},{\"type\":\"text\",\"text\":\"Hi!\"}],",
             "\"usage\":{\"input_tokens\":412,\"output_tokens\":264,",
             "\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0,\"iterations\":[",
             "{\"type\":\"message\",\"model\":\"claude-fable-5\",\"input_tokens\":535,\"output_tokens\":0,",
@@ -190,6 +192,8 @@ mod tests {
         assert_eq!(info.iterations.len(), 1);
         assert_eq!(info.iterations[0].model.as_deref(), Some("claude-fable-5"));
         assert_eq!(info.iterations[0].prompt_tokens, 535);
+        // Declined before output under `cyber` (not billed): tokens recorded, cost suppressed.
+        assert!(info.iterations[0].cost_suppressed);
     }
 
     #[test]

@@ -67,11 +67,26 @@ impl ConfigurableProvider {
             if let Some(model) = text(served, &response.identity.model_path) {
                 info.model = Some(model);
             }
-            // The earlier entries are the declined attempts, each billed under its own model.
+            // The earlier entries are the declined attempts, each billed under its own model. The
+            // refusal category is read from the `content` fallback block that names the same
+            // declined model in `from.model`, not by position: block and attempt counts can differ.
+            let categories = fallback_categories(json);
             for entry in &entries[..entries.len() - 1] {
-                if let Some(attempt) = self.read_usage(entry, entry)
+                if let Some(mut attempt) = self.read_usage(entry, entry)
                     && attempt.model.is_some()
                 {
+                    // Suppress cost only where the provider declares billed_categories: a before-output
+                    // decline (no output tokens) in any other category records tokens but no cost; a
+                    // mid-output decline always bills.
+                    if let Some(billed) = &response.pricing.billed_categories
+                        && attempt.completion_tokens == 0
+                    {
+                        let category = attempt
+                            .model
+                            .as_deref()
+                            .and_then(|model| category_of(&categories, model));
+                        attempt.cost_suppressed = !is_billed_category(category, billed);
+                    }
                     info.iterations.push(attempt);
                 }
             }
@@ -106,6 +121,7 @@ impl ConfigurableProvider {
             speed: optional_text(usage, &pricing.speed),
             inference_geo: optional_text(usage, &pricing.inference_geo),
             iterations: Vec::new(),
+            cost_suppressed: false,
         })
     }
 }
@@ -120,6 +136,38 @@ struct Cache {
     read: Option<u64>,
     write: Option<u64>,
     write_long_ttl: Option<u64>,
+}
+
+/// The response's `content` fallback blocks as (declined model, refusal category) pairs, keyed by
+/// the block's `from.model`; a block without that model cannot be matched and is dropped.
+fn fallback_categories(root: &Value) -> Vec<(String, Option<String>)> {
+    let Some(blocks) = root.get("content").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("fallback"))
+        .filter_map(|b| {
+            let from = get_nested_value(b, "from.model").and_then(Value::as_str)?;
+            let category = get_nested_value(b, "trigger.category")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            Some((from.to_string(), category))
+        })
+        .collect()
+}
+
+/// The refusal category recorded for a declined model; `None` when no block named it or it carried none.
+fn category_of<'a>(blocks: &'a [(String, Option<String>)], model: &str) -> Option<&'a str> {
+    blocks
+        .iter()
+        .find(|(from, _)| from == model)
+        .and_then(|(_, category)| category.as_deref())
+}
+
+/// Whether a before-output decline in this category is billed; an unknown category never is.
+fn is_billed_category(category: Option<&str>, billed: &[String]) -> bool {
+    category.is_some_and(|c| billed.iter().any(|b| b == c))
 }
 
 fn is_own_usage(config: &IdentityConfig, usage: &Value) -> bool {

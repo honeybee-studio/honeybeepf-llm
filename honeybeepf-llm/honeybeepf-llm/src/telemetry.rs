@@ -276,7 +276,10 @@ impl HoneyBeeMetrics {
         if let Some(n) = usage.thoughts_tokens {
             self.llm_reasoning_tokens_total.add(n, &attrs);
         }
-        self.record_cost(usage, &mut attrs);
+        // A fallback attempt declined before output in a non-billed category records tokens but no cost.
+        if !usage.cost_suppressed {
+            self.record_cost(usage, &mut attrs);
+        }
 
         let mut prompt_attrs = attrs.clone();
         prompt_attrs.push(KeyValue::new("token_type", "prompt"));
@@ -1006,6 +1009,66 @@ mod tests {
         assert_eq!(total("llm_requests_total"), 1);
         assert_eq!(tokens_for("claude-opus-4-8"), 676);
         assert_eq!(tokens_for("claude-fable-5"), 535);
+        Ok(())
+    }
+
+    #[test]
+    fn llm_suppressed_fallback_attempt_records_tokens_but_no_cost() -> Result<()> {
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        // A custom table prices both models, so a missing cost proves suppression, not a missing price.
+        let json = r#"{"version": "t", "providers": [{"name": "p", "source": "s",
+            "checked": "2026-10-01", "models": {"served-m": {"input": 2}, "declined-m": {"input": 3}}}]}"#;
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(Some(json)));
+        let usage = UsageInfo {
+            prompt_tokens: 1_000_000,
+            model: Some("served-m".to_string()),
+            iterations: vec![UsageInfo {
+                prompt_tokens: 1_000_000,
+                model: Some("declined-m".to_string()),
+                cost_suppressed: true,
+                ..UsageInfo::default()
+            }],
+            ..UsageInfo::default()
+        };
+        metrics.record_llm_call(&usage, "served-m", 1.0, false, |model, status| {
+            vec![
+                KeyValue::new("model", model.to_string()),
+                KeyValue::new("status", status.to_string()),
+            ]
+        });
+
+        let mut rm = ResourceMetrics {
+            resource: Resource::empty(),
+            scope_metrics: vec![],
+        };
+        reader.collect(&mut rm)?;
+        let models = |name: &str| -> Vec<String> {
+            rm.scope_metrics
+                .iter()
+                .flat_map(|s| &s.metrics)
+                .find(|m| m.name == name)
+                .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<f64>>())
+                .map(|sum| {
+                    sum.data_points
+                        .iter()
+                        .filter(|p| p.value > 0.0)
+                        .filter_map(|p| {
+                            p.attributes
+                                .iter()
+                                .find(|kv| kv.key.as_str() == "model")
+                                .map(|kv| kv.value.to_string())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        // Both attempts' tokens are recorded, but only the served model is billed.
+        let cost_models = models("llm_cost_usd_total");
+        assert!(cost_models.contains(&"served-m".to_string()));
+        assert!(!cost_models.contains(&"declined-m".to_string()));
         Ok(())
     }
 
