@@ -52,6 +52,36 @@ impl ConfigurableProvider {
             return None;
         }
 
+        let mut info = self.read_usage(usage, json)?;
+
+        // Server-side fallback: the served attempt is the final `fallback_message` entry that the
+        // top-level usage already counts. Advisor and compaction also use `usage.iterations` but
+        // relate to the top level differently, so engage only when that entry is last.
+        if let Some(path) = &response.identity.iterations_path
+            && let Some(entries) = get_nested_value(usage, path).and_then(Value::as_array)
+            && let Some(served) = entries.last()
+            && served.get("type").and_then(Value::as_str) == Some("fallback_message")
+        {
+            // A mid-output streaming fallback names the requested (declined) model at the top level,
+            // so take the served model from the fallback_message entry.
+            if let Some(model) = text(served, &response.identity.model_path) {
+                info.model = Some(model);
+            }
+            // The earlier entries are the declined attempts, each billed under its own model.
+            for entry in &entries[..entries.len() - 1] {
+                if let Some(attempt) = self.read_usage(entry, entry)
+                    && attempt.model.is_some()
+                {
+                    info.iterations.push(attempt);
+                }
+            }
+        }
+        Some(info)
+    }
+
+    /// One attempt's usage: `usage` holds the token counts, `root` the model name and service tier.
+    fn read_usage(&self, usage: &Value, root: &Value) -> Option<UsageInfo> {
+        let response = &self.config.response;
         let tokens = read_tokens(&response.tokens, usage)?;
         let cache = read_cache(&response.cache, usage);
         let prompt = if response.cache.prompt_excludes_cache {
@@ -71,10 +101,11 @@ impl ConfigurableProvider {
             cache_read_tokens: cache.read,
             cache_write_tokens: cache.write,
             cache_write_long_ttl_tokens: cache.write_long_ttl,
-            model: text(json, &response.identity.model_path),
-            service_tier: optional_text(json, &pricing.service_tier_path),
+            model: text(root, &response.identity.model_path),
+            service_tier: optional_text(root, &pricing.service_tier_path),
             speed: optional_text(usage, &pricing.speed),
             inference_geo: optional_text(usage, &pricing.inference_geo),
+            iterations: Vec::new(),
         })
     }
 }

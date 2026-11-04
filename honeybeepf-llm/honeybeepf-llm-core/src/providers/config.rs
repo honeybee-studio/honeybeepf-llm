@@ -92,6 +92,11 @@ pub struct IdentityConfig {
 
     /// Optional: usage field that must be present, to tell apart providers sharing token keys
     pub required_field: Option<String>,
+
+    /// Optional: usage field holding the per-attempt billing records of a server-side fallback
+    /// response; every entry but the last (the served attempt the top-level usage already counts)
+    /// is a billed attempt under its own model.
+    pub iterations_path: Option<String>,
 }
 
 // Not `#[serde(flatten)]`: it skips the config crate's conversions (`yes` or `1` as a boolean).
@@ -122,6 +127,7 @@ struct FlatResponseConfig {
     #[serde(default = "default_model_path")]
     model_path: String,
     service_tier_path: Option<String>,
+    iterations_path: Option<String>,
 }
 
 impl From<FlatResponseConfig> for ResponseConfig {
@@ -150,6 +156,7 @@ impl From<FlatResponseConfig> for ResponseConfig {
             identity: IdentityConfig {
                 model_path: flat.model_path,
                 required_field: flat.required_field,
+                iterations_path: flat.iterations_path,
             },
         }
     }
@@ -187,6 +194,7 @@ impl Default for IdentityConfig {
         Self {
             model_path: default_model_path(),
             required_field: None,
+            iterations_path: None,
         }
     }
 }

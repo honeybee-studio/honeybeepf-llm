@@ -224,12 +224,34 @@ impl HoneyBeeMetrics {
         labels.truncate(base);
     }
 
+    /// Record a served call, then the billed tokens and cost of each earlier server-side fallback
+    /// attempt under its own model. The served call owns the one request count and its latency;
+    /// `attrs_for(model, status)` builds the label set, pod labels included.
+    fn record_llm_call(
+        &self,
+        usage: &UsageInfo,
+        model: &str,
+        latency_secs: f64,
+        is_error: bool,
+        attrs_for: impl Fn(&str, &str) -> Vec<KeyValue>,
+    ) {
+        let status = if is_error { "error" } else { "success" };
+        self.record_llm(usage, latency_secs, is_error, attrs_for(model, status));
+        for attempt in &usage.iterations {
+            if attempt.prompt_tokens == 0 && attempt.completion_tokens == 0 {
+                continue;
+            }
+            let model = attempt.model.as_deref().unwrap_or("unknown");
+            self.record_tokens(attempt, attrs_for(model, "success"));
+        }
+    }
+
     fn record_llm(
         &self,
         usage: &UsageInfo,
         latency_secs: f64,
         is_error: bool,
-        mut attrs: Vec<KeyValue>,
+        attrs: Vec<KeyValue>,
     ) {
         // 1. total requests
         self.llm_requests_total.add(1, &attrs);
@@ -239,27 +261,32 @@ impl HoneyBeeMetrics {
 
         // 3. tokens
         if !is_error {
-            if let Some(n) = usage.cache_read_tokens {
-                self.llm_cache_read_tokens_total.add(n, &attrs);
-            }
-            if let Some(n) = usage.cache_write_tokens {
-                self.llm_cache_write_tokens_total.add(n, &attrs);
-            }
-            if let Some(n) = usage.thoughts_tokens {
-                self.llm_reasoning_tokens_total.add(n, &attrs);
-            }
-            self.record_cost(usage, &mut attrs);
-
-            let mut prompt_attrs = attrs.clone();
-            prompt_attrs.push(KeyValue::new("token_type", "prompt"));
-            self.llm_tokens_total
-                .add(usage.prompt_tokens, &prompt_attrs);
-
-            let mut comp_attrs = attrs; // move ownership
-            comp_attrs.push(KeyValue::new("token_type", "completion"));
-            self.llm_tokens_total
-                .add(usage.completion_tokens, &comp_attrs);
+            self.record_tokens(usage, attrs);
         }
+    }
+
+    /// The tokens, cache, reasoning and cost of one billed attempt.
+    fn record_tokens(&self, usage: &UsageInfo, mut attrs: Vec<KeyValue>) {
+        if let Some(n) = usage.cache_read_tokens {
+            self.llm_cache_read_tokens_total.add(n, &attrs);
+        }
+        if let Some(n) = usage.cache_write_tokens {
+            self.llm_cache_write_tokens_total.add(n, &attrs);
+        }
+        if let Some(n) = usage.thoughts_tokens {
+            self.llm_reasoning_tokens_total.add(n, &attrs);
+        }
+        self.record_cost(usage, &mut attrs);
+
+        let mut prompt_attrs = attrs.clone();
+        prompt_attrs.push(KeyValue::new("token_type", "prompt"));
+        self.llm_tokens_total
+            .add(usage.prompt_tokens, &prompt_attrs);
+
+        let mut comp_attrs = attrs; // move ownership
+        comp_attrs.push(KeyValue::new("token_type", "completion"));
+        self.llm_tokens_total
+            .add(usage.completion_tokens, &comp_attrs);
     }
 
     fn record_unparsed(&self, reason: &'static str, mut attrs: Vec<KeyValue>) {
@@ -584,20 +611,31 @@ pub fn record_llm_request(
     #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
 ) {
     if let Some(m) = metrics() {
-        let status = if is_error { "error" } else { "success" };
-
-        #[allow(unused_mut)]
-        let mut attrs = vec![
-            KeyValue::new("model", model.to_string()),
-            KeyValue::new("status", status.to_string()),
-        ];
-
-        // Only add pod info if k8s feature is enabled
-        #[cfg(feature = "k8s")]
-        push_pod_attrs(&mut attrs, pod_info);
-
-        m.record_llm(usage, latency_secs, is_error, attrs);
+        m.record_llm_call(usage, model, latency_secs, is_error, |model, status| {
+            llm_attrs(
+                model,
+                status,
+                #[cfg(feature = "k8s")]
+                pod_info,
+            )
+        });
     }
+}
+
+/// The model and status labels of an LLM call, plus the pod target labels when k8s is on.
+fn llm_attrs(
+    model: &str,
+    status: &str,
+    #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
+) -> Vec<KeyValue> {
+    #[allow(unused_mut)]
+    let mut attrs = vec![
+        KeyValue::new("model", model.to_string()),
+        KeyValue::new("status", status.to_string()),
+    ];
+    #[cfg(feature = "k8s")]
+    push_pod_attrs(&mut attrs, pod_info);
+    attrs
 }
 
 /// Count an LLM call that has no usage to record, by `reason`.
@@ -900,6 +938,74 @@ mod tests {
 
         assert_eq!(total("llm_reasoning_tokens_total")?, 4);
         assert_eq!(total("llm_tokens_total")?, 9);
+        Ok(())
+    }
+
+    #[test]
+    fn llm_fallback_bills_each_attempt_under_its_model_without_a_second_request() -> Result<()> {
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(None));
+        let usage = UsageInfo {
+            prompt_tokens: 412,
+            completion_tokens: 264,
+            model: Some("claude-opus-4-8".to_string()),
+            iterations: vec![UsageInfo {
+                prompt_tokens: 535,
+                completion_tokens: 0,
+                model: Some("claude-fable-5".to_string()),
+                ..UsageInfo::default()
+            }],
+            ..UsageInfo::default()
+        };
+        metrics.record_llm_call(&usage, "claude-opus-4-8", 1.0, false, |model, status| {
+            vec![
+                KeyValue::new("model", model.to_string()),
+                KeyValue::new("status", status.to_string()),
+            ]
+        });
+
+        let mut rm = ResourceMetrics {
+            resource: Resource::empty(),
+            scope_metrics: vec![],
+        };
+        reader.collect(&mut rm)?;
+        let points = |name: &str| -> Vec<(Vec<(String, String)>, u64)> {
+            rm.scope_metrics
+                .iter()
+                .flat_map(|s| &s.metrics)
+                .find(|m| m.name == name)
+                .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
+                .map(|sum| {
+                    sum.data_points
+                        .iter()
+                        .map(|p| {
+                            let attrs = p
+                                .attributes
+                                .iter()
+                                .map(|kv| (kv.key.to_string(), kv.value.to_string()))
+                                .collect();
+                            (attrs, p.value)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let total = |name: &str| -> u64 { points(name).iter().map(|(_, v)| v).sum() };
+        let tokens_for = |model: &str| -> u64 {
+            points("llm_tokens_total")
+                .iter()
+                .filter(|(a, _)| a.iter().any(|(k, v)| k == "model" && v == model))
+                .map(|(_, v)| v)
+                .sum()
+        };
+
+        // The served call owns the one request and the latency observation.
+        assert_eq!(total("llm_requests_total"), 1);
+        assert_eq!(tokens_for("claude-opus-4-8"), 676);
+        assert_eq!(tokens_for("claude-fable-5"), 535);
         Ok(())
     }
 
