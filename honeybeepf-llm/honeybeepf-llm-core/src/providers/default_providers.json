@@ -56,7 +56,7 @@
     },
     {
       "name": "anthropic",
-      "note": "Messages. Hosts: Claude API, Claude Platform on AWS, Bedrock Mantle /anthropic/v1, Claude on Google Cloud (Anthropic managed), Claude in Microsoft Foundry /anthropic/v1. `$` keeps /v1/messages/count_tokens and /v1/messages/batches out. Streaming carries speed and inference_geo only in message_start. A server-side fallback response bills each attempt under its own model in usage.iterations; the last entry is the served attempt the top-level usage already counts.",
+      "note": "Messages. Hosts: Claude API, Claude Platform on AWS, Bedrock Mantle /anthropic/v1, Claude on Google Cloud (Anthropic managed), Claude in Microsoft Foundry /anthropic/v1. `$` keeps /v1/messages/count_tokens and /v1/messages/batches out. Streaming carries speed and inference_geo only in message_start. A server-side fallback response bills each attempt under its own model in usage.iterations; the last entry is the served attempt the top-level usage already counts. A declined attempt that stopped before output bills only when its content fallback block's trigger.category is in billed_categories; its tokens are recorded either way.",
       "hosts": [
         "api.anthropic.com",
         "aws-external-anthropic.*.api.aws",
@@ -76,7 +76,8 @@
         "model_path": "model",
         "speed": "speed",
         "inference_geo": "inference_geo",
-        "iterations_path": "iterations"
+        "iterations_path": "iterations",
+        "billed_categories": ["bio", "frontier_llm", "reasoning_extraction"]
       },
       "request_extractor": "messages"
     },
@@ -121,7 +122,8 @@
         "model_path": "model",
         "speed": "speed",
         "inference_geo": "inference_geo",
-        "iterations_path": "iterations"
+        "iterations_path": "iterations",
+        "billed_categories": ["bio", "frontier_llm", "reasoning_extraction"]
       },
       "request_extractor": "messages"
     },
