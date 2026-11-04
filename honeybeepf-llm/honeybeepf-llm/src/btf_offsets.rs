@@ -173,6 +173,22 @@ impl Btf {
             .ok_or_else(|| BtfError::NoEnumValue(variant.to_string()))
     }
 
+    /// Bitmask of the iterator-kind bits: the OR of every value in the enum that defines
+    /// `ITER_IOVEC`. ANDing the kind field with it drops the direction bit packed into the
+    /// pre-5.14 `iov_iter.type`, and is a no-op on the dedicated `iter_type` field.
+    pub fn iter_kind_mask(&self) -> Result<i64, BtfError> {
+        self.types
+            .iter()
+            .filter(|t| t.kind == KIND_ENUM || t.kind == KIND_ENUM64)
+            .find(|t| {
+                t.enum_vals
+                    .iter()
+                    .any(|(n, _)| self.str_at(*n) == "ITER_IOVEC")
+            })
+            .map(|t| t.enum_vals.iter().fold(0i64, |m, (_, v)| m | v))
+            .ok_or_else(|| BtfError::NoEnumValue("ITER_IOVEC".to_string()))
+    }
+
     /// Resolve every field and enum value a tcp_sendmsg/recvmsg plaintext capture needs.
     pub fn plaintext_support(&self) -> PlaintextSupport {
         let mut offsets = Vec::new();
@@ -182,6 +198,13 @@ impl Btf {
                 Ok(off) => offsets.push((format!("{root}.{}", path.join(".")), off)),
                 Err(_) => missing.push(format!("{root}.{}", path.join("."))),
             }
+        }
+        // The kind field is `iter_type` since 5.14 and `type` before it; either is fine.
+        let iter_kind = ITER_KIND_ALTS
+            .iter()
+            .find_map(|(r, p)| self.offset_of(r, p).ok().map(|o| (p.join("."), o)));
+        if iter_kind.is_none() {
+            missing.push("iov_iter kind field (iter_type/type)".into());
         }
         let payload = PAYLOAD_PTR_ALTS
             .iter()
@@ -194,10 +217,16 @@ impl Btf {
         if iovec.is_err() {
             missing.push("enum ITER_IOVEC".into());
         }
+        let kind_mask = self.iter_kind_mask();
+        if kind_mask.is_err() {
+            missing.push("iov_iter kind mask".into());
+        }
         let ubuf = self.enum_value("ITER_UBUF").ok();
 
         PlaintextSupport {
             offsets,
+            iter_kind,
+            iter_kind_mask: kind_mask.ok(),
             payload,
             iter_iovec: iovec.ok(),
             iter_ubuf: ubuf,
@@ -272,10 +301,15 @@ pub const REQUIRED_FIELDS: &[(&str, &[&str])] = &[
     ("sock", &["__sk_common", "skc_dport"]),
     ("sock", &["__sk_common", "skc_num"]),
     ("msghdr", &["msg_iter"]),
-    ("iov_iter", &["iter_type"]),
     ("iov_iter", &["iov_offset"]),
     ("iov_iter", &["count"]),
 ];
+
+/// The iterator-kind field: `iter_type` since 5.14, `type` before it (5.10, RHEL 8.10's 4.18),
+/// where the read/write direction is packed into the low bit — capture masks it off with
+/// `iter_kind_mask` before comparing to the `ITER_*` enum values.
+pub const ITER_KIND_ALTS: &[(&str, &[&str])] =
+    &[("iov_iter", &["iter_type"]), ("iov_iter", &["type"])];
 
 /// The payload pointer's union member was respelled at 6.4 (`iov`→`__iov`) and 6.7 (`ubuf`);
 /// capture uses whichever the running kernel has.
@@ -289,6 +323,10 @@ pub const PAYLOAD_PTR_ALTS: &[(&str, &[&str])] = &[
 /// What a kernel can offer plaintext capture, resolved once at load time.
 pub struct PlaintextSupport {
     pub offsets: Vec<(String, u32)>,
+    /// The iterator-kind field actually present: `("iter_type", off)` or `("type", off)`.
+    pub iter_kind: Option<(String, u32)>,
+    /// Mask applied to the kind field to drop the pre-5.14 packed direction bit.
+    pub iter_kind_mask: Option<i64>,
     pub payload: Option<(String, u32)>,
     pub iter_iovec: Option<i64>,
     pub iter_ubuf: Option<i64>,
@@ -313,9 +351,15 @@ impl PlaintextSupport {
                 .as_ref()
                 .map(|(n, o)| format!("{n}@{o}"))
                 .unwrap_or_default();
+            let kind = self
+                .iter_kind
+                .as_ref()
+                .map(|(n, o)| format!("{n}@{o}"))
+                .unwrap_or_default();
             format!(
-                "[plaintext] kernel BTF supported: {} fields, payload {payload}, ITER_IOVEC={}{ubuf}",
+                "[plaintext] kernel BTF supported: {} fields, kind {kind} mask {:#x}, payload {payload}, ITER_IOVEC={}{ubuf}",
                 self.offsets.len(),
+                self.iter_kind_mask.unwrap_or(0),
                 self.iter_iovec.unwrap_or(-1),
             )
         } else {
@@ -333,6 +377,8 @@ pub fn detect_plaintext_support() -> PlaintextSupport {
         Ok(btf) => btf.plaintext_support(),
         Err(e) => PlaintextSupport {
             offsets: Vec::new(),
+            iter_kind: None,
+            iter_kind_mask: None,
             payload: None,
             iter_iovec: None,
             iter_ubuf: None,
@@ -659,6 +705,103 @@ mod tests {
         blob.extend_from_slice(&(types.len() as u32).to_le_bytes()); // type_len
         blob.extend_from_slice(&(types.len() as u32).to_le_bytes()); // str_off
         blob.extend_from_slice(&(strings.len() as u32).to_le_bytes()); // str_len
+        blob.extend_from_slice(&types);
+        blob.extend_from_slice(&strings);
+        blob
+    }
+
+    /// A pre-5.14 kernel (5.10, RHEL 8.10's 4.18): the kind field is `type`, not `iter_type`,
+    /// with the read/write direction packed into the low bit, and `ITER_*` are an anonymous
+    /// enum of flavour bits. Capture must fall back to `type` and mask the direction off.
+    #[test]
+    fn resolves_pre_5_14_type_field_and_masks_direction() {
+        let blob = build_pre514_iov_iter_btf();
+        let btf = Btf::parse(&blob).expect("synthetic BTF should parse");
+        // No dedicated iter_type field on this kernel; capture falls back to `type` at 0.
+        assert!(matches!(
+            btf.offset_of("iov_iter", &["iter_type"]),
+            Err(BtfError::NoField { .. })
+        ));
+        let s = btf.plaintext_support();
+        assert_eq!(s.iter_kind, Some(("type".to_string(), 0)));
+        // Mask is the OR of the enum's values (2|4|8, IOVEC=0), leaving bit 0 (direction) clear.
+        let mask = s.iter_kind_mask.expect("kind mask from the ITER_* enum");
+        assert_eq!(mask, 2 | 4 | 8);
+        assert_eq!(btf.enum_value("ITER_IOVEC").expect("ITER_IOVEC present"), 0);
+        // The stored field is `flavour | WRITE(1)`; masking the direction bit recovers the flavour.
+        assert_eq!(1 & mask, 0, "write IOVEC (0|1) resolves to ITER_IOVEC");
+        assert_eq!(5 & mask, 4, "write BVEC (4|1) resolves to ITER_BVEC");
+    }
+
+    /// Minimal BTF: `struct iov_iter { int type; size_t iov_offset; void *iov; size_t count; }`
+    /// plus an anonymous flavour enum, matching the pre-5.14 layout.
+    fn build_pre514_iov_iter_btf() -> Vec<u8> {
+        let mut strings = vec![0u8];
+        let intern = |s: &str, strings: &mut Vec<u8>| {
+            let off = strings.len() as u32;
+            strings.extend_from_slice(s.as_bytes());
+            strings.push(0);
+            off
+        };
+        let n_iov_iter = intern("iov_iter", &mut strings);
+        let n_type = intern("type", &mut strings);
+        let n_iov_offset = intern("iov_offset", &mut strings);
+        let n_iov = intern("iov", &mut strings);
+        let n_count = intern("count", &mut strings);
+        let variants: [(&str, i32); 4] = [
+            ("ITER_IOVEC", 0),
+            ("ITER_KVEC", 2),
+            ("ITER_BVEC", 4),
+            ("ITER_PIPE", 8),
+        ];
+        let var_offs: Vec<u32> = variants
+            .iter()
+            .map(|(n, _)| intern(n, &mut strings))
+            .collect();
+
+        let mut types = Vec::new();
+        let btf_type = |name_off: u32, kind: u32, vlen: u32, size_or_type: u32| {
+            let info = (kind << 24) | (vlen & 0xffff);
+            [
+                name_off.to_le_bytes(),
+                info.to_le_bytes(),
+                size_or_type.to_le_bytes(),
+            ]
+            .concat()
+        };
+        // id 1: INT, size 8 (member element type).
+        types.extend_from_slice(&btf_type(0, INT_KIND, 0, 8));
+        types.extend_from_slice(&0u32.to_le_bytes());
+        // id 2: struct iov_iter, 4 members at 0/8/16/24.
+        types.extend_from_slice(&btf_type(n_iov_iter, KIND_STRUCT, 4, 32));
+        let member = |name_off: u32, bit_off: u32| {
+            [
+                name_off.to_le_bytes(),
+                1u32.to_le_bytes(),
+                bit_off.to_le_bytes(),
+            ]
+            .concat()
+        };
+        types.extend_from_slice(&member(n_type, 0));
+        types.extend_from_slice(&member(n_iov_offset, 64));
+        types.extend_from_slice(&member(n_iov, 128));
+        types.extend_from_slice(&member(n_count, 192));
+        // id 3: anonymous flavour enum.
+        types.extend_from_slice(&btf_type(0, KIND_ENUM, variants.len() as u32, 4));
+        for (off, (_, val)) in var_offs.iter().zip(variants) {
+            types.extend_from_slice(&off.to_le_bytes());
+            types.extend_from_slice(&val.to_le_bytes());
+        }
+
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&BTF_MAGIC.to_le_bytes());
+        blob.push(1);
+        blob.push(0);
+        blob.extend_from_slice(&24u32.to_le_bytes());
+        blob.extend_from_slice(&0u32.to_le_bytes());
+        blob.extend_from_slice(&(types.len() as u32).to_le_bytes());
+        blob.extend_from_slice(&(types.len() as u32).to_le_bytes());
+        blob.extend_from_slice(&(strings.len() as u32).to_le_bytes());
         blob.extend_from_slice(&types);
         blob.extend_from_slice(&strings);
         blob

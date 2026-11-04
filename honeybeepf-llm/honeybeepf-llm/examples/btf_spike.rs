@@ -22,6 +22,13 @@ fn main() {
     for (name, off) in &s.offsets {
         println!("FIELD ok    {name} = {off}");
     }
+    match &s.iter_kind {
+        Some((name, off)) => println!(
+            "FIELD ok    iov_iter kind -> {name} = {off} (mask {:#x})",
+            s.iter_kind_mask.unwrap_or(0)
+        ),
+        None => println!("FIELD MISS  iov_iter kind field (iter_type/type)"),
+    }
     match &s.payload {
         Some((name, off)) => println!("FIELD ok    iov_iter payload pointer -> {name} = {off}"),
         None => println!("FIELD MISS  iov_iter payload pointer"),
