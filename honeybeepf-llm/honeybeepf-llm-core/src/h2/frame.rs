@@ -7,19 +7,35 @@ pub const DEFAULT_MAX_FRAME_SIZE: u32 = 16_384;
 /// Largest header block kept; a larger one is reported as `HeadersTooLarge`.
 pub const MAX_HEADER_BLOCK: usize = 64 * 1024;
 
-const DATA: u8 = 0;
-const HEADERS: u8 = 1;
-const RST_STREAM: u8 = 3;
-const PUSH_PROMISE: u8 = 5;
-const GOAWAY: u8 = 7;
-const CONTINUATION: u8 = 9;
+/// A frame's type (RFC 9113 §6); an open set, since an unknown type is skipped, not rejected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FrameType(u8);
 
-const END_STREAM: u8 = 0x1;
-const END_HEADERS: u8 = 0x4;
-const PADDED: u8 = 0x8;
-const PRIORITY: u8 = 0x20;
+impl FrameType {
+    const DATA: Self = Self(0);
+    const HEADERS: Self = Self(1);
+    const RST_STREAM: Self = Self(3);
+    const PUSH_PROMISE: Self = Self(5);
+    const GOAWAY: Self = Self(7);
+    const CONTINUATION: Self = Self(9);
+}
 
-/// What a frame, or a piece of a DATA frame, carries; other frame types are skipped.
+/// A frame's flags byte; `has` tests one flag bit.
+#[derive(Clone, Copy, Debug)]
+struct Flags(u8);
+
+impl Flags {
+    const END_STREAM: u8 = 0x1;
+    const END_HEADERS: u8 = 0x4;
+    const PADDED: u8 = 0x8;
+    const PRIORITY: u8 = 0x20;
+
+    fn has(self, flag: u8) -> bool {
+        self.0 & flag != 0
+    }
+}
+
+/// An event the reader emits, not one per frame: a DATA frame yields several, most frame types none.
 #[non_exhaustive]
 #[derive(Debug, PartialEq, Eq)]
 pub enum Frame<'a> {
@@ -78,8 +94,8 @@ pub struct FrameReader {
     max_frame_size: u32,
     head: [u8; 9],
     head_len: usize,
-    kind: u8,
-    flags: u8,
+    kind: FrameType,
+    flags: Flags,
     stream: u32,
     /// Payload bytes of the current frame still due.
     left: usize,
@@ -113,8 +129,8 @@ impl FrameReader {
             max_frame_size: DEFAULT_MAX_FRAME_SIZE,
             head: [0; 9],
             head_len: 0,
-            kind: 0,
-            flags: 0,
+            kind: FrameType(0),
+            flags: Flags(0),
             stream: 0,
             left: 0,
             front: 0,
@@ -181,48 +197,66 @@ impl FrameReader {
     fn start_frame(&mut self, on: &mut impl FnMut(Frame<'_>)) {
         let h = self.head;
         let len = (usize::from(h[0]) << 16) | (usize::from(h[1]) << 8) | usize::from(h[2]);
-        let (kind, flags) = (h[3], h[4]);
+        let (kind, flags) = (FrameType(h[3]), Flags(h[4]));
         let stream = u32::from_be_bytes([h[5], h[6], h[7], h[8]]) & 0x7fff_ffff;
-        let padded = matches!(kind, DATA | HEADERS) && flags & PADDED != 0;
-        let priority = kind == HEADERS && flags & PRIORITY != 0;
+        let padded =
+            matches!(kind, FrameType::DATA | FrameType::HEADERS) && flags.has(Flags::PADDED);
+        let priority = kind == FrameType::HEADERS && flags.has(Flags::PRIORITY);
         let front = usize::from(padded) + if priority { 5 } else { 0 };
-        let in_block = self
-            .block
-            .is_some_and(|b| kind == CONTINUATION && stream == b.stream);
-        let broken = if len > self.max_frame_size as usize {
-            Some(Broken::TooLarge)
-        } else if self.block.is_some() != in_block || (kind == CONTINUATION && !in_block) {
-            Some(Broken::Continuation)
-        } else if matches!(kind, DATA | HEADERS | CONTINUATION) && stream == 0 {
-            Some(Broken::NoStream)
-        } else if kind == PUSH_PROMISE {
-            Some(Broken::PushPromise)
-        } else if front > len {
-            Some(Broken::BadPadding)
-        } else {
-            None
-        };
-        if let Some(why) = broken {
+        if let Err(why) = self.check_head(len, kind, stream, front) {
             self.state = State::Broken(why);
             return;
         }
         (self.kind, self.flags, self.stream) = (kind, flags, stream);
         (self.left, self.front, self.pad_due, self.pad) = (len, front, padded, 0);
-        if kind == HEADERS {
+        if kind == FrameType::HEADERS {
             self.buf.clear();
             self.block = Some(Block {
                 stream,
-                end_stream: flags & END_STREAM != 0,
+                end_stream: flags.has(Flags::END_STREAM),
                 too_large: false,
             });
         }
-        if kind == GOAWAY {
+        if kind == FrameType::GOAWAY {
             (self.ctrl, self.ctrl_len) = ([0; 4], 0);
         }
         self.state = State::Payload;
         if len == 0 {
             self.finish_frame(on);
         }
+    }
+
+    /// Head validity in rule order; the first rule a frame breaks names the break.
+    fn check_head(
+        &self,
+        len: usize,
+        kind: FrameType,
+        stream: u32,
+        front: usize,
+    ) -> Result<(), Broken> {
+        let in_block = self
+            .block
+            .is_some_and(|b| kind == FrameType::CONTINUATION && stream == b.stream);
+        if len > self.max_frame_size as usize {
+            return Err(Broken::TooLarge);
+        }
+        if self.block.is_some() != in_block || (kind == FrameType::CONTINUATION && !in_block) {
+            return Err(Broken::Continuation);
+        }
+        if matches!(
+            kind,
+            FrameType::DATA | FrameType::HEADERS | FrameType::CONTINUATION
+        ) && stream == 0
+        {
+            return Err(Broken::NoStream);
+        }
+        if kind == FrameType::PUSH_PROMISE {
+            return Err(Broken::PushPromise);
+        }
+        if front > len {
+            return Err(Broken::BadPadding);
+        }
+        Ok(())
     }
 
     /// Reads payload bytes from `input`; returns how many it used.
@@ -248,17 +282,17 @@ impl FrameReader {
         let n = content.min(input.len() - used);
         let bytes = &input[used..used + n];
         match (self.kind, &mut self.block) {
-            (DATA, _) if n > 0 => on(Frame::Data {
+            (FrameType::DATA, _) if n > 0 => on(Frame::Data {
                 stream: self.stream,
                 data: bytes,
             }),
-            (HEADERS | CONTINUATION, Some(b)) if !b.too_large => {
+            (FrameType::HEADERS | FrameType::CONTINUATION, Some(b)) if !b.too_large => {
                 b.too_large = self.buf.len() + n > MAX_HEADER_BLOCK;
                 if !b.too_large {
                     self.buf.extend_from_slice(bytes);
                 }
             }
-            (GOAWAY, _) if n > 0 && self.ctrl_len < 4 => {
+            (FrameType::GOAWAY, _) if n > 0 && self.ctrl_len < 4 => {
                 let take = n.min(4 - self.ctrl_len);
                 self.ctrl[self.ctrl_len..self.ctrl_len + take].copy_from_slice(&bytes[..take]);
                 self.ctrl_len += take;
@@ -277,23 +311,25 @@ impl FrameReader {
 
     fn finish_frame(&mut self, on: &mut impl FnMut(Frame<'_>)) {
         self.state = State::Head;
-        if self.kind == DATA && self.flags & END_STREAM != 0 {
+        if self.kind == FrameType::DATA && self.flags.has(Flags::END_STREAM) {
             on(Frame::StreamEnd {
                 stream: self.stream,
             });
         }
-        if self.kind == RST_STREAM && self.stream != 0 {
+        if self.kind == FrameType::RST_STREAM && self.stream != 0 {
             on(Frame::Reset {
                 stream: self.stream,
             });
         }
         // A GOAWAY shorter than its last-stream-id is malformed; dropping it avoids acting on a garbage id.
-        if self.kind == GOAWAY && self.ctrl_len == 4 {
+        if self.kind == FrameType::GOAWAY && self.ctrl_len == 4 {
             on(Frame::Goaway {
                 last_stream: u32::from_be_bytes(self.ctrl) & 0x7fff_ffff,
             });
         }
-        if !matches!(self.kind, HEADERS | CONTINUATION) || self.flags & END_HEADERS == 0 {
+        if !matches!(self.kind, FrameType::HEADERS | FrameType::CONTINUATION)
+            || !self.flags.has(Flags::END_HEADERS)
+        {
             return;
         }
         if let Some(b) = self.block.take() {
