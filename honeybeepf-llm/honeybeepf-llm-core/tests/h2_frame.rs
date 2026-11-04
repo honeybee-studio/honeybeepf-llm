@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use honeybeepf_llm_core::h2::frame::{Broken, Frame, FrameReader, PREFACE};
+use honeybeepf_llm_core::h2::frame::{Broken, Frame, FrameReader, PREFACE, looks_like_http2};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Ev {
@@ -282,6 +282,19 @@ fn resync_waits_for_three_heads_and_does_not_resume_on_two() {
     // Two valid frames are not a run, so nothing is read and the reader is still scanning, not broken.
     let two = [frame(0, 0x1, 1, b"aa"), frame(0, 0x1, 3, b"bb")].concat();
     assert_eq!(after_resync(&two, usize::MAX), (vec![], None));
+}
+
+#[test]
+fn looks_like_http2_spots_a_frame_run_but_not_http11_or_the_preface() {
+    // Three chaining frame heads read as HTTP/2 (how a mid-stream join is recognized).
+    assert!(looks_like_http2(&run_of_three()));
+    // HTTP/1.1 request bytes never form a run of frame heads (their ASCII reads as an oversized frame).
+    let post =
+        b"POST /v1/chat/completions HTTP/1.1\r\nhost: api.openai.com\r\n\r\n{\"model\":\"x\"}";
+    assert!(!looks_like_http2(post));
+    // The preface itself is not frames, and nothing is not a run.
+    assert!(!looks_like_http2(PREFACE));
+    assert!(!looks_like_http2(b""));
 }
 
 #[test]

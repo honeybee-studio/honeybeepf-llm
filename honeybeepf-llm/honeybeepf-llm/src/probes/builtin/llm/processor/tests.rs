@@ -1463,3 +1463,43 @@ fn h2_loss_marks_the_previous_direction_when_a_new_call_interrupts_it() {
     p.frag_dir = LlmDirection::Read;
     assert!(p.h2_loss(LlmDirection::Write, 0, false, false));
 }
+
+/// A minimal HTTP/2 frame (9-byte header + payload), for mid-stream-join detection tests.
+fn h2_frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
+    let len = (payload.len() as u32).to_be_bytes();
+    [&len[1..], &[kind, flags], &stream.to_be_bytes(), payload].concat()
+}
+
+#[test]
+fn an_http11_request_is_not_misclassified_as_http2_midjoin() {
+    // The h1 request+response records normally; the mid-join frame probe never fires on HTTP/1.1 bytes,
+    // which start with an uppercase method, so the connection stays HTTP/1.1.
+    let mut p = StreamProcessor::new();
+    let out = outcomes(&mut p, &h1_response(50), None);
+    assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+}
+
+#[test]
+fn a_connection_joined_mid_stream_is_detected_and_records_from_data() {
+    // No preface: three client frame heads classify the connection as HTTP/2 (joined mid-stream). The
+    // request headers were missed, so the response stream is tracked on its DATA and its usage read there.
+    let mut p = StreamProcessor::new();
+    let client = [
+        h2_frame(0, 0, 1, b"aa"),
+        h2_frame(0, 0, 1, b"bb"),
+        h2_frame(0, 0, 1, b"cc"),
+    ]
+    .concat();
+    let fed = send(&mut p, LlmDirection::Write, &client, None);
+    assert!(fed.iter().all(|o| *o == Outcome::Pending), "{fed:?}");
+    let json = b"{\"model\":\"gpt-4o\",\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}";
+    let third = json.len() / 3;
+    let server = [
+        h2_frame(0, 0, 1, &json[..third]),
+        h2_frame(0, 0, 1, &json[third..2 * third]),
+        h2_frame(0, 0x1, 1, &json[2 * third..]),
+    ]
+    .concat();
+    let out = send(&mut p, LlmDirection::Read, &server, None);
+    assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+}

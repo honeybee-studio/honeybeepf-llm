@@ -20,7 +20,7 @@ mod sse_stream;
 pub use body::BackgroundState;
 pub use h1::{Http11Parser, ResponseProgress};
 pub use h2::Http2Parser;
-pub(crate) use h2::{H2Conn, H2Event, starts_preface};
+pub(crate) use h2::{H2Conn, H2Event, looks_like_http2, starts_preface};
 pub use json_ends::JsonEnds;
 pub use provider_report::report_provider_config;
 pub use sse_stream::SseStream;
