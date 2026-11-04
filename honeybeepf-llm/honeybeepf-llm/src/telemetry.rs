@@ -72,6 +72,7 @@ pub struct HoneyBeeMetrics {
     pub llm_reasoning_tokens_total: Counter<u64>,
     pub llm_latency_seconds: Histogram<f64>,
     pub llm_responses_unparsed_total: Counter<u64>,
+    pub llm_h2_resynced_total: Counter<u64>,
     pub llm_cost_usd_total: Counter<f64>,
     pub llm_unpriced_tokens_total: Counter<u64>,
     /// Swapped whole when the user price file changes, so a call never waits on a reload.
@@ -174,6 +175,11 @@ impl HoneyBeeMetrics {
                 .u64_counter("llm_responses_unparsed_total")
                 .with_description("LLM calls not recorded because no usage could be read, by reason")
                 .with_unit("responses")
+                .build(),
+            llm_h2_resynced_total: meter
+                .u64_counter("llm_h2_resynced_total")
+                .with_description("HTTP/2 directions re-anchored after a capture gap")
+                .with_unit("events")
                 .build(),
             // No unit: the Prometheus exporter would append it to the name.
             llm_cost_usd_total: meter
@@ -292,6 +298,10 @@ impl HoneyBeeMetrics {
     fn record_unparsed(&self, reason: &'static str, mut attrs: Vec<KeyValue>) {
         attrs.push(KeyValue::new("reason", reason));
         self.llm_responses_unparsed_total.add(1, &attrs);
+    }
+
+    fn record_resynced(&self, attrs: Vec<KeyValue>) {
+        self.llm_h2_resynced_total.add(1, &attrs);
     }
 }
 
@@ -651,6 +661,19 @@ pub fn record_llm_unparsed(
         push_pod_attrs(&mut attrs, pod_info);
 
         m.record_unparsed(reason, attrs);
+    }
+}
+
+/// Count an HTTP/2 direction re-anchoring its frame reader after a capture gap.
+pub fn record_h2_resynced(#[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>) {
+    if let Some(m) = metrics() {
+        #[allow(unused_mut)]
+        let mut attrs = Vec::new();
+
+        #[cfg(feature = "k8s")]
+        push_pod_attrs(&mut attrs, pod_info);
+
+        m.record_resynced(attrs);
     }
 }
 
