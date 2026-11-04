@@ -42,7 +42,7 @@ impl Probe for ProcessLifecycleProbe {
         spawn_ringbuf_handler(
             bpf,
             "PROCESS_EXIT_EVENTS",
-            move |event: ProcessExitEvent| {
+            move |event: &ProcessExitEvent| {
                 let comm = std::str::from_utf8(&event.comm)
                     .unwrap_or("<invalid>")
                     .trim_matches(char::from(0));

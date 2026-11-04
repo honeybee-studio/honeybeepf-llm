@@ -15,6 +15,8 @@ use aya::{
     programs::{FEntry, KProbe, TracePoint, UProbe, uprobe::UProbeLinkId},
 };
 use honeybeepf_llm_common::{ExecEvent, LibOpenEvent};
+use std::os::unix::io::AsRawFd;
+
 use log::{info, warn};
 use tokio::sync::Notify;
 
@@ -103,6 +105,8 @@ pub struct TracepointConfig<'a> {
 }
 
 pub const POLL_INTERVAL_MS: u64 = 10;
+/// How long (ms) a ring-buffer reader blocks in poll() before re-checking the shutdown flag.
+const POLL_WAIT_MS: libc::c_int = 1000;
 const MAX_EXEC_QUEUE_SIZE: usize = 1024;
 
 /// Shared queue of PIDs from exec events.
@@ -146,28 +150,50 @@ pub fn attach_tracepoint(bpf: &mut Ebpf, config: TracepointConfig) -> Result<boo
 
 pub fn spawn_ringbuf_handler<T, F>(bpf: &mut Ebpf, map_name: &str, mut handler: F) -> Result<()>
 where
-    T: Copy + Send + 'static,
-    F: FnMut(T) + Send + 'static,
+    T: aya::Pod,
+    F: FnMut(&T) + Send + 'static,
 {
     let mut ring_buf = RingBuf::try_from(bpf.take_map(map_name).context("Failed to get map")?)?;
     let shutdown = shutdown_flag();
+    let fd = ring_buf.as_raw_fd();
 
+    // Own thread, not a tokio worker. Under load: drain, then sleep 10 ms so it wakes per batch, not per
+    // event. Idle: block on the ring fd with poll(), so no CPU and no periodic wake-up.
     tokio::task::spawn_blocking(move || {
         while !shutdown.load(Ordering::Relaxed) {
-            let mut has_work = false;
-            while let Some(item) = ring_buf.next() {
-                has_work = true;
-                if item.len() >= std::mem::size_of::<T>() {
-                    let event = unsafe { (item.as_ptr() as *const T).read_unaligned() };
-                    handler(event);
-                }
-            }
-            if !has_work {
+            if drain_ring(&mut ring_buf, &mut handler) > 0 {
                 std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
+            } else {
+                let mut pfd = libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: one valid pollfd for the duration of the call; poll reads fd/events, writes revents.
+                // The timeout bounds how long an idle reader waits before re-checking the shutdown flag.
+                unsafe {
+                    libc::poll(&mut pfd, 1, POLL_WAIT_MS);
+                }
             }
         }
     });
     Ok(())
+}
+
+/// Read every record waiting in the ring buffer in place, handing each to `handler` without copying it out;
+/// returns how many records were drained (0 means the ring was empty).
+fn drain_ring<T: aya::Pod>(ring_buf: &mut RingBuf<MapData>, handler: &mut impl FnMut(&T)) -> usize {
+    let mut drained = 0;
+    while let Some(item) = ring_buf.next() {
+        drained += 1;
+        if item.len() >= std::mem::size_of::<T>() {
+            // SAFETY: BPF ring-buffer records are 8-byte aligned and `T: aya::Pod` (repr(C), every byte
+            // pattern valid); the length is checked, so the record is reborrowed in place.
+            let event: &T = unsafe { &*(item.as_ptr() as *const T) };
+            handler(event);
+        }
+    }
+    drained
 }
 
 /// Attach a uprobe at a file offset in a library or executable.
@@ -253,7 +279,7 @@ pub fn setup_exec_watch(bpf: &mut Ebpf) -> Result<(ExecPidQueue, ExecNotify)> {
     let handler_queue = queue.clone();
     let handler_notify = notify.clone();
 
-    spawn_ringbuf_handler(bpf, "EXEC_EVENTS", move |event: ExecEvent| {
+    spawn_ringbuf_handler(bpf, "EXEC_EVENTS", move |event: &ExecEvent| {
         let mut q = handler_queue.lock().unwrap_or_else(|e| e.into_inner());
         // Cap queue to avoid unbounded growth under extreme exec rates
         if q.len() < MAX_EXEC_QUEUE_SIZE {
@@ -305,7 +331,7 @@ pub fn setup_lib_open_watch(bpf: &mut Ebpf) -> Result<(LibOpenQueue, ExecNotify,
     let handler_notify = notify.clone();
     let own_pid = std::process::id();
 
-    spawn_ringbuf_handler(bpf, "LIB_OPEN_EVENTS", move |event: LibOpenEvent| {
+    spawn_ringbuf_handler(bpf, "LIB_OPEN_EVENTS", move |event: &LibOpenEvent| {
         // aya opens the library file itself while attaching.
         if event.pid == own_pid {
             return;
