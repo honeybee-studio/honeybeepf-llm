@@ -1,7 +1,7 @@
 //! One HTTP/2 connection: frames demultiplexed into streams, each direction's HPACK table its own.
 
 use std::collections::BTreeMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use honeybeepf_llm_core::h2::frame::{Frame, FrameReader, PREFACE};
 use honeybeepf_llm_core::h2::hpack::{Decoder, Text};
@@ -9,17 +9,31 @@ use honeybeepf_llm_core::types::{LlmDirection, UsageInfo};
 
 use super::super::registry::PROVIDER_REGISTRY;
 use super::stream::H2Stream;
+use crate::probes::builtin::llm::processor::UnparsedReason;
 
 /// Streams tracked at once; a connection rarely runs many in parallel (SETTINGS_MAX_CONCURRENT_STREAMS ~100).
 const MAX_STREAMS: usize = 128;
 /// Response body bytes buffered across a connection's streams; past it, further DATA is dropped so that
 /// many large responses on one connection cannot each reach the per-stream cap.
 const CONN_BUFFER_CAP: usize = 32 * 1024 * 1024;
+/// A stream whose response began but then saw no frame for this long on a still-live connection is dropped
+/// and counted, so a stalled response frees its buffered bytes instead of being held forever. A stream still
+/// awaiting its first response byte is left alone (a slow time-to-first-byte is not an abandoned stream).
+const STREAM_IDLE: Duration = Duration::from_secs(300);
 
 /// What feeding a connection produced, for the processor to log and record.
 pub(crate) enum H2Event {
-    Detected { path: String },
-    Recorded { usage: UsageInfo, start: Instant },
+    Detected {
+        path: String,
+    },
+    Recorded {
+        usage: UsageInfo,
+        start: Instant,
+    },
+    /// A tracked stream ended without usage (reset, connection going away, idle, or over a cap).
+    Unparsed {
+        reason: UnparsedReason,
+    },
 }
 
 /// A frame reader and the HPACK table of one direction's encoder.
@@ -72,6 +86,15 @@ impl H2Conn {
         reader.read(data, |frame| {
             on_frame(frame, request, decoder, streams, buffered, &mut on)
         });
+        // A live connection's traffic is the only clock here, so drop idle streams as it flows.
+        if !streams.is_empty() {
+            sweep_idle(streams, buffered, Instant::now(), &mut on);
+        }
+    }
+
+    /// Tracked streams still open, each a detected call with no usage yet; counted unparsed at close.
+    pub(crate) fn open_streams(&self) -> usize {
+        self.streams.len()
     }
 }
 
@@ -129,13 +152,69 @@ fn on_frame(
                         usage,
                         start: s.start(),
                     });
+                } else if s.over_limit() {
+                    on(H2Event::Unparsed {
+                        reason: UnparsedReason::ResponseTooLarge,
+                    });
                 }
                 *buffered = buffered.saturating_sub(s.held());
             }
             streams.remove(&stream);
         }
+        // A server RST_STREAM rejects the request, so the stream ended with no usage. A client RST on its
+        // own stream is often routine cleanup after the response (undici does this), so it is left alone;
+        // a real client abort is then caught by the idle sweep or at close.
+        Frame::Reset { stream } if !request => drop_stream(stream, streams, buffered, on),
+        // Only the server's GOAWAY bounds our client-initiated streams (a client GOAWAY's last-stream-id
+        // names server-pushed streams, which we never track). Streams above it are abandoned; the rest may
+        // still finish.
+        Frame::Goaway { last_stream } if !request => {
+            let gone: Vec<u32> = streams
+                .range(last_stream + 1..)
+                .map(|(id, _)| *id)
+                .collect();
+            for stream in gone {
+                drop_stream(stream, streams, buffered, on);
+            }
+        }
         // Request DATA and END_STREAM carry nothing to record; `Frame` is non-exhaustive.
         _ => {}
+    }
+}
+
+/// Drop every stream whose response began but then stalled since before `now - STREAM_IDLE`, counting each
+/// as closed. A stream still awaiting its first response byte is kept, so a slow call is not lost.
+fn sweep_idle(
+    streams: &mut BTreeMap<u32, H2Stream>,
+    buffered: &mut usize,
+    now: Instant,
+    on: &mut impl FnMut(H2Event),
+) {
+    streams.retain(|_, s| {
+        let keep = !s.started() || now.duration_since(s.last()) < STREAM_IDLE;
+        if !keep {
+            *buffered = buffered.saturating_sub(s.held());
+            on(H2Event::Unparsed {
+                reason: UnparsedReason::ConnectionClosed,
+            });
+        }
+        keep
+    });
+}
+
+/// Drop a tracked stream that ended before its usage was read, returning its bytes to the budget and
+/// counting the call as closed. An untracked stream (never a provider POST) is ignored.
+fn drop_stream(
+    stream: u32,
+    streams: &mut BTreeMap<u32, H2Stream>,
+    buffered: &mut usize,
+    on: &mut impl FnMut(H2Event),
+) {
+    if let Some(s) = streams.remove(&stream) {
+        *buffered = buffered.saturating_sub(s.held());
+        on(H2Event::Unparsed {
+            reason: UnparsedReason::ConnectionClosed,
+        });
     }
 }
 
@@ -203,6 +282,7 @@ pub(crate) fn starts_preface(data: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
 
     /// A header field as a literal without indexing, new name, not Huffman-coded (names/values < 127 B).
     fn lit(name: &[u8], value: &[u8]) -> Vec<u8> {
@@ -311,6 +391,7 @@ mod tests {
             let mut on = |event| match event {
                 H2Event::Detected { .. } => detected += 1,
                 H2Event::Recorded { .. } => recorded += 1,
+                H2Event::Unparsed { .. } => {}
             };
             for chunk in c2s.chunks(step) {
                 conn.feed(LlmDirection::Write, chunk, &mut on);
@@ -340,5 +421,120 @@ mod tests {
                 assert_eq!(counts(&c2s, &s2c, step), want, "{name} step {step}");
             }
         }
+    }
+
+    /// Drives a connection (preface + a provider request on stream 1), then the given reads, returning
+    /// (recorded, closed, too_large) counts.
+    fn drive(reads: &[(LlmDirection, Vec<u8>)]) -> (usize, usize, usize) {
+        let mut conn = H2Conn::new();
+        let (mut rec, mut closed, mut big) = (0, 0, 0);
+        {
+            let mut on = |event| match event {
+                H2Event::Recorded { .. } => rec += 1,
+                H2Event::Unparsed {
+                    reason: UnparsedReason::ResponseTooLarge,
+                } => big += 1,
+                H2Event::Unparsed { .. } => closed += 1,
+                H2Event::Detected { .. } => {}
+            };
+            conn.feed(LlmDirection::Write, PREFACE, &mut on);
+            conn.feed(LlmDirection::Write, &req(1), &mut on);
+            for (dir, bytes) in reads {
+                conn.feed(*dir, bytes, &mut on);
+            }
+        }
+        (rec, closed, big)
+    }
+
+    #[test]
+    fn a_reset_stream_is_counted_closed_not_recorded() {
+        let rst = frame(3, 0, 1, b"\0\0\0\x08");
+        assert_eq!(drive(&[(LlmDirection::Read, rst)]), (0, 1, 0));
+    }
+
+    #[test]
+    fn goaway_closes_streams_above_the_last_and_spares_those_at_or_below() {
+        let goaway = || frame(7, 0, 0, b"\0\0\0\x01\0\0\0\0");
+        // Stream 3 is above last_stream=1, so it is closed; stream 1 is spared.
+        assert_eq!(
+            drive(&[
+                (LlmDirection::Write, req(3)),
+                (LlmDirection::Read, goaway()),
+            ]),
+            (0, 1, 0)
+        );
+        // The spared stream 1 can still finish and record after the GOAWAY.
+        let head = frame(1, 0x4, 1, &lit(b":status", b"200"));
+        let body = frame(0, 0x1, 1, JSON);
+        assert_eq!(
+            drive(&[
+                (LlmDirection::Write, req(3)),
+                (LlmDirection::Read, goaway()),
+                (LlmDirection::Read, head),
+                (LlmDirection::Read, body),
+            ]),
+            (1, 1, 0)
+        );
+    }
+
+    #[test]
+    fn a_response_over_the_cap_is_counted_too_large_at_its_end() {
+        let head = frame(1, 0x4, 1, &lit(b":status", b"200"));
+        let chunk = frame(0, 0, 1, &[b'a'; 16 * 1024]);
+        let n = MAX_RESPONSE_BUFFER_SIZE / (16 * 1024) + 1;
+        let mut reads = vec![(LlmDirection::Read, head)];
+        reads.extend(std::iter::repeat_n((LlmDirection::Read, chunk), n));
+        reads.push((LlmDirection::Read, frame(0, 0x1, 1, b"")));
+        assert_eq!(drive(&reads), (0, 0, 1));
+    }
+
+    /// Opens stream 1 and feeds it `response` reads, returning the live `H2Conn` for an idle-sweep check.
+    fn conn_with_open_stream(response: &[&[u8]]) -> H2Conn {
+        let mut conn = H2Conn::new();
+        let mut on = |_| {};
+        conn.feed(LlmDirection::Write, PREFACE, &mut on);
+        conn.feed(LlmDirection::Write, &req(1), &mut on);
+        for r in response {
+            conn.feed(LlmDirection::Read, r, &mut on);
+        }
+        conn
+    }
+
+    #[test]
+    fn a_stalled_response_is_swept_and_counted_closed() {
+        // A response that began (DATA seen) then stopped is abandoned; sweeping it frees its buffered bytes.
+        let head = frame(1, 0x4, 1, &lit(b":status", b"200"));
+        let part = frame(0, 0, 1, b"{\"partial\":");
+        let mut conn = conn_with_open_stream(&[&head, &part]);
+        let mut closed = 0;
+        {
+            let mut on = |e| {
+                if matches!(e, H2Event::Unparsed { .. }) {
+                    closed += 1;
+                }
+            };
+            assert_eq!(conn.open_streams(), 1);
+            // A test cannot wait out the idle window, so sweep with a clock past it directly.
+            let future = Instant::now() + STREAM_IDLE + Duration::from_secs(1);
+            sweep_idle(&mut conn.streams, &mut conn.buffered, future, &mut on);
+        }
+        assert_eq!((conn.open_streams(), closed, conn.buffered), (0, 1, 0));
+    }
+
+    #[test]
+    fn a_stream_awaiting_its_first_byte_is_not_swept() {
+        // A slow time-to-first-byte must not be mistaken for an abandoned stream, or its response is lost.
+        let mut conn = conn_with_open_stream(&[]);
+        let mut closed = 0;
+        {
+            let mut on = |e| {
+                if matches!(e, H2Event::Unparsed { .. }) {
+                    closed += 1;
+                }
+            };
+            let future = Instant::now() + STREAM_IDLE + Duration::from_secs(1);
+            sweep_idle(&mut conn.streams, &mut conn.buffered, future, &mut on);
+        }
+        assert_eq!((conn.open_streams(), closed), (1, 0));
     }
 }

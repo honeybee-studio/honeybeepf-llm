@@ -267,6 +267,14 @@ impl StreamProcessor {
                 );
                 outcome = Outcome::Recorded;
             }
+            http::H2Event::Unparsed { reason } => {
+                outcome = Self::count_unparsed(
+                    pid,
+                    reason,
+                    #[cfg(feature = "k8s")]
+                    pod_info.as_ref(),
+                );
+            }
         });
         outcome
     }
@@ -277,10 +285,20 @@ impl StreamProcessor {
         pid: u32,
         #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
     ) -> Outcome {
-        // HTTP/2 streams still open at close are not yet counted as unparsed (follow-up).
-        if matches!(self.state, ProcessorState::Http2(_)) {
+        // Each HTTP/2 stream still open at close was a detected call that never reported usage.
+        if let ProcessorState::Http2(conn) = &self.state {
+            let open = conn.open_streams();
             self.state = ProcessorState::Finished;
-            return Outcome::Pending;
+            let mut outcome = Outcome::Pending;
+            for _ in 0..open {
+                outcome = Self::count_unparsed(
+                    pid,
+                    UnparsedReason::ConnectionClosed,
+                    #[cfg(feature = "k8s")]
+                    pod_info,
+                );
+            }
+            return outcome;
         }
         self.drop_response(
             pid,
