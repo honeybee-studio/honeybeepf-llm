@@ -21,22 +21,27 @@ fn frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
     [&len[1..], &[kind, flags], &stream.to_be_bytes(), payload].concat()
 }
 
+/// Record one frame as an event; consecutive DATA of one stream are merged.
+fn push_ev(evs: &mut Vec<Ev>, f: Frame<'_>) {
+    match (f, evs.last_mut()) {
+        (Frame::Data { stream, data }, Some(Ev::Data(s, d))) if *s == stream => {
+            d.extend_from_slice(data)
+        }
+        (Frame::Data { stream, data }, _) => evs.push(Ev::Data(stream, data.to_vec())),
+        (Frame::Headers { stream, block }, _) => evs.push(Ev::Headers(stream, block.to_vec())),
+        (Frame::HeadersTooLarge { stream }, _) => evs.push(Ev::BlockTooLarge(stream)),
+        (Frame::StreamEnd { stream }, _) => evs.push(Ev::End(stream)),
+        (Frame::Reset { stream }, _) => evs.push(Ev::Reset(stream)),
+        (Frame::Goaway { last_stream }, _) => evs.push(Ev::Goaway(last_stream)),
+        (other, _) => panic!("unexpected {other:?}"),
+    }
+}
+
 /// Events from the pieces fed in order; consecutive DATA of one stream merged.
 fn read_pieces<'a>(mut r: FrameReader, pieces: impl IntoIterator<Item = &'a [u8]>) -> Read {
     let mut evs = Vec::new();
     for piece in pieces {
-        r.read(piece, |f| match (f, evs.last_mut()) {
-            (Frame::Data { stream, data }, Some(Ev::Data(s, d))) if *s == stream => {
-                d.extend_from_slice(data)
-            }
-            (Frame::Data { stream, data }, _) => evs.push(Ev::Data(stream, data.to_vec())),
-            (Frame::Headers { stream, block }, _) => evs.push(Ev::Headers(stream, block.to_vec())),
-            (Frame::HeadersTooLarge { stream }, _) => evs.push(Ev::BlockTooLarge(stream)),
-            (Frame::StreamEnd { stream }, _) => evs.push(Ev::End(stream)),
-            (Frame::Reset { stream }, _) => evs.push(Ev::Reset(stream)),
-            (Frame::Goaway { last_stream }, _) => evs.push(Ev::Goaway(last_stream)),
-            (other, _) => panic!("unexpected {other:?}"),
-        });
+        r.read(piece, |f| push_ev(&mut evs, f));
     }
     (evs, r.broken())
 }
@@ -225,4 +230,72 @@ fn test_recorded_connections_read_into_their_streams_at_any_split() {
             }
         }
     }
+}
+
+/// Events from `post` fed in `step`-byte chunks after a `resync()` on a fresh server reader.
+fn after_resync(post: &[u8], step: usize) -> Read {
+    let mut r = FrameReader::server();
+    r.resync();
+    let mut evs = Vec::new();
+    for chunk in post.chunks(step.max(1)) {
+        r.read(chunk, |f| push_ev(&mut evs, f));
+    }
+    (evs, r.broken())
+}
+
+/// Three DATA frames on stream 1, END_STREAM on the last: a run that re-anchors the reader.
+fn run_of_three() -> Vec<u8> {
+    [
+        frame(0, 0, 1, b"aa"),
+        frame(0, 0, 1, b"bb"),
+        frame(0, 0x1, 1, b"cc"),
+    ]
+    .concat()
+}
+
+#[test]
+fn resync_reads_frames_after_a_run_of_three_heads_at_any_split() {
+    let d = |s: &[u8]| s.to_vec();
+    let post = run_of_three();
+    let want: Read = (vec![Ev::Data(1, d(b"aabbcc")), Ev::End(1)], None);
+    for step in [1usize, 3, post.len()] {
+        assert_eq!(after_resync(&post, step), want, "step {step}");
+    }
+}
+
+#[test]
+fn resync_skips_a_lone_head_that_does_not_start_a_run() {
+    let d = |s: &[u8]| s.to_vec();
+    // A plausible DATA head claiming 1000 payload bytes that never follow: the scanner must not resume on
+    // it, but skip to the real run after it, recording nothing from the dangling head.
+    let big = 1000u32.to_be_bytes();
+    let dangling = [&big[1..], &[0, 0], &1u32.to_be_bytes()].concat();
+    let post = [&dangling[..], &run_of_three()].concat();
+    let want: Read = (vec![Ev::Data(1, d(b"aabbcc")), Ev::End(1)], None);
+    for step in [1usize, post.len()] {
+        assert_eq!(after_resync(&post, step), want, "step {step}");
+    }
+}
+
+#[test]
+fn resync_waits_for_three_heads_and_does_not_resume_on_two() {
+    // Two valid frames are not a run, so nothing is read and the reader is still scanning, not broken.
+    let two = [frame(0, 0x1, 1, b"aa"), frame(0, 0x1, 3, b"bb")].concat();
+    assert_eq!(after_resync(&two, usize::MAX), (vec![], None));
+}
+
+#[test]
+fn resync_recovers_a_reader_that_broke_on_a_gap() {
+    let d = |s: &[u8]| s.to_vec();
+    // A CONTINUATION with no HEADERS breaks the reader; resync then re-anchors on a valid run.
+    let mut r = FrameReader::server();
+    r.read(&frame(9, 0x4, 1, b"x"), |_| {});
+    assert_eq!(r.broken(), Some(Broken::Continuation));
+    r.resync();
+    let mut evs = Vec::new();
+    r.read(&run_of_three(), |f| push_ev(&mut evs, f));
+    assert_eq!(
+        (evs, r.broken()),
+        (vec![Ev::Data(1, d(b"aabbcc")), Ev::End(1)], None)
+    );
 }

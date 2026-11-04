@@ -14,9 +14,13 @@ struct FrameType(u8);
 impl FrameType {
     const DATA: Self = Self(0);
     const HEADERS: Self = Self(1);
+    const PRIORITY: Self = Self(2);
     const RST_STREAM: Self = Self(3);
+    const SETTINGS: Self = Self(4);
     const PUSH_PROMISE: Self = Self(5);
+    const PING: Self = Self(6);
     const GOAWAY: Self = Self(7);
+    const WINDOW_UPDATE: Self = Self(8);
     const CONTINUATION: Self = Self(9);
 }
 
@@ -76,7 +80,23 @@ enum State {
     Preface(usize),
     Head,
     Payload,
+    /// Re-anchoring after a gap: buffering bytes until a run of valid frame heads is found.
+    Scan,
     Broken(Broken),
+}
+
+/// Whether a scan offset begins a run of three chaining valid heads.
+enum Candidate {
+    Anchored,
+    Rejected,
+    NeedMore,
+}
+
+/// A frame head read at a scan offset: valid with its payload length, malformed, or short of 9 bytes.
+enum HeadScan {
+    Ok(usize),
+    Bad,
+    Short,
 }
 
 /// A header block waiting for its END_HEADERS.
@@ -111,6 +131,10 @@ pub struct FrameReader {
     /// First payload bytes of a GOAWAY (its last-stream-id), gathered across reads.
     ctrl: [u8; 4],
     ctrl_len: usize,
+    /// Bytes buffered while re-anchoring after a gap; empty except during a resync.
+    scan: Vec<u8>,
+    /// First `scan` offset not yet ruled out as the start of a frame-head run.
+    scan_from: usize,
 }
 
 impl FrameReader {
@@ -140,6 +164,8 @@ impl FrameReader {
             buf: Vec::new(),
             ctrl: [0; 4],
             ctrl_len: 0,
+            scan: Vec::new(),
+            scan_from: 0,
         }
     }
 
@@ -155,11 +181,33 @@ impl FrameReader {
         }
     }
 
+    /// Recover after a gap in this direction: drop any frame in progress and re-anchor at the next run of
+    /// three chaining valid heads, so a lost HEADERS cannot silently desync the rest of the stream for good.
+    pub fn resync(&mut self) {
+        self.block = None;
+        self.buf.clear();
+        self.scan.clear();
+        self.scan_from = 0;
+        self.state = State::Scan;
+    }
+
     /// Reads all of `input`, passing what it completes to `on` and keeping a cut frame for the next call.
-    pub fn read(&mut self, mut input: &[u8], mut on: impl FnMut(Frame<'_>)) {
+    pub fn read(&mut self, input: &[u8], mut on: impl FnMut(Frame<'_>)) {
+        // Once a resync re-anchors, `input` is repointed at the bytes kept past the anchor so they feed the
+        // normal state machine in this same call; `tail` owns them and outlives that borrow.
+        let mut tail: Vec<u8>;
+        let mut input: &[u8] = input;
         while !input.is_empty() {
             match self.state {
                 State::Broken(_) => return,
+                State::Scan => {
+                    self.scan_push(input);
+                    let Some(at) = self.anchor() else { return };
+                    self.scan.drain(..at);
+                    self.state = State::Head;
+                    tail = std::mem::take(&mut self.scan);
+                    input = &tail;
+                }
                 State::Preface(seen) => {
                     let n = (PREFACE.len() - seen).min(input.len());
                     if input[..n] != PREFACE[seen..seen + n] {
@@ -346,4 +394,92 @@ impl FrameReader {
             }
         }
     }
+
+    /// Append scan bytes, keeping only enough tail to hold three frames so the buffer stays bounded.
+    fn scan_push(&mut self, input: &[u8]) {
+        let cap = (2 * self.max_frame_size as usize + 27).min(256 * 1024);
+        self.scan.extend_from_slice(input);
+        if self.scan.len() > cap {
+            let drop = self.scan.len() - cap;
+            self.scan.drain(..drop);
+            self.scan_from = self.scan_from.saturating_sub(drop);
+        }
+    }
+
+    /// The offset of the first run of three chaining valid heads in `scan`, advancing `scan_from` past
+    /// offsets whose first head can never be valid.
+    fn anchor(&mut self) -> Option<usize> {
+        let mut at = self.scan_from;
+        while at + 9 <= self.scan.len() {
+            match self.chain_at(at) {
+                Candidate::Anchored => return Some(at),
+                Candidate::NeedMore => at += 1,
+                Candidate::Rejected => {
+                    if at == self.scan_from {
+                        self.scan_from += 1;
+                    }
+                    at += 1;
+                }
+            }
+        }
+        None
+    }
+
+    /// Whether three chaining valid heads start at `off`, or more bytes are needed to tell.
+    fn chain_at(&self, off: usize) -> Candidate {
+        let mut at = off;
+        for _ in 0..3 {
+            match self.head_scan(at) {
+                HeadScan::Bad => return Candidate::Rejected,
+                HeadScan::Short => return Candidate::NeedMore,
+                HeadScan::Ok(len) => at += 9 + len,
+            }
+        }
+        Candidate::Anchored
+    }
+
+    /// A frame head at `off`: its payload length if it is self-consistent, or whether bytes run short.
+    fn head_scan(&self, off: usize) -> HeadScan {
+        let Some(h) = self.scan.get(off..off + 9) else {
+            return HeadScan::Short;
+        };
+        let len = (usize::from(h[0]) << 16) | (usize::from(h[1]) << 8) | usize::from(h[2]);
+        let stream = u32::from_be_bytes([h[5], h[6], h[7], h[8]]) & 0x7fff_ffff;
+        if len <= self.max_frame_size as usize
+            && plausible_head(FrameType(h[3]), Flags(h[4]), stream)
+        {
+            HeadScan::Ok(len)
+        } else {
+            HeadScan::Bad
+        }
+    }
+}
+
+/// Whether a frame head's type, flags and stream id are self-consistent (RFC 9113 §6), so a chance byte
+/// pattern is unlikely to pass as a frame when re-anchoring. We only see client-initiated streams (odd ids)
+/// and connection frames (stream 0); server push is skipped, so its head is not a valid anchor either.
+fn plausible_head(kind: FrameType, flags: Flags, stream: u32) -> bool {
+    // (flag bits defined for the type, whether the stream id must be the connection's 0).
+    let (mask, on_connection): (u8, bool) = match kind {
+        FrameType::DATA => (Flags::END_STREAM | Flags::PADDED, false),
+        FrameType::HEADERS => (
+            Flags::END_STREAM | Flags::END_HEADERS | Flags::PADDED | Flags::PRIORITY,
+            false,
+        ),
+        FrameType::PRIORITY => (0, false),
+        FrameType::RST_STREAM => (0, false),
+        FrameType::SETTINGS => (0x1, true), // ACK
+        FrameType::PING => (0x1, true),     // ACK
+        FrameType::GOAWAY => (0, true),
+        // WINDOW_UPDATE is the one type valid on either a stream or the connection.
+        FrameType::WINDOW_UPDATE => return flags.0 == 0 && (stream == 0 || stream & 1 == 1),
+        FrameType::CONTINUATION => (Flags::END_HEADERS, false),
+        _ => return false,
+    };
+    let stream_ok = if on_connection {
+        stream == 0
+    } else {
+        stream != 0 && stream & 1 == 1
+    };
+    flags.0 & !mask == 0 && stream_ok
 }
