@@ -91,8 +91,8 @@ replayed against it as well. A blank cell was not checked.
 | Azure OpenAI | ✅ Chat Completions | ✅ Responses API | |
 | Google Vertex AI (Gemini) | ✅ | ✅ | |
 | Claude on Vertex AI, Google Cloud and Microsoft Foundry | ✅ | ✅ | ✅ read/write |
-| Amazon Bedrock Converse | ✅ | ❌ event-stream responses | ✅ read/write |
-| Amazon Bedrock InvokeModel (Anthropic Claude models) | ✅ | ❌ event-stream responses | ✅ read/write |
+| Amazon Bedrock Converse | ✅ | ✅ ConverseStream (event stream) | ✅ read/write |
+| Amazon Bedrock InvokeModel (Anthropic Claude models) | ✅ | ✅ InvokeModelWithResponseStream, every model | ✅ read/write |
 
 Compressed responses (`gzip`, `br`, `zstd`, `deflate`) are decoded, SSE included.
 

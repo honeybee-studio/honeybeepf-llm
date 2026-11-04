@@ -20,6 +20,7 @@ mod sse_stream;
 pub use body::BackgroundState;
 pub use h1::{Http11Parser, ResponseProgress};
 pub use h2::Http2Parser;
+pub(crate) use h2::{H2Conn, H2Event, starts_preface};
 pub use json_ends::JsonEnds;
 pub use provider_report::report_provider_config;
 pub use sse_stream::SseStream;
@@ -94,6 +95,36 @@ pub(crate) mod test_support {
             (":message-type", "event"),
         ];
         es_message(&headers, payload.as_bytes())
+    }
+
+    /// An invoke stream `chunk` wrapping one model-native event, with the padding Bedrock adds.
+    pub(crate) fn es_chunk(model_event: &str) -> Vec<u8> {
+        let bytes = base64(model_event.as_bytes());
+        es_event(
+            "chunk",
+            &format!("{{\"bytes\":\"{bytes}\",\"p\":\"abcdefghij\"}}"),
+        )
+    }
+
+    pub(crate) fn base64(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for group in bytes.chunks(3) {
+            let n = group
+                .iter()
+                .enumerate()
+                .fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+            for i in 0..4 {
+                let sextet = (n >> (18 - 6 * i)) & 63;
+                out.push(if i <= group.len() {
+                    char::from(ALPHABET[sextet as usize])
+                } else {
+                    '='
+                });
+            }
+        }
+        out
     }
 
     /// Usage Gemini sends when nothing was generated: no `candidatesTokenCount`.

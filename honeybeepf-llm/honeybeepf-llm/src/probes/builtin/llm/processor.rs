@@ -26,6 +26,8 @@ enum ProcessorState {
         start_time: Instant,
         parser: Box<dyn ProtocolParser>,
     },
+    /// An HTTP/2 connection: frames demultiplexed into streams, recorded per stream.
+    Http2(Box<http::H2Conn>),
     /// Finished or Invalid
     Finished,
 }
@@ -160,6 +162,27 @@ impl StreamProcessor {
         pid: u32,
         #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
     ) -> Outcome {
+        // HTTP/2 is a connection-level path: once the client preface is seen, every fragment feeds the
+        // frame readers and the HTTP/1.1 state machine below is left untouched.
+        if matches!(self.state, ProcessorState::Http2(_))
+            || matches!(self.state, ProcessorState::Detecting)
+                && direction == LlmDirection::Write
+                && offset == 0
+                && self.write_buf.is_empty()
+                && http::starts_preface(data)
+        {
+            if matches!(self.state, ProcessorState::Detecting) {
+                self.state = ProcessorState::Http2(Box::new(http::H2Conn::new()));
+            }
+            return self.feed_http2(
+                direction,
+                data,
+                pid,
+                #[cfg(feature = "k8s")]
+                pod_info,
+            );
+        }
+
         let end = offset.saturating_add(data.len() as u32);
         let complete = end as usize >= (len as usize).min(capture_limit(direction));
         // The kernel sends a call's fragments in order and stops at the first with no ringbuf room.
@@ -224,12 +247,52 @@ impl StreamProcessor {
         }
     }
 
+    /// Feed one fragment to the HTTP/2 connection, recording each stream whose response ended.
+    fn feed_http2(
+        &mut self,
+        direction: LlmDirection,
+        data: &[u8],
+        pid: u32,
+        #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
+    ) -> Outcome {
+        self.last_activity = Instant::now();
+        let ProcessorState::Http2(conn) = &mut self.state else {
+            return Outcome::Pending;
+        };
+        let mut outcome = Outcome::Pending;
+        conn.feed(direction, data, |event| match event {
+            http::H2Event::Detected { path } => {
+                #[cfg(feature = "k8s")]
+                let pod_str = fmt_pod(&pod_info);
+                #[cfg(not(feature = "k8s"))]
+                let pod_str = "";
+                info!("[LLM] Detected HTTP/2: {} (PID: {}){}", path, pid, pod_str);
+            }
+            http::H2Event::Recorded { usage, start } => {
+                record_usage(
+                    &usage,
+                    start,
+                    pid,
+                    #[cfg(feature = "k8s")]
+                    pod_info.clone(),
+                );
+                outcome = Outcome::Recorded;
+            }
+        });
+        outcome
+    }
+
     /// End of the connection: an LLM call still without usage (request or response) is counted as unparsed.
     pub fn close(
         &mut self,
         pid: u32,
         #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
     ) -> Outcome {
+        // HTTP/2 streams still open at close are not yet counted as unparsed (follow-up).
+        if matches!(self.state, ProcessorState::Http2(_)) {
+            self.state = ProcessorState::Finished;
+            return Outcome::Pending;
+        }
         self.drop_response(
             pid,
             UnparsedReason::ConnectionClosed,
@@ -458,6 +521,8 @@ impl StreamProcessor {
                 }
                 self.state = ProcessorState::ProcessingResponse { start_time, parser };
             }
+            // handle_fragment routes HTTP/2 before this point, so it is never reached here.
+            ProcessorState::Http2(conn) => self.state = ProcessorState::Http2(conn),
             ProcessorState::Finished => {}
         }
         Outcome::Pending
