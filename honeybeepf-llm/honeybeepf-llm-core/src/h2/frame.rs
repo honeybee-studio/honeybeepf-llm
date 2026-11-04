@@ -9,7 +9,9 @@ pub const MAX_HEADER_BLOCK: usize = 64 * 1024;
 
 const DATA: u8 = 0;
 const HEADERS: u8 = 1;
+const RST_STREAM: u8 = 3;
 const PUSH_PROMISE: u8 = 5;
+const GOAWAY: u8 = 7;
 const CONTINUATION: u8 = 9;
 
 const END_STREAM: u8 = 0x1;
@@ -29,6 +31,10 @@ pub enum Frame<'a> {
     Data { stream: u32, data: &'a [u8] },
     /// END_STREAM, after the DATA frame or header block that carried it.
     StreamEnd { stream: u32 },
+    /// RST_STREAM: the peer ended this stream early (its error code is not read).
+    Reset { stream: u32 },
+    /// GOAWAY: no stream above `last_stream` will be processed (error and debug data not read).
+    Goaway { last_stream: u32 },
 }
 
 /// Why a reader stopped; past it, frame boundaries in this direction are unknown.
@@ -86,6 +92,9 @@ pub struct FrameReader {
     block: Option<Block>,
     /// The header block in progress.
     buf: Vec<u8>,
+    /// First payload bytes of a GOAWAY (its last-stream-id), gathered across reads.
+    ctrl: [u8; 4],
+    ctrl_len: usize,
 }
 
 impl FrameReader {
@@ -113,6 +122,8 @@ impl FrameReader {
             pad: 0,
             block: None,
             buf: Vec::new(),
+            ctrl: [0; 4],
+            ctrl_len: 0,
         }
     }
 
@@ -205,6 +216,9 @@ impl FrameReader {
                 too_large: false,
             });
         }
+        if kind == GOAWAY {
+            (self.ctrl, self.ctrl_len) = ([0; 4], 0);
+        }
         self.state = State::Payload;
         if len == 0 {
             self.finish_frame(on);
@@ -244,6 +258,11 @@ impl FrameReader {
                     self.buf.extend_from_slice(bytes);
                 }
             }
+            (GOAWAY, _) if n > 0 && self.ctrl_len < 4 => {
+                let take = n.min(4 - self.ctrl_len);
+                self.ctrl[self.ctrl_len..self.ctrl_len + take].copy_from_slice(&bytes[..take]);
+                self.ctrl_len += take;
+            }
             _ => {}
         }
         used += n;
@@ -261,6 +280,17 @@ impl FrameReader {
         if self.kind == DATA && self.flags & END_STREAM != 0 {
             on(Frame::StreamEnd {
                 stream: self.stream,
+            });
+        }
+        if self.kind == RST_STREAM && self.stream != 0 {
+            on(Frame::Reset {
+                stream: self.stream,
+            });
+        }
+        // A GOAWAY shorter than its last-stream-id is malformed; dropping it avoids acting on a garbage id.
+        if self.kind == GOAWAY && self.ctrl_len == 4 {
+            on(Frame::Goaway {
+                last_stream: u32::from_be_bytes(self.ctrl) & 0x7fff_ffff,
             });
         }
         if !matches!(self.kind, HEADERS | CONTINUATION) || self.flags & END_HEADERS == 0 {

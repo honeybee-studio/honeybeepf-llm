@@ -49,6 +49,8 @@ impl Body {
 pub(super) struct H2Stream {
     /// The request head's time, so latency is measured to the response's END_STREAM.
     start: Instant,
+    /// The last frame this stream saw, so the connection can drop one left idle.
+    last: Instant,
     body: Body,
     /// Response DATA has begun, so a later HEADERS block is trailers and must not reset the body.
     got_data: bool,
@@ -58,6 +60,7 @@ impl H2Stream {
     pub(super) fn open(start: Instant) -> Self {
         Self {
             start,
+            last: start,
             body: Body::plain_json(),
             got_data: false,
         }
@@ -65,6 +68,26 @@ impl H2Stream {
 
     pub(super) fn start(&self) -> Instant {
         self.start
+    }
+
+    pub(super) fn last(&self) -> Instant {
+        self.last
+    }
+
+    /// Whether any response DATA has arrived, so an idle sweep can tell a stalled response from a slow start.
+    pub(super) fn started(&self) -> bool {
+        self.got_data
+    }
+
+    /// Whether the body was given up for a memory cap, so its end counts as a too-large response.
+    pub(super) fn over_limit(&self) -> bool {
+        matches!(
+            &self.body,
+            Body::Buffered {
+                too_large: true,
+                ..
+            }
+        )
     }
 
     /// Response body bytes this stream currently holds, returned to the connection budget when it ends.
@@ -78,6 +101,7 @@ impl H2Stream {
     /// Pick how to read the body from the response's content type and coding. A HEADERS block after DATA
     /// is trailers (the frame reader cannot tell it apart), so it is ignored rather than resetting the body.
     pub(super) fn response_headers(&mut self, content_type: Option<&[u8]>, coding: &[u8]) {
+        self.last = Instant::now();
         if self.got_data {
             return;
         }
@@ -99,6 +123,7 @@ impl H2Stream {
     /// Takes response DATA. `room` is the connection's remaining buffered-byte budget; the returned change
     /// in held bytes keeps that budget. SSE is read as it streams and never counts against the budget.
     pub(super) fn data(&mut self, bytes: &[u8], room: usize) -> isize {
+        self.last = Instant::now();
         self.got_data = true;
         match &mut self.body {
             Body::Streaming(cursor) => {
