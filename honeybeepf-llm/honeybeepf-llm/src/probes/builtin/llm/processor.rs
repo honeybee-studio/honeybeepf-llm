@@ -113,6 +113,9 @@ pub struct StreamProcessor {
     next_request: Option<(usize, Instant)>,
     /// Response id of the background call this request polls.
     continuation: Option<Box<str>>,
+    /// An HTTP/2 direction (client=Write, server=Read) that lost bytes and must re-anchor on its next feed.
+    h2_lost_client: bool,
+    h2_lost_server: bool,
 }
 
 impl Default for StreamProcessor {
@@ -135,6 +138,8 @@ impl StreamProcessor {
             frag_dir: LlmDirection::Unknown,
             next_request: None,
             continuation: None,
+            h2_lost_client: false,
+            h2_lost_server: false,
         }
     }
 
@@ -162,8 +167,14 @@ impl StreamProcessor {
         pid: u32,
         #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
     ) -> Outcome {
+        let end = offset.saturating_add(data.len() as u32);
+        let complete = end as usize >= (len as usize).min(capture_limit(direction));
+        // The kernel sends a call's fragments in order and stops at the first with no ringbuf room.
+        let out_of_order = offset != self.frag_next;
+
         // HTTP/2 is a connection-level path: once the client preface is seen, every fragment feeds the
-        // frame readers and the HTTP/1.1 state machine below is left untouched.
+        // frame readers and the HTTP/1.1 state machine below is left untouched. A gap in a direction makes
+        // the connection re-anchor that direction's frame reader before the bytes are fed.
         if matches!(self.state, ProcessorState::Http2(_))
             || matches!(self.state, ProcessorState::Detecting)
                 && direction == LlmDirection::Write
@@ -174,19 +185,19 @@ impl StreamProcessor {
             if matches!(self.state, ProcessorState::Detecting) {
                 self.state = ProcessorState::Http2(Box::new(http::H2Conn::new()));
             }
+            let lost = self.h2_loss(direction, offset, out_of_order, truncated);
+            self.frag_next = if complete { 0 } else { end };
+            self.frag_dir = direction;
             return self.feed_http2(
                 direction,
                 data,
+                lost,
                 pid,
                 #[cfg(feature = "k8s")]
                 pod_info,
             );
         }
 
-        let end = offset.saturating_add(data.len() as u32);
-        let complete = end as usize >= (len as usize).min(capture_limit(direction));
-        // The kernel sends a call's fragments in order and stops at the first with no ringbuf room.
-        let out_of_order = offset != self.frag_next;
         let lost_tail = out_of_order && offset == 0 && self.frag_dir == LlmDirection::Read;
         let lost_here =
             (out_of_order && offset != 0 || truncated) && direction == LlmDirection::Read;
@@ -247,11 +258,13 @@ impl StreamProcessor {
         }
     }
 
-    /// Feed one fragment to the HTTP/2 connection, recording each stream whose response ended.
+    /// Feed one fragment to the HTTP/2 connection, recording each stream whose response ended. `lost` tells
+    /// the connection this direction's bytes are discontinuous, so it re-anchors its frame reader first.
     fn feed_http2(
         &mut self,
         direction: LlmDirection,
         data: &[u8],
+        lost: bool,
         pid: u32,
         #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
     ) -> Outcome {
@@ -260,7 +273,7 @@ impl StreamProcessor {
             return Outcome::Pending;
         };
         let mut outcome = Outcome::Pending;
-        conn.feed(direction, data, |event| match event {
+        conn.feed(direction, data, lost, |event| match event {
             http::H2Event::Detected { path } => {
                 #[cfg(feature = "k8s")]
                 let pod_str = fmt_pod(&pod_info);
@@ -286,8 +299,51 @@ impl StreamProcessor {
                     pod_info.as_ref(),
                 );
             }
+            http::H2Event::Resynced => crate::telemetry::record_h2_resynced(
+                #[cfg(feature = "k8s")]
+                pod_info.as_ref(),
+            ),
         });
         outcome
+    }
+
+    /// Whether this HTTP/2 direction's bytes are discontinuous with what its reader has, so it must
+    /// re-anchor. A dropped middle fragment breaks the current direction now; a truncated call or a new
+    /// call starting while the previous was unfinished loses a direction's tail, marked for its next feed.
+    fn h2_loss(
+        &mut self,
+        direction: LlmDirection,
+        offset: u32,
+        out_of_order: bool,
+        truncated: bool,
+    ) -> bool {
+        if offset == 0 && self.frag_next != 0 {
+            self.mark_h2_lost(self.frag_dir);
+        }
+        if out_of_order && offset != 0 {
+            self.mark_h2_lost(direction);
+        }
+        let lost = self.take_h2_lost(direction);
+        if truncated {
+            self.mark_h2_lost(direction);
+        }
+        lost
+    }
+
+    fn mark_h2_lost(&mut self, direction: LlmDirection) {
+        match direction {
+            LlmDirection::Write => self.h2_lost_client = true,
+            LlmDirection::Read => self.h2_lost_server = true,
+            _ => {}
+        }
+    }
+
+    fn take_h2_lost(&mut self, direction: LlmDirection) -> bool {
+        match direction {
+            LlmDirection::Write => std::mem::take(&mut self.h2_lost_client),
+            LlmDirection::Read => std::mem::take(&mut self.h2_lost_server),
+            _ => false,
+        }
     }
 
     /// End of the connection: an LLM call still without usage (request or response) is counted as unparsed.
@@ -649,6 +705,8 @@ impl StreamProcessor {
         self.past_limit = None;
         self.next_request = None;
         self.continuation = None;
+        self.h2_lost_client = false;
+        self.h2_lost_server = false;
     }
 
     /// Record, defer or drop the call once its response parsed to `usage` and `state`; None keeps waiting.

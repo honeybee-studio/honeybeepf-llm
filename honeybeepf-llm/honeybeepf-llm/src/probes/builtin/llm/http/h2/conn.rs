@@ -34,6 +34,8 @@ pub(crate) enum H2Event {
     Unparsed {
         reason: UnparsedReason,
     },
+    /// A direction re-anchored its frame reader after a capture gap.
+    Resynced,
 }
 
 /// A frame reader and the HPACK table of one direction's encoder.
@@ -68,10 +70,13 @@ impl H2Conn {
     }
 
     /// Read one direction's bytes, emitting an event as each matched stream is detected and finished.
+    /// `lost` means bytes were dropped before `data`, so the reader re-anchors and the HPACK table, now
+    /// out of sync, is forgotten (later indexed fields decode as unknown until a fresh literal).
     pub(crate) fn feed(
         &mut self,
         direction: LlmDirection,
         data: &[u8],
+        lost: bool,
         mut on: impl FnMut(H2Event),
     ) {
         let Self {
@@ -83,6 +88,11 @@ impl H2Conn {
         let request = direction == LlmDirection::Write;
         // Disjoint borrows: the reader walks frames while the callback holds the decoder and stream map.
         let Dir { reader, decoder } = if request { client } else { server };
+        if lost {
+            reader.resync();
+            decoder.forget();
+            on(H2Event::Resynced);
+        }
         reader.read(data, |frame| {
             on_frame(frame, request, decoder, streams, buffered, &mut on)
         });
@@ -350,10 +360,10 @@ mod tests {
                     recorded += 1;
                 }
             };
-            conn.feed(LlmDirection::Write, PREFACE, &mut on);
-            conn.feed(LlmDirection::Write, &req(1), &mut on);
+            conn.feed(LlmDirection::Write, PREFACE, false, &mut on);
+            conn.feed(LlmDirection::Write, &req(1), false, &mut on);
             for r in reads {
-                conn.feed(LlmDirection::Read, r, &mut on);
+                conn.feed(LlmDirection::Read, r, false, &mut on);
             }
         }
         (recorded, conn.buffered)
@@ -391,13 +401,13 @@ mod tests {
             let mut on = |event| match event {
                 H2Event::Detected { .. } => detected += 1,
                 H2Event::Recorded { .. } => recorded += 1,
-                H2Event::Unparsed { .. } => {}
+                H2Event::Unparsed { .. } | H2Event::Resynced => {}
             };
             for chunk in c2s.chunks(step) {
-                conn.feed(LlmDirection::Write, chunk, &mut on);
+                conn.feed(LlmDirection::Write, chunk, false, &mut on);
             }
             for chunk in s2c.chunks(step) {
-                conn.feed(LlmDirection::Read, chunk, &mut on);
+                conn.feed(LlmDirection::Read, chunk, false, &mut on);
             }
         }
         (detected, recorded)
@@ -435,12 +445,12 @@ mod tests {
                     reason: UnparsedReason::ResponseTooLarge,
                 } => big += 1,
                 H2Event::Unparsed { .. } => closed += 1,
-                H2Event::Detected { .. } => {}
+                H2Event::Detected { .. } | H2Event::Resynced => {}
             };
-            conn.feed(LlmDirection::Write, PREFACE, &mut on);
-            conn.feed(LlmDirection::Write, &req(1), &mut on);
+            conn.feed(LlmDirection::Write, PREFACE, false, &mut on);
+            conn.feed(LlmDirection::Write, &req(1), false, &mut on);
             for (dir, bytes) in reads {
-                conn.feed(*dir, bytes, &mut on);
+                conn.feed(*dir, bytes, false, &mut on);
             }
         }
         (rec, closed, big)
@@ -492,10 +502,10 @@ mod tests {
     fn conn_with_open_stream(response: &[&[u8]]) -> H2Conn {
         let mut conn = H2Conn::new();
         let mut on = |_| {};
-        conn.feed(LlmDirection::Write, PREFACE, &mut on);
-        conn.feed(LlmDirection::Write, &req(1), &mut on);
+        conn.feed(LlmDirection::Write, PREFACE, false, &mut on);
+        conn.feed(LlmDirection::Write, &req(1), false, &mut on);
         for r in response {
-            conn.feed(LlmDirection::Read, r, &mut on);
+            conn.feed(LlmDirection::Read, r, false, &mut on);
         }
         conn
     }
@@ -536,5 +546,59 @@ mod tests {
             sweep_idle(&mut conn.streams, &mut conn.buffered, future, &mut on);
         }
         assert_eq!((conn.open_streams(), closed), (1, 0));
+    }
+
+    /// `json` across three DATA frames on `stream`, END_STREAM on the last: a run that re-anchors a reader.
+    fn data_run(stream: u32, json: &[u8]) -> Vec<u8> {
+        let third = json.len() / 3;
+        [
+            frame(0, 0, stream, &json[..third]),
+            frame(0, 0, stream, &json[third..2 * third]),
+            frame(0, 0x1, stream, &json[2 * third..]),
+        ]
+        .concat()
+    }
+
+    /// Preface + a provider request on each of `streams`, then one server feed marked as following a gap,
+    /// returning (recorded, resynced).
+    fn after_gap(streams: &[u32], server: &[u8]) -> (usize, usize) {
+        let mut conn = H2Conn::new();
+        let (mut rec, mut resynced) = (0, 0);
+        {
+            let mut on = |e| match e {
+                H2Event::Recorded { .. } => rec += 1,
+                H2Event::Resynced => resynced += 1,
+                _ => {}
+            };
+            conn.feed(LlmDirection::Write, PREFACE, false, &mut on);
+            for &s in streams {
+                conn.feed(LlmDirection::Write, &req(s), false, &mut on);
+            }
+            conn.feed(LlmDirection::Read, server, true, &mut on);
+        }
+        (rec, resynced)
+    }
+
+    #[test]
+    fn a_gap_resyncs_the_server_and_records_from_the_run_after_it() {
+        // Bytes are lost mid-response; the reader skips the stray leading bytes, re-anchors on the next run
+        // of three DATA frames, and still records the usage (the request was matched before the gap).
+        let server = [&[0xff; 5][..], &data_run(1, JSON)].concat();
+        assert_eq!(after_gap(&[1], &server), (1, 1));
+    }
+
+    #[test]
+    fn a_gap_that_resyncs_onto_non_usage_bytes_records_nothing() {
+        // A re-anchored run whose DATA is not a usage JSON fabricates no number; only the resync is counted.
+        let junk = b"{\"choices\":[]}{\"choices\":[]}{\"choices\":[]}";
+        let server = [&[0xff; 5][..], &data_run(1, junk)].concat();
+        assert_eq!(after_gap(&[1], &server), (0, 1));
+    }
+
+    #[test]
+    fn a_gap_resyncs_and_records_one_of_several_multiplexed_streams() {
+        // Two requests are open; after a gap the server's run is on stream 3, which records while 1 stays open.
+        let server = [&[0xff; 5][..], &data_run(3, JSON)].concat();
+        assert_eq!(after_gap(&[1, 3], &server), (1, 1));
     }
 }

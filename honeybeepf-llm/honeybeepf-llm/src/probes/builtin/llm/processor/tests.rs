@@ -1429,3 +1429,37 @@ fn test_only_a_queued_background_object_defers_its_call() {
     assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
     assert_eq!(count(&out, Outcome::Deferred), 0, "{out:?}");
 }
+
+#[test]
+fn h2_loss_flags_a_dropped_middle_fragment_at_once() {
+    let mut p = StreamProcessor::new();
+    p.frag_next = 16384;
+    p.frag_dir = LlmDirection::Read;
+    // A read fragment out of order and not at a call start: a middle fragment of this call was dropped.
+    assert!(p.h2_loss(LlmDirection::Read, 32768, true, false));
+}
+
+#[test]
+fn h2_loss_resyncs_a_truncated_direction_on_its_next_feed_only() {
+    let mut p = StreamProcessor::new();
+    // A truncated read loses its tail: this feed is fine, the next read must re-anchor.
+    assert!(!p.h2_loss(LlmDirection::Read, 0, false, true));
+    // A write in between is untouched.
+    assert!(!p.h2_loss(LlmDirection::Write, 0, false, false));
+    // The next read re-anchors, and only once.
+    assert!(p.h2_loss(LlmDirection::Read, 0, false, false));
+    assert!(!p.h2_loss(LlmDirection::Read, 0, false, false));
+}
+
+#[test]
+fn h2_loss_marks_the_previous_direction_when_a_new_call_interrupts_it() {
+    let mut p = StreamProcessor::new();
+    // A write call is left unfinished when a read call starts: the write lost its tail, not this read.
+    p.frag_next = 4096;
+    p.frag_dir = LlmDirection::Write;
+    assert!(!p.h2_loss(LlmDirection::Read, 0, true, false));
+    // The read completed; the write re-anchors on its next feed.
+    p.frag_next = 0;
+    p.frag_dir = LlmDirection::Read;
+    assert!(p.h2_loss(LlmDirection::Write, 0, false, false));
+}
