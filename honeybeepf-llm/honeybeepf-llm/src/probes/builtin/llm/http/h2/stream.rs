@@ -52,7 +52,8 @@ impl H2Stream {
         if !json.starts_with('{') {
             return None;
         }
-        parse_response_json(json)
+        // Background Responses polling is HTTP/1.1 only (see PR notes); drop the state here.
+        parse_response_json(json, &mut None)
     }
 }
 
