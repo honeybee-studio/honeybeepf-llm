@@ -1,6 +1,6 @@
 use super::super::ResponseProgress;
 use super::super::h1::plain_body;
-use super::super::test_support::{es_event, es_message, tokens};
+use super::super::test_support::{base64, es_chunk, es_event, es_message, tokens};
 use super::super::{Http11Parser, ProtocolParser};
 use super::*;
 
@@ -35,6 +35,40 @@ fn converse_stream(text: &str) -> Vec<Vec<u8>> {
             r#"{"p":"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRS","stopReason":"end_turn"}"#,
         ),
         es_event("metadata", CONVERSE_METADATA),
+    ]
+}
+
+/// InvokeModelWithResponseStream for a Claude model: Anthropic SSE events, metrics on `message_stop`.
+fn anthropic_invoke_stream(text: &str) -> Vec<Vec<u8>> {
+    vec![
+        es_chunk(
+            r#"{"type":"message_start","message":{"id":"msg_bdrk_01","type":"message","role":"assistant","model":"claude-sonnet-5-5","content":[],"stop_reason":null,"usage":{"input_tokens":30,"cache_creation_input_tokens":20,"cache_read_input_tokens":100,"output_tokens":1}}}"#,
+        ),
+        es_chunk(
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+        ),
+        es_chunk(&format!(
+            r#"{{"type":"content_block_delta","index":0,"delta":{{"type":"text_delta","text":"{text}"}}}}"#
+        )),
+        es_chunk(r#"{"type":"content_block_stop","index":0}"#),
+        es_chunk(
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}"#,
+        ),
+        es_chunk(
+            r#"{"type":"message_stop","amazon-bedrock-invocationMetrics":{"inputTokenCount":30,"outputTokenCount":9,"invocationLatency":1275,"firstByteLatency":402,"cacheReadInputTokenCount":100,"cacheWriteInputTokenCount":20}}"#,
+        ),
+    ]
+}
+
+/// A model with its own event shape and no `usage`: only the metrics count.
+fn titan_invoke_stream() -> Vec<Vec<u8>> {
+    vec![
+        es_chunk(
+            r#"{"outputText":"Once upon a time","index":0,"totalOutputTextTokenCount":null,"completionReason":null,"inputTextTokenCount":12}"#,
+        ),
+        es_chunk(
+            r#"{"outputText":" the end.","index":0,"totalOutputTextTokenCount":40,"completionReason":"FINISH","inputTextTokenCount":null,"amazon-bedrock-invocationMetrics":{"inputTokenCount":12,"outputTokenCount":40,"invocationLatency":900,"firstByteLatency":300}}"#,
+        ),
     ]
 }
 
@@ -90,17 +124,77 @@ fn converse_stream_reads_usage_from_the_metadata_event() {
 }
 
 #[test]
-fn stream_before_its_last_event_is_incomplete() {
-    let mut stream = converse_stream("hi");
+fn anthropic_invoke_stream_merges_message_start_and_delta_usage() {
+    let info = parse(&chunked(&anthropic_invoke_stream("hi"))).expect("usage");
+    assert_eq!((info.prompt_tokens, info.completion_tokens), (150, 9));
+    assert_eq!(cache(&info), (Some(100), Some(20)));
+    assert_eq!(info.model.as_deref(), Some("claude-sonnet-5-5"));
+}
+
+#[test]
+fn invoke_stream_of_other_models_reads_invocation_metrics() {
+    let info = parse(&chunked(&titan_invoke_stream())).expect("usage");
+    assert_eq!((info.prompt_tokens, info.completion_tokens), (12, 40));
+    assert_eq!(info.model, None);
+}
+
+#[test]
+fn invocation_metrics_survive_a_response_member_in_the_last_chunk() {
+    // Cohere's stream-end event has its own `response` object, the shape of an OpenAI Responses event.
+    let stream = [
+        es_chunk(r#"{"is_finished":false,"event_type":"text-generation","text":"hi"}"#),
+        es_chunk(
+            r#"{"is_finished":true,"event_type":"stream-end","finish_reason":"COMPLETE","response":{"text":"hi","meta":{"billed_units":{"input_tokens":12,"output_tokens":40}}},"amazon-bedrock-invocationMetrics":{"inputTokenCount":12,"outputTokenCount":40}}"#,
+        ),
+    ];
+    assert_eq!(tokens(parse(&chunked(&stream))), Some((12, 40)));
+}
+
+#[test]
+fn chunk_bytes_with_escaped_slashes_are_read_and_bad_ones_skipped() {
+    let last = r#"{"outputText":"???","amazon-bedrock-invocationMetrics":{"inputTokenCount":12,"outputTokenCount":40}}"#;
+    let encoded = base64(last.as_bytes());
+    assert!(encoded.contains('/'));
+    let escaped = es_event(
+        "chunk",
+        &format!(r#"{{"bytes":"{}"}}"#, encoded.replace('/', "\\/")),
+    );
+    let bad = [
+        es_event("chunk", r#"{"bytes":"eyJ1c2FnZSI6-_x"}"#),
+        es_event("chunk", r#"{"bytes":7}"#),
+        es_message(
+            &[(":event-type", "chunk"), (":message-type", "event")],
+            b"{\"bytes\":\"\xff\"}",
+        ),
+    ];
+    let mut stream = titan_invoke_stream();
     stream.pop();
-    assert_eq!(tokens(parse(&chunked(&stream))), None);
+    stream.extend(bad);
+    stream.push(escaped);
+    assert_eq!(tokens(parse(&chunked(&stream))), Some((12, 40)));
+}
+
+#[test]
+fn stream_before_its_last_event_is_incomplete() {
+    for mut stream in [
+        converse_stream("hi"),
+        anthropic_invoke_stream("hi"),
+        titan_invoke_stream(),
+    ] {
+        stream.pop();
+        assert_eq!(tokens(parse(&chunked(&stream))), None);
+    }
 }
 
 #[test]
 fn text_that_looks_like_protocol_is_neither_usage_nor_an_end() {
-    let stream = converse_stream(PROTOCOL_TEXT);
-    assert_eq!(tokens(parse(&chunked(&stream[..4]))), None);
-    assert_eq!(tokens(parse(&chunked(&stream))), Some((150, 9)));
+    for stream in [
+        converse_stream(PROTOCOL_TEXT),
+        anthropic_invoke_stream(PROTOCOL_TEXT),
+    ] {
+        assert_eq!(tokens(parse(&chunked(&stream[..stream.len() - 1]))), None);
+        assert_eq!(tokens(parse(&chunked(&stream))), Some((150, 9)));
+    }
 }
 
 #[test]
@@ -122,10 +216,11 @@ fn exception_message_ends_the_call_as_an_error() {
         b"",
     );
     for last in [throttled, error] {
-        let mut stream = converse_stream("hi");
-        stream.truncate(2);
-        stream.push(last);
-        assert_eq!(tokens(parse(&chunked(&stream))), Some((0, 0)));
+        for mut stream in [converse_stream("hi"), anthropic_invoke_stream("hi")] {
+            stream.truncate(2);
+            stream.push(last.clone());
+            assert_eq!(tokens(parse(&chunked(&stream))), Some((0, 0)));
+        }
     }
 }
 
@@ -191,6 +286,28 @@ fn headers_of_every_type_are_skipped() {
 }
 
 #[test]
+fn base64_decodes_the_rfc_4648_vectors() {
+    let mut out = Vec::new();
+    for (text, want) in [
+        ("", ""),
+        ("Zg==", "f"),
+        ("Zm9v", "foo"),
+        ("Zm9vYg==", "foob"),
+        ("Zm9vYmE=", "fooba"),
+        ("Zm9vYmFy", "foobar"),
+    ] {
+        assert!(decode_base64(text.as_bytes(), &mut out));
+        assert_eq!(out, want.as_bytes(), "{text}");
+    }
+    let every_byte: Vec<u8> = (0..=255).collect();
+    assert!(decode_base64(base64(&every_byte).as_bytes(), &mut out));
+    assert_eq!(out, every_byte);
+    for bad in ["Zm9v\n", "Zm-v", "Zm9v\\u002b"] {
+        assert!(!decode_base64(bad.as_bytes(), &mut out), "{bad}");
+    }
+}
+
+#[test]
 fn crc32_matches_the_check_value() {
     assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
 }
@@ -228,7 +345,13 @@ fn framed_streams() -> Vec<Vec<u8>> {
         )
         .into_bytes();
     sized.extend_from_slice(&converse.concat());
-    vec![chunked(&converse), chunked_across(&converse), sized]
+    vec![
+        chunked(&converse),
+        chunked_across(&converse),
+        sized,
+        chunked_across(&anthropic_invoke_stream(PROTOCOL_TEXT)),
+        chunked(&titan_invoke_stream()),
+    ]
 }
 
 #[test]

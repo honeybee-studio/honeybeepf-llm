@@ -1,4 +1,9 @@
-//! HTTP/2 request detection and usage parsing from raw bytes, without frame or HPACK decoding.
+//! HTTP/2: the per-connection stream assembler, plus the old raw-byte heuristic it is replacing.
+
+mod conn;
+mod stream;
+
+pub(crate) use conn::{H2Conn, H2Event, starts_preface};
 
 use serde_json::Value;
 
