@@ -818,6 +818,200 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "title": "Cost-Waste Signals — ④ refusal cost (measured) · ① cache (estimate)",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "Prompt Cache Hit Rate by Pod / Model",
+      "description": "Share of prompt tokens served from the provider cache (cache_read ÷ prompt). A low rate with high prompt volume on a cache-capable model is a savings opportunity — but a low rate is only waste if the prompt prefix actually repeats, which the agent cannot see (it reads no prompt content). Treat as a lead, not a verdict.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 47
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "axisLabel": "cache hit rate",
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.3
+              },
+              {
+                "color": "green",
+                "value": 0.7
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "(sum by (target_namespace, target_workload_name, model) (rate(honeybeepf_llm_llm_cache_read_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) or (0 * sum by (target_namespace, target_workload_name, model) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\", token_type=\"prompt\"}[$__rate_interval])))) / sum by (target_namespace, target_workload_name, model) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\", token_type=\"prompt\"}[$__rate_interval]))",
+          "interval": "1m",
+          "legendFormat": "{{ target_namespace }} / {{ target_workload_name }} / {{ model }}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Potential Input-Cost Savings from Caching — upper bound (추정)",
+      "description": "UPPER-BOUND ESTIMATE, not a measured loss. Input cost over the selected range × 0.975 — the ceiling if every input token were a repeated cacheable prefix priced at the table's most cache-favorable rate (cache read as low as 0.025× input). Real savings are lower, by both the non-repeated share (which needs prompt content the agent never reads) and the model's actual cache-read price (0.025–0.5× input across the table). A lead for human review, never a bill.",
+      "type": "bargauge",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 47
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-RdYlGr"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyUSD",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "showUnfilled": true,
+        "minVizWidth": 0,
+        "minVizHeight": 10
+      },
+      "targets": [
+        {
+          "expr": "topk(10, sum by (target_namespace, target_workload_name) (increase(honeybeepf_llm_llm_cost_usd_total{cost_type=\"input\", target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__range])) * 0.975)",
+          "legendFormat": "{{ target_namespace }} / {{ target_workload_name }}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Fallback Refusal Cost by Workload (declined, measured)",
+      "description": "MEASURED cost (not an estimate): USD billed for server-side fallback attempts the provider charged for but routed away from — attempt=\"declined\" (Anthropic fallback, #152/#154). A workload that is repeatedly declined is paying for refused attempts and is a candidate to fix its prompt. Zero when no server-side fallback occurs in the fleet. Sums all cost_type parts of the declined attempt.",
+      "type": "bargauge",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 55
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-RdYlGr"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyUSD",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "showUnfilled": true,
+        "minVizWidth": 0,
+        "minVizHeight": 10
+      },
+      "targets": [
+        {
+          "expr": "topk(10, sum by (target_namespace, target_workload_name) (increase(honeybeepf_llm_llm_cost_usd_total{attempt=\"declined\", target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__range])))",
+          "legendFormat": "{{ target_namespace }} / {{ target_workload_name }}",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "5s",

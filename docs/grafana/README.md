@@ -12,7 +12,7 @@ HoneybeePF eBPF agent via OpenTelemetry → Prometheus.
 
 ### Cost Observability (`honeybeepf-cost.json`)
 
-Two sections — **External LLM API** and **On-Premise LLM** — with:
+Three sections — **External LLM API**, **On-Premise LLM**, and **Cost-Waste Signals** — with:
 
 - Requests / minute (by team, by model)
 - Token usage / minute (prompt vs completion, by team, by model)
@@ -21,6 +21,9 @@ Two sections — **External LLM API** and **On-Premise LLM** — with:
 - 5-minute summary stats (total requests, total tokens, active probes)
 - Per-pod token usage and p95 latency
 - Top 10 pods by token usage
+- Fallback refusal cost per workload (`attempt="declined"`, **measured**), prompt cache hit rate per pod / model, and an **upper-bound** estimate of the input cost caching could save
+
+The **Cost-Waste Signals** section mixes one measured panel and two estimates, labelled as such. The refusal-cost panel is a real billed amount (`attempt="declined"`). The two cache panels are leads for human review, not measured losses: they are computed only from counters, so a low cache hit rate flags waste only where the prompt prefix actually repeats, which the agent cannot see, and the savings figure assumes every input token is a repeated cacheable prefix priced at the most cache-favorable rate, so it is a ceiling. Each panel says so in its description.
 
 Template variables: `$datasource`, `$team`, `$pod`, `$model`.
 
@@ -52,6 +55,8 @@ Collector, which forwards them to Prometheus.
 | `honeybeepf_llm_llm_cost_usd_total` | Counter (USD) | `model`, `status`, `cost_type` (input / cache_read / cache_write / output), `price_table_version`, `target_namespace`, `target_pod_name` |
 | `honeybeepf_llm_llm_unpriced_tokens_total` | Counter | `model`, `status`, `reason` (unknown_model / missing_price / unsupported_modifier / inconsistent_usage), `price_table_version`, `target_namespace`, `target_pod_name` |
 | `honeybeepf_llm_llm_latency_seconds_bucket` | Histogram | `model`, `status`, `target_namespace`, `target_pod_name` |
+
+Every per-call LLM metric (`llm_requests_total`, `llm_tokens_total`, the cache/reasoning subsets, `llm_cost_usd_total`, `llm_unpriced_tokens_total`, `llm_latency_seconds`) also carries `attempt` (`served` / `declined`). It is `served` for the call the provider returned; `declined` marks an earlier server-side fallback attempt that the provider billed but routed away from (Anthropic fallback, #152/#154). A declined attempt adds its billed tokens and cost but no request count, so `sum(...)` over a metric is unchanged, while `attempt="declined"` isolates the cost of refused attempts per pod. Every series now carries the label; `declined` series appear only for models that show up in a fallback, so for non-fallback traffic the label is a constant `served` and adds no series.
 
 Every LLM metric that has `target_pod_name` also has `target_workload_kind` and `target_workload_name`: the pod's owner, with a ReplicaSet resolved to its Deployment or Argo Rollout and a Job to its CronJob (`Pod` and the pod name for a pod without an owner, `unattributed` when the owner cannot be named). The workload is fixed by the pod, so these labels add no series (except a Job pod relabelled with its CronJob after a failed lookup). The cost dashboard groups the On-Premise panels by namespace and workload; the **Workload** and **Pod** variables drill down.
 
