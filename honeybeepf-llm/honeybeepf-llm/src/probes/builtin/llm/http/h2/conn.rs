@@ -36,7 +36,7 @@ pub(crate) enum H2Event {
         path: String,
     },
     Recorded {
-        usage: UsageInfo,
+        usage: Box<UsageInfo>,
         start: Instant,
         /// The connection was joined mid-stream, so this call's host is unknown and it is lower-confidence.
         midjoin: bool,
@@ -240,7 +240,7 @@ fn on_frame(
             if let Some(s) = streams.get_mut(&stream) {
                 if let Some(usage) = s.finish() {
                     on(H2Event::Recorded {
-                        usage,
+                        usage: Box::new(usage),
                         start: s.start(),
                         midjoin,
                     });
