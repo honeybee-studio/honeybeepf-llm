@@ -15,8 +15,8 @@ use aya::{
     maps::{MapData, PerCpuArray},
 };
 use background::BackgroundCalls;
-use conn_filter::{ConnFilter, payload};
-use honeybeepf_llm_common::{LLM_STAT_COUNT, LLM_STAT_NAMES, LlmEvent};
+use conn_filter::ConnFilter;
+use honeybeepf_llm_common::{LLM_STAT_COUNT, LLM_STAT_NAMES, LlmEventHeader};
 use honeybeepf_llm_core::types::LlmDirection;
 use log::{info, warn};
 use processor::{Outcome, StreamProcessor};
@@ -28,7 +28,7 @@ use crate::probes::{
     discovery::{
         FileId, exported_function_offsets, file_identity, find_executables_all, find_libraries_all,
     },
-    spawn_ringbuf_handler,
+    spawn_ringbuf_handler_var,
 };
 // Re-export exec watch types and functions for lib.rs
 pub use crate::probes::{
@@ -303,33 +303,33 @@ type BackgroundMap = Arc<Mutex<BackgroundCalls>>;
 fn route_event(
     streams: &mut HashMap<StreamKey, StreamProcessor>,
     background: &mut BackgroundCalls,
-    event: &LlmEvent,
+    header: &LlmEventHeader,
+    data: &[u8],
     // Called only for events that use it: a pod lookup miss reads /proc.
     #[cfg(feature = "k8s")] pod_info: impl FnOnce() -> Option<Arc<crate::k8s::PodInfo>>,
 ) -> Outcome {
-    let key = (event.metadata.pid, event.ssl_ptr);
-    if event.closed != 0 {
+    let key = (header.metadata.pid, header.ssl_ptr);
+    if header.closed != 0 {
         return match streams.remove(&key) {
             Some(mut stream) if stream.is_llm() => stream.close(
-                event.metadata.pid,
+                header.metadata.pid,
                 #[cfg(feature = "k8s")]
                 pod_info().as_ref(),
             ),
             _ => Outcome::Pending,
         };
     }
-    let data = payload(event);
     if data.is_empty() {
         return Outcome::Pending;
     }
     streams.entry(key).or_default().handle_fragment(
-        LlmDirection::from(event.rw),
+        LlmDirection::from(header.rw),
         data,
-        event.offset,
-        event.len,
-        event.truncated != 0,
+        header.offset,
+        header.len,
+        header.truncated != 0,
         background,
-        event.metadata.pid,
+        header.metadata.pid,
         #[cfg(feature = "k8s")]
         pod_info(),
     )
@@ -386,21 +386,28 @@ impl Probe for LlmProbe {
         let handler_background = background.clone();
         let mut conn_filter = ConnFilter::new(bpf)?;
 
-        spawn_ringbuf_handler(bpf, "SSL_EVENTS", move |event: &LlmEvent| {
-            if event.is_handshake == 1 || conn_filter.skip_if_foreign(event, &handler_state) {
-                return;
-            }
+        spawn_ringbuf_handler_var(
+            bpf,
+            "SSL_EVENTS",
+            move |header: &LlmEventHeader, data: &[u8]| {
+                if header.is_handshake == 1
+                    || conn_filter.skip_if_foreign(header, data, &handler_state)
+                {
+                    return;
+                }
 
-            let mut map = handler_state.lock().unwrap_or_else(|e| e.into_inner());
-            let mut calls = handler_background.lock().unwrap_or_else(|e| e.into_inner());
-            route_event(
-                &mut map,
-                &mut calls,
-                event,
-                #[cfg(feature = "k8s")]
-                || _resolver.resolve_pod(event.metadata.pid, event.metadata.cgroup_id),
-            );
-        })?;
+                let mut map = handler_state.lock().unwrap_or_else(|e| e.into_inner());
+                let mut calls = handler_background.lock().unwrap_or_else(|e| e.into_inner());
+                route_event(
+                    &mut map,
+                    &mut calls,
+                    header,
+                    data,
+                    #[cfg(feature = "k8s")]
+                    || _resolver.resolve_pod(header.metadata.pid, header.metadata.cgroup_id),
+                );
+            },
+        )?;
 
         start_stats_log_task(state.clone());
         start_cleanup_task(state, background);
@@ -465,7 +472,7 @@ pub fn find_all_targets() -> Result<HashSet<String>> {
 mod tests {
     use super::*;
     use conn_filter::opens_foreign_request;
-    use honeybeepf_llm_common::{EventMetadata, MAX_SSL_BUF_SIZE};
+    use honeybeepf_llm_common::{EventMetadata, LlmEvent, MAX_SSL_BUF_SIZE};
     use processor::UnparsedReason;
 
     const OPENAI_REQUEST: &[u8] = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"gpt-4o\",\"stream\":true,\"messages\":[]}";
@@ -484,25 +491,26 @@ mod tests {
         let mut buf = [0u8; MAX_SSL_BUF_SIZE];
         buf[..data.len()].copy_from_slice(data);
         LlmEvent {
-            metadata: EventMetadata {
-                pid: 7,
-                _pad: tid,
+            header: LlmEventHeader {
+                metadata: EventMetadata {
+                    pid: 7,
+                    _pad: tid,
+                    ..Default::default()
+                },
+                rw: rw as u8,
+                len: data.len() as u32,
+                buf_filled: 1,
+                ssl_ptr: ssl,
                 ..Default::default()
             },
-            rw: rw as u8,
-            len: data.len() as u32,
-            buf_filled: 1,
-            ssl_ptr: ssl,
             buf,
-            ..Default::default()
         }
     }
 
     fn free(tid: u32, ssl: u64) -> LlmEvent {
-        LlmEvent {
-            closed: 1,
-            ..call(tid, ssl, LlmDirection::Unknown, b"")
-        }
+        let mut e = call(tid, ssl, LlmDirection::Unknown, b"");
+        e.header.closed = 1;
+        e
     }
 
     fn route_all(events: &[LlmEvent]) -> Vec<Outcome> {
@@ -514,7 +522,8 @@ mod tests {
                 route_event(
                     &mut streams,
                     &mut background,
-                    e,
+                    &e.header,
+                    e.payload(),
                     #[cfg(feature = "k8s")]
                     || None,
                 )
@@ -593,7 +602,8 @@ mod tests {
             route_event(
                 &mut streams,
                 &mut BackgroundCalls::default(),
-                &e,
+                &e.header,
+                e.payload(),
                 #[cfg(feature = "k8s")]
                 || None,
             );
@@ -606,11 +616,10 @@ mod tests {
         use LlmDirection::{Read, Write};
         let noise =
             b"POST /api/data HTTP/1.1\r\nHost: noise.internal\r\nContent-Length: 2\r\n\r\nxx";
-        assert!(opens_foreign_request(&call(1, OPENAI, Write, noise)));
-        let continued = LlmEvent {
-            offset: MAX_SSL_BUF_SIZE as u32,
-            ..call(1, OPENAI, Write, noise)
-        };
+        let opener = call(1, OPENAI, Write, noise);
+        assert!(opens_foreign_request(&opener.header, opener.payload()));
+        let mut continued = call(1, OPENAI, Write, noise);
+        continued.header.offset = MAX_SSL_BUF_SIZE as u32;
         for e in [
             continued,
             call(1, OPENAI, Write, OPENAI_REQUEST),
@@ -635,7 +644,11 @@ mod tests {
                 b"HTTP/1.1 200 OK\r\nHost: noise.internal\r\n\r\n",
             ),
         ] {
-            assert!(!opens_foreign_request(&e), "{:?}", payload(&e));
+            assert!(
+                !opens_foreign_request(&e.header, e.payload()),
+                "{:?}",
+                e.payload()
+            );
         }
     }
 

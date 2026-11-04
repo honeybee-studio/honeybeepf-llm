@@ -200,9 +200,9 @@ fn emit_fragments(call: &SslCall, rw: u8, is_handshake: bool) {
             count(LLM_STAT_FRAGMENT);
         } else if is_handshake {
             count(LLM_STAT_HANDSHAKE);
-        } else if event.buf_filled == 0 {
+        } else if event.header.buf_filled == 0 {
             count(LLM_STAT_EMPTY);
-        } else if event.truncated != 0 {
+        } else if event.header.truncated != 0 {
             count(LLM_STAT_TRUNCATED);
         }
         count(LLM_STAT_SUBMIT);

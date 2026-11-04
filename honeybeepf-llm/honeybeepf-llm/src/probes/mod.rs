@@ -14,7 +14,7 @@ use aya::{
     maps::{HashMap as AyaHashMap, MapData, RingBuf},
     programs::{FEntry, KProbe, TracePoint, UProbe, uprobe::UProbeLinkId},
 };
-use honeybeepf_llm_common::{ExecEvent, LibOpenEvent};
+use honeybeepf_llm_common::{ExecEvent, LibOpenEvent, LlmEventHeader};
 use std::os::unix::io::AsRawFd;
 
 use log::{info, warn};
@@ -153,15 +153,33 @@ where
     T: aya::Pod,
     F: FnMut(&T) + Send + 'static,
 {
-    let mut ring_buf = RingBuf::try_from(bpf.take_map(map_name).context("Failed to get map")?)?;
+    let ring_buf = RingBuf::try_from(bpf.take_map(map_name).context("Failed to get map")?)?;
+    spawn_ring_loop(ring_buf, move |rb| drain_ring(rb, &mut handler));
+    Ok(())
+}
+
+/// Like `spawn_ringbuf_handler`, for the variable-length SSL ring: each record is a fixed
+/// `LlmEventHeader` then the payload bytes it holds, handed to `handler` borrowed in place.
+pub fn spawn_ringbuf_handler_var<F>(bpf: &mut Ebpf, map_name: &str, mut handler: F) -> Result<()>
+where
+    F: FnMut(&LlmEventHeader, &[u8]) + Send + 'static,
+{
+    let ring_buf = RingBuf::try_from(bpf.take_map(map_name).context("Failed to get map")?)?;
+    spawn_ring_loop(ring_buf, move |rb| drain_var(rb, &mut handler));
+    Ok(())
+}
+
+/// Drive a ring reader on its own blocking thread, not a tokio worker. Under load: drain, then sleep
+/// 10 ms so it wakes per batch, not per event. Idle: block on the ring fd with poll(), so no CPU.
+fn spawn_ring_loop(
+    mut ring_buf: RingBuf<MapData>,
+    mut drain: impl FnMut(&mut RingBuf<MapData>) -> usize + Send + 'static,
+) {
     let shutdown = shutdown_flag();
     let fd = ring_buf.as_raw_fd();
-
-    // Own thread, not a tokio worker. Under load: drain, then sleep 10 ms so it wakes per batch, not per
-    // event. Idle: block on the ring fd with poll(), so no CPU and no periodic wake-up.
     tokio::task::spawn_blocking(move || {
         while !shutdown.load(Ordering::Relaxed) {
-            if drain_ring(&mut ring_buf, &mut handler) > 0 {
+            if drain(&mut ring_buf) > 0 {
                 std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
             } else {
                 let mut pfd = libc::pollfd {
@@ -177,11 +195,10 @@ where
             }
         }
     });
-    Ok(())
 }
 
-/// Read every record waiting in the ring buffer in place, handing each to `handler` without copying it out;
-/// returns how many records were drained (0 means the ring was empty).
+/// Read every fixed-size record waiting in the ring in place, handing each to `handler` without
+/// copying it out; returns how many were drained (0 means the ring was empty).
 fn drain_ring<T: aya::Pod>(ring_buf: &mut RingBuf<MapData>, handler: &mut impl FnMut(&T)) -> usize {
     let mut drained = 0;
     while let Some(item) = ring_buf.next() {
@@ -194,6 +211,36 @@ fn drain_ring<T: aya::Pod>(ring_buf: &mut RingBuf<MapData>, handler: &mut impl F
         }
     }
     drained
+}
+
+/// Drain SSL records, handing each as (header, payload) borrowed in place; returns how many were
+/// drained. A record too short for its header, or shorter than the payload the header claims, is dropped.
+fn drain_var(
+    ring_buf: &mut RingBuf<MapData>,
+    handler: &mut impl FnMut(&LlmEventHeader, &[u8]),
+) -> usize {
+    let mut drained = 0;
+    while let Some(item) = ring_buf.next() {
+        drained += 1;
+        if let Some((header, payload)) = parse_llm_record(&item) {
+            handler(header, payload);
+        }
+    }
+    drained
+}
+
+/// Split one SSL ring record into its header and payload slice, checking the record is long enough
+/// for both; `None` drops a malformed record.
+fn parse_llm_record(item: &[u8]) -> Option<(&LlmEventHeader, &[u8])> {
+    const H: usize = std::mem::size_of::<LlmEventHeader>();
+    if item.len() < H {
+        return None;
+    }
+    // SAFETY: BPF ring-buffer records are 8-byte aligned and `LlmEventHeader: aya::Pod` (repr(C),
+    // every byte pattern valid); the length is checked, so the header is reborrowed in place.
+    let header: &LlmEventHeader = unsafe { &*(item.as_ptr() as *const LlmEventHeader) };
+    let end = H + header.payload_len();
+    item.get(H..end).map(|payload| (header, payload))
 }
 
 /// Attach a uprobe at a file offset in a library or executable.
@@ -356,4 +403,76 @@ pub fn setup_lib_open_watch(bpf: &mut Ebpf) -> Result<(LibOpenQueue, ExecNotify,
     })?;
 
     Ok((queue, notify, seen))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use honeybeepf_llm_common::{LlmEvent, MAX_SSL_BUF_SIZE};
+
+    const H: usize = std::mem::size_of::<LlmEventHeader>();
+
+    fn event(data: &[u8], offset: u32, len: u32) -> LlmEvent {
+        let mut ev = LlmEvent::default();
+        ev.header.len = len;
+        ev.header.offset = offset;
+        ev.header.buf_filled = u32::from(!data.is_empty());
+        ev.buf[..data.len()].copy_from_slice(data);
+        ev
+    }
+
+    /// One ring record is the event's bytes truncated to its real size; the value is 8-byte aligned.
+    fn record(ev: &LlmEvent, bytes: usize) -> &[u8] {
+        // SAFETY: LlmEvent is repr(C) + aya::Pod (every byte valid); bytes <= its size.
+        unsafe { std::slice::from_raw_parts(ev as *const LlmEvent as *const u8, bytes) }
+    }
+
+    #[test]
+    fn a_short_record_yields_only_its_payload() {
+        let data = b"POST /v1/messages";
+        let ev = event(data, 0, data.len() as u32);
+        let (header, payload) =
+            parse_llm_record(record(&ev, H + data.len())).expect("record parses");
+        assert_eq!(payload, data);
+        assert_eq!(header.len, data.len() as u32);
+    }
+
+    #[test]
+    fn a_full_fragment_yields_the_whole_buffer() {
+        let data = [0xabu8; MAX_SSL_BUF_SIZE];
+        let ev = event(&data, 0, MAX_SSL_BUF_SIZE as u32);
+        let (_, payload) =
+            parse_llm_record(record(&ev, H + MAX_SSL_BUF_SIZE)).expect("record parses");
+        assert_eq!(payload.len(), MAX_SSL_BUF_SIZE);
+    }
+
+    /// A call over the capture limit still fills one fragment: payload is clamped to the buffer.
+    #[test]
+    fn a_truncated_call_clamps_the_payload_to_the_buffer() {
+        let data = [7u8; MAX_SSL_BUF_SIZE];
+        let ev = event(&data, 0, 10 * MAX_SSL_BUF_SIZE as u32);
+        let (_, payload) =
+            parse_llm_record(record(&ev, H + MAX_SSL_BUF_SIZE)).expect("record parses");
+        assert_eq!(payload.len(), MAX_SSL_BUF_SIZE);
+    }
+
+    #[test]
+    fn a_payloadless_record_is_just_the_header() {
+        let ev = event(b"", 0, 0);
+        let (_, payload) = parse_llm_record(record(&ev, H)).expect("record parses");
+        assert!(payload.is_empty());
+    }
+
+    #[test]
+    fn a_record_shorter_than_its_header_is_dropped() {
+        let ev = event(b"x", 0, 1);
+        assert!(parse_llm_record(record(&ev, H - 1)).is_none());
+    }
+
+    #[test]
+    fn a_record_shorter_than_its_claimed_payload_is_dropped() {
+        let data = b"twenty-byte-payload!";
+        let ev = event(data, 0, data.len() as u32);
+        assert!(parse_llm_record(record(&ev, H + data.len() - 1)).is_none());
+    }
 }
