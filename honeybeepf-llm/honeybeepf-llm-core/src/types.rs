@@ -39,10 +39,12 @@ pub struct SseChunkDelta {
     pub message: Option<Value>,
     /// OpenAI Responses events nest the response under `response`; usage is null until it ends.
     pub response: Option<Value>,
+    /// Gemini Interactions streaming nests the interaction, with its usage, under `interaction`.
+    pub interaction: Option<Value>,
 }
 
 impl SseChunkDelta {
-    /// Whether this event carries usage at the top level, under `message` or under `response`.
+    /// Whether this event carries usage at the top level, under `message`, `response` or `interaction`.
     pub fn has_usage(&self) -> bool {
         self.usage.is_some()
             || self
@@ -53,5 +55,9 @@ impl SseChunkDelta {
                 .response
                 .as_ref()
                 .is_some_and(|r| r.get("usage").is_some_and(|u| !u.is_null()))
+            || self
+                .interaction
+                .as_ref()
+                .is_some_and(|i| i.get("usage").is_some_and(|u| !u.is_null()))
     }
 }
