@@ -198,6 +198,34 @@ impl StreamProcessor {
             );
         }
 
+        // A connection joined after its preface: no preface was seen, but the client bytes form a run of
+        // frame heads (HTTP/1.1, which starts with an uppercase method, never does). Classify it HTTP/2,
+        // start both directions unknown, and feed what was buffered as the first (lost) client bytes.
+        if matches!(self.state, ProcessorState::Detecting)
+            && direction == LlmDirection::Write
+            && !starts_ascii_upper(&self.write_buf, data)
+        {
+            let client = [&self.write_buf[..], data].concat();
+            if http::looks_like_http2(&client) {
+                info!("[LLM] Detected HTTP/2 (mid-stream join) (PID: {})", pid);
+                self.write_buf = Vec::new();
+                self.state = ProcessorState::Http2(Box::new(http::H2Conn::new_midjoin()));
+                self.h2_lost_client = true;
+                self.h2_lost_server = true;
+                self.frag_next = if complete { 0 } else { end };
+                self.frag_dir = direction;
+                let lost = self.take_h2_lost(direction);
+                return self.feed_http2(
+                    direction,
+                    &client,
+                    lost,
+                    pid,
+                    #[cfg(feature = "k8s")]
+                    pod_info,
+                );
+            }
+        }
+
         let lost_tail = out_of_order && offset == 0 && self.frag_dir == LlmDirection::Read;
         let lost_here =
             (out_of_order && offset != 0 || truncated) && direction == LlmDirection::Read;
@@ -281,7 +309,11 @@ impl StreamProcessor {
                 let pod_str = "";
                 info!("[LLM] Detected HTTP/2: {} (PID: {}){}", path, pid, pod_str);
             }
-            http::H2Event::Recorded { usage, start } => {
+            http::H2Event::Recorded {
+                usage,
+                start,
+                midjoin,
+            } => {
                 record_usage(
                     &usage,
                     start,
@@ -289,6 +321,12 @@ impl StreamProcessor {
                     #[cfg(feature = "k8s")]
                     pod_info.clone(),
                 );
+                if midjoin {
+                    crate::telemetry::record_h2_midjoin(
+                        #[cfg(feature = "k8s")]
+                        pod_info.as_ref(),
+                    );
+                }
                 outcome = Outcome::Recorded;
             }
             http::H2Event::Unparsed { reason } => {
@@ -871,6 +909,15 @@ impl PastLimit {
             Self::Sse(stream) => stream.usage(),
         }
     }
+}
+
+/// Whether the client bytes start like HTTP/1.1 or the preface (an ASCII uppercase method), so the HTTP/2
+/// mid-join frame probe can be skipped. A real HTTP/2 frame starts with a length byte, 0 for any frame.
+fn starts_ascii_upper(buffered: &[u8], data: &[u8]) -> bool {
+    buffered
+        .first()
+        .or(data.first())
+        .is_some_and(u8::is_ascii_uppercase)
 }
 
 /// The bytes after any empty lines, which httparse skips before a status line.

@@ -1,6 +1,7 @@
 //! One HTTP/2 connection: frames demultiplexed into streams, each direction's HPACK table its own.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use honeybeepf_llm_core::h2::frame::{Frame, FrameReader, PREFACE};
@@ -20,6 +21,14 @@ const CONN_BUFFER_CAP: usize = 32 * 1024 * 1024;
 /// and counted, so a stalled response frees its buffered bytes instead of being held forever. A stream still
 /// awaiting its first response byte is left alone (a slow time-to-first-byte is not an abandoned stream).
 const STREAM_IDLE: Duration = Duration::from_secs(300);
+/// A mid-join connection's streams are guesses (no request matched them), so its total buffering is held far
+/// below `CONN_BUFFER_CAP`; a non-LLM join (internal gRPC, …) must not be able to pile up per connection.
+const MIDJOIN_CONN_CAP: usize = 1024 * 1024;
+/// Speculative mid-join bytes buffered across every connection on the node, so many non-LLM joins at once
+/// (e.g. right after the agent restarts) cannot add up to gigabytes.
+const MIDJOIN_NODE_CAP: usize = 64 * 1024 * 1024;
+/// Bytes currently buffered by mid-join connections node-wide; each connection reconciles its share per feed.
+static MIDJOIN_NODE_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 /// What feeding a connection produced, for the processor to log and record.
 pub(crate) enum H2Event {
@@ -29,6 +38,8 @@ pub(crate) enum H2Event {
     Recorded {
         usage: UsageInfo,
         start: Instant,
+        /// The connection was joined mid-stream, so this call's host is unknown and it is lower-confidence.
+        midjoin: bool,
     },
     /// A tracked stream ended without usage (reset, connection going away, idle, or over a cap).
     Unparsed {
@@ -51,6 +62,9 @@ pub(crate) struct H2Conn {
     streams: BTreeMap<u32, H2Stream>,
     /// Response body bytes buffered across all streams, capped at `CONN_BUFFER_CAP`.
     buffered: usize,
+    /// Joined mid-stream (no preface seen): the HPACK tables are unknown, so requests cannot be matched;
+    /// any response stream is tracked and its usage read from DATA, with the host unknown.
+    midjoin: bool,
 }
 
 impl H2Conn {
@@ -66,7 +80,17 @@ impl H2Conn {
             },
             streams: BTreeMap::new(),
             buffered: 0,
+            midjoin: false,
         }
+    }
+
+    /// A connection joined after its preface: neither direction expects a preface, and the first feed of
+    /// each (marked lost by the processor) re-anchors it and forgets its HPACK table.
+    pub(crate) fn new_midjoin() -> Self {
+        let mut conn = Self::new();
+        conn.client.reader = FrameReader::server();
+        conn.midjoin = true;
+        conn
     }
 
     /// Read one direction's bytes, emitting an event as each matched stream is detected and finished.
@@ -84,7 +108,9 @@ impl H2Conn {
             server,
             streams,
             buffered,
+            midjoin,
         } = self;
+        let midjoin = *midjoin;
         let request = direction == LlmDirection::Write;
         // Disjoint borrows: the reader walks frames while the callback holds the decoder and stream map.
         let Dir { reader, decoder } = if request { client } else { server };
@@ -93,12 +119,27 @@ impl H2Conn {
             decoder.forget();
             on(H2Event::Resynced);
         }
+        // A normal connection buffers up to the full budget; a mid-join one is held to a small per-connection
+        // cap and the node-wide speculative budget, so unmatched (possibly non-LLM) joins cannot pile up.
+        let before = *buffered;
+        let cap = if midjoin {
+            let node_room =
+                MIDJOIN_NODE_CAP.saturating_sub(MIDJOIN_NODE_BYTES.load(Ordering::Relaxed));
+            MIDJOIN_CONN_CAP.min(before.saturating_add(node_room))
+        } else {
+            CONN_BUFFER_CAP
+        };
         reader.read(data, |frame| {
-            on_frame(frame, request, decoder, streams, buffered, &mut on)
+            on_frame(
+                frame, request, midjoin, cap, decoder, streams, buffered, &mut on,
+            )
         });
         // A live connection's traffic is the only clock here, so drop idle streams as it flows.
         if !streams.is_empty() {
             sweep_idle(streams, buffered, Instant::now(), &mut on);
+        }
+        if midjoin {
+            reconcile_node_bytes(before, *buffered);
         }
     }
 
@@ -108,9 +149,40 @@ impl H2Conn {
     }
 }
 
+impl Drop for H2Conn {
+    fn drop(&mut self) {
+        // Return this mid-join connection's share of the node-wide speculative budget.
+        if self.midjoin && self.buffered > 0 {
+            MIDJOIN_NODE_BYTES.fetch_sub(self.buffered, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Apply a mid-join connection's net buffering change over one feed to the node-wide total.
+fn reconcile_node_bytes(before: usize, after: usize) {
+    if after > before {
+        MIDJOIN_NODE_BYTES.fetch_add(after - before, Ordering::Relaxed);
+    } else if before > after {
+        MIDJOIN_NODE_BYTES.fetch_sub(before - after, Ordering::Relaxed);
+    }
+}
+
+/// Whether a first DATA chunk could begin a usage JSON object or an SSE body, so a mid-join stream is worth
+/// tracking. Length-prefixed binary (gRPC), gzip and anything else is abandoned without buffering.
+fn looks_recordable(data: &[u8]) -> bool {
+    let start = data
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .map_or(&[][..], |i| &data[i..]);
+    start.first() == Some(&b'{') || start.starts_with(b"data:") || start.starts_with(b"event:")
+}
+
+#[allow(clippy::too_many_arguments)]
 fn on_frame(
     frame: Frame<'_>,
     request: bool,
+    midjoin: bool,
+    cap: usize,
     decoder: &mut Decoder,
     streams: &mut BTreeMap<u32, H2Stream>,
     buffered: &mut usize,
@@ -148,10 +220,19 @@ fn on_frame(
             }
             streams.remove(&stream);
         }
-        // Feed every stream (SSE keeps almost nothing); the connection budget only bounds buffered bodies.
+        // Feed every stream; `cap` bounds buffered bodies. On a mid-stream join the request HEADERS were
+        // missed, so a response is tracked on its first DATA (host unknown) only when that DATA could be a
+        // usage JSON or SSE body — framed binary (gRPC, gzip) is abandoned at once (`looks_recordable`).
         Frame::Data { stream, data } if !request => {
+            if midjoin
+                && !streams.contains_key(&stream)
+                && streams.len() < MAX_STREAMS
+                && looks_recordable(data)
+            {
+                streams.insert(stream, H2Stream::open(Instant::now()));
+            }
             if let Some(s) = streams.get_mut(&stream) {
-                let room = CONN_BUFFER_CAP.saturating_sub(*buffered);
+                let room = cap.saturating_sub(*buffered);
                 *buffered = buffered.saturating_add_signed(s.data(data, room));
             }
         }
@@ -161,6 +242,7 @@ fn on_frame(
                     on(H2Event::Recorded {
                         usage,
                         start: s.start(),
+                        midjoin,
                     });
                 } else if s.over_limit() {
                     on(H2Event::Unparsed {
@@ -600,5 +682,83 @@ mod tests {
         // Two requests are open; after a gap the server's run is on stream 3, which records while 1 stays open.
         let server = [&[0xff; 5][..], &data_run(3, JSON)].concat();
         assert_eq!(after_gap(&[1, 3], &server), (1, 1));
+    }
+
+    /// Feeds a mid-join connection its server bytes (lost, as a mid-stream join makes them), returning
+    /// (recorded, recordings flagged mid-join).
+    fn midjoin_server(server: &[u8]) -> (usize, usize) {
+        let mut conn = H2Conn::new_midjoin();
+        let (mut rec, mut flagged) = (0, 0);
+        {
+            let mut on = |e| {
+                if let H2Event::Recorded { midjoin, .. } = e {
+                    rec += 1;
+                    flagged += usize::from(midjoin);
+                }
+            };
+            conn.feed(LlmDirection::Read, server, true, &mut on);
+        }
+        (rec, flagged)
+    }
+
+    #[test]
+    fn a_midjoin_connection_records_a_response_from_its_data_alone() {
+        // No request was seen; a run of three server DATA frames carrying a usage JSON is tracked on its
+        // DATA and recorded, flagged mid-join (host unknown).
+        assert_eq!(midjoin_server(&data_run(1, JSON)), (1, 1));
+    }
+
+    #[test]
+    fn a_midjoin_connection_records_nothing_from_non_usage_data() {
+        // Speculatively tracked DATA that is not a usage JSON records nothing, so it fabricates no number.
+        let junk = b"{\"choices\":[]}{\"choices\":[]}{\"choices\":[]}";
+        assert_eq!(midjoin_server(&data_run(1, junk)), (0, 0));
+    }
+
+    #[test]
+    fn non_llm_midjoin_connections_stay_within_a_small_buffer() {
+        // gRPC-like framed DATA (a binary length prefix) never looks recordable: across many mid-join
+        // connections no stream is tracked and nothing is buffered.
+        let grpc = data_run(1, &[0u8; 300]);
+        for _ in 0..50 {
+            let mut conn = H2Conn::new_midjoin();
+            conn.feed(LlmDirection::Read, &grpc, true, &mut |_| {});
+            assert_eq!((conn.open_streams(), conn.buffered), (0, 0));
+        }
+        // A JSON-looking (non-usage) body well over the per-connection mid-join cap is held to it, not to the
+        // 32 MiB connection budget: the over-cap stream drops its buffer, so little stays buffered.
+        let chunk = vec![b' '; 16_000];
+        let mut body = {
+            let mut head = vec![b'{'];
+            head.extend(std::iter::repeat_n(b' ', 15_999));
+            frame(0, 0, 1, &head)
+        };
+        for _ in 0..100 {
+            body.extend(frame(0, 0, 1, &chunk));
+        }
+        let mut conn = H2Conn::new_midjoin();
+        conn.feed(LlmDirection::Read, &body, true, &mut |_| {});
+        assert!(
+            conn.buffered < MIDJOIN_CONN_CAP,
+            "buffered {}",
+            conn.buffered
+        );
+    }
+
+    #[test]
+    fn a_normal_connection_does_not_speculatively_track_server_data() {
+        // Without the mid-join flag, server DATA on a stream no request matched is ignored.
+        let mut conn = H2Conn::new();
+        let mut rec = 0;
+        {
+            let mut on = |e| {
+                if matches!(e, H2Event::Recorded { .. }) {
+                    rec += 1;
+                }
+            };
+            conn.feed(LlmDirection::Write, PREFACE, false, &mut on);
+            conn.feed(LlmDirection::Read, &data_run(1, JSON), false, &mut on);
+        }
+        assert_eq!(rec, 0);
     }
 }

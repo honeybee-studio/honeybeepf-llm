@@ -4,6 +4,7 @@ mod conn;
 mod stream;
 
 pub(crate) use conn::{H2Conn, H2Event, starts_preface};
+pub(crate) use honeybeepf_llm_core::h2::frame::looks_like_http2;
 
 use serde_json::Value;
 

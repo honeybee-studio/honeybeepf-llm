@@ -455,6 +455,16 @@ impl FrameReader {
     }
 }
 
+/// Whether `bytes` begin an HTTP/2 frame stream: a run of three chaining valid frame heads, the same test
+/// a resync uses. Used to classify a connection joined after its preface; HTTP/1.1 text never forms such a
+/// run (its ASCII start reads as a frame far larger than the max).
+pub fn looks_like_http2(bytes: &[u8]) -> bool {
+    let mut reader = FrameReader::server();
+    reader.resync();
+    reader.scan_push(bytes);
+    reader.anchor().is_some()
+}
+
 /// Whether a frame head's type, flags and stream id are self-consistent (RFC 9113 §6), so a chance byte
 /// pattern is unlikely to pass as a frame when re-anchoring. We only see client-initiated streams (odd ids)
 /// and connection frames (stream 0); server push is skipped, so its head is not a valid anchor either.
