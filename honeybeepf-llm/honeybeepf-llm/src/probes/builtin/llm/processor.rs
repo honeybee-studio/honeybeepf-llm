@@ -4,7 +4,8 @@ use honeybeepf_llm_common::capture_limit;
 use honeybeepf_llm_core::types::{LlmDirection, UsageInfo};
 use log::info;
 
-use crate::probes::builtin::llm::http::{self, ProtocolParser};
+use crate::probes::builtin::llm::background::{BackgroundCalls, PendingCall};
+use crate::probes::builtin::llm::http::{self, BackgroundState, ProtocolParser};
 
 // Buffer size constants
 const MAX_REQUEST_BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB max for request (images, large context)
@@ -25,6 +26,8 @@ enum ProcessorState {
         start_time: Instant,
         parser: Box<dyn ProtocolParser>,
     },
+    /// An HTTP/2 connection: frames demultiplexed into streams, recorded per stream.
+    Http2(Box<http::H2Conn>),
     /// Finished or Invalid
     Finished,
 }
@@ -42,6 +45,8 @@ fn fmt_pod(pod_info: &Option<std::sync::Arc<crate::k8s::PodInfo>>) -> String {
 pub enum Outcome {
     Pending,
     Recorded,
+    /// A background call was queued; its result is recorded from a later poll.
+    Deferred,
     /// The call was counted as unparsed instead of recorded.
     Unparsed(UnparsedReason),
 }
@@ -54,6 +59,7 @@ pub enum UnparsedReason {
     ConnectionClosed,
     RequestTooLarge,
     ResponseTooLarge,
+    BackgroundUnfinished,
 }
 
 impl UnparsedReason {
@@ -65,6 +71,7 @@ impl UnparsedReason {
             Self::ConnectionClosed => "connection_closed",
             Self::RequestTooLarge => "request_too_large",
             Self::ResponseTooLarge => "response_too_large",
+            Self::BackgroundUnfinished => "background_unfinished",
         }
     }
 }
@@ -85,6 +92,7 @@ impl std::fmt::Display for UnparsedReason {
                 "response exceeded the {}MB buffer limit",
                 MAX_RESPONSE_BUFFER_SIZE / (1024 * 1024)
             ),
+            Self::BackgroundUnfinished => f.write_str("background call's usage was never seen"),
         }
     }
 }
@@ -103,6 +111,8 @@ pub struct StreamProcessor {
     frag_dir: LlmDirection,
     /// A request head written before the HTTP/1.1 response ended: where it starts in `write_buf`, and when.
     next_request: Option<(usize, Instant)>,
+    /// Response id of the background call this request polls.
+    continuation: Option<Box<str>>,
 }
 
 impl Default for StreamProcessor {
@@ -124,6 +134,7 @@ impl StreamProcessor {
             frag_next: 0,
             frag_dir: LlmDirection::Unknown,
             next_request: None,
+            continuation: None,
         }
     }
 
@@ -147,9 +158,31 @@ impl StreamProcessor {
         offset: u32,
         len: u32,
         truncated: bool,
+        background: &mut BackgroundCalls,
         pid: u32,
         #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
     ) -> Outcome {
+        // HTTP/2 is a connection-level path: once the client preface is seen, every fragment feeds the
+        // frame readers and the HTTP/1.1 state machine below is left untouched.
+        if matches!(self.state, ProcessorState::Http2(_))
+            || matches!(self.state, ProcessorState::Detecting)
+                && direction == LlmDirection::Write
+                && offset == 0
+                && self.write_buf.is_empty()
+                && http::starts_preface(data)
+        {
+            if matches!(self.state, ProcessorState::Detecting) {
+                self.state = ProcessorState::Http2(Box::new(http::H2Conn::new()));
+            }
+            return self.feed_http2(
+                direction,
+                data,
+                pid,
+                #[cfg(feature = "k8s")]
+                pod_info,
+            );
+        }
+
         let end = offset.saturating_add(data.len() as u32);
         let complete = end as usize >= (len as usize).min(capture_limit(direction));
         // The kernel sends a call's fragments in order and stops at the first with no ringbuf room.
@@ -183,6 +216,7 @@ impl StreamProcessor {
         };
         if resync {
             self.resume_next_request(
+                background,
                 pid,
                 #[cfg(feature = "k8s")]
                 pod_info.as_ref(),
@@ -203,14 +237,57 @@ impl StreamProcessor {
         }
 
         #[cfg(feature = "k8s")]
-        let fed = self.handle_event(direction, data, complete, pid, pod_info);
+        let fed = self.handle_event(direction, data, complete, background, pid, pod_info);
         #[cfg(not(feature = "k8s"))]
-        let fed = self.handle_event(direction, data, complete, pid);
+        let fed = self.handle_event(direction, data, complete, background, pid);
         if matches!(dropped, Outcome::Unparsed(_)) {
             dropped
         } else {
             fed
         }
+    }
+
+    /// Feed one fragment to the HTTP/2 connection, recording each stream whose response ended.
+    fn feed_http2(
+        &mut self,
+        direction: LlmDirection,
+        data: &[u8],
+        pid: u32,
+        #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
+    ) -> Outcome {
+        self.last_activity = Instant::now();
+        let ProcessorState::Http2(conn) = &mut self.state else {
+            return Outcome::Pending;
+        };
+        let mut outcome = Outcome::Pending;
+        conn.feed(direction, data, |event| match event {
+            http::H2Event::Detected { path } => {
+                #[cfg(feature = "k8s")]
+                let pod_str = fmt_pod(&pod_info);
+                #[cfg(not(feature = "k8s"))]
+                let pod_str = "";
+                info!("[LLM] Detected HTTP/2: {} (PID: {}){}", path, pid, pod_str);
+            }
+            http::H2Event::Recorded { usage, start } => {
+                record_usage(
+                    &usage,
+                    start,
+                    pid,
+                    #[cfg(feature = "k8s")]
+                    pod_info.clone(),
+                );
+                outcome = Outcome::Recorded;
+            }
+            http::H2Event::Unparsed { reason } => {
+                outcome = Self::count_unparsed(
+                    pid,
+                    reason,
+                    #[cfg(feature = "k8s")]
+                    pod_info.as_ref(),
+                );
+            }
+        });
+        outcome
     }
 
     /// End of the connection: an LLM call still without usage (request or response) is counted as unparsed.
@@ -219,6 +296,21 @@ impl StreamProcessor {
         pid: u32,
         #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
     ) -> Outcome {
+        // Each HTTP/2 stream still open at close was a detected call that never reported usage.
+        if let ProcessorState::Http2(conn) = &self.state {
+            let open = conn.open_streams();
+            self.state = ProcessorState::Finished;
+            let mut outcome = Outcome::Pending;
+            for _ in 0..open {
+                outcome = Self::count_unparsed(
+                    pid,
+                    UnparsedReason::ConnectionClosed,
+                    #[cfg(feature = "k8s")]
+                    pod_info,
+                );
+            }
+            return outcome;
+        }
         self.drop_response(
             pid,
             UnparsedReason::ConnectionClosed,
@@ -283,6 +375,7 @@ impl StreamProcessor {
     /// Start over from the request written mid-response, so this Read is parsed as its response.
     fn resume_next_request(
         &mut self,
+        background: &BackgroundCalls,
         pid: u32,
         #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
     ) {
@@ -294,6 +387,7 @@ impl StreamProcessor {
         self.read_progress = http::ResponseProgress::default();
         // Detected again, so a non-LLM request after the loss is skipped like any other.
         self.state = match self.detect(
+            background,
             pid,
             #[cfg(feature = "k8s")]
             pod_info,
@@ -328,7 +422,7 @@ impl StreamProcessor {
         }
     }
 
-    /// Count the response in progress as unparsed rather than record it as a 0-token failure.
+    /// Count the response in progress as unparsed rather than record it as a 0-token failure; a poll's is not a call.
     fn drop_response(
         &mut self,
         pid: u32,
@@ -339,6 +433,10 @@ impl StreamProcessor {
             return Outcome::Pending;
         }
         self.state = ProcessorState::Finished;
+        // A poll cut short settles nothing: its call stays pending until a result or the TTL.
+        if self.continuation.take().is_some() {
+            return Outcome::Pending;
+        }
         Self::count_unparsed(
             pid,
             reason,
@@ -376,6 +474,7 @@ impl StreamProcessor {
         direction: LlmDirection,
         data: &[u8],
         complete: bool,
+        background: &mut BackgroundCalls,
         pid: u32,
         #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
     ) -> Outcome {
@@ -405,6 +504,7 @@ impl StreamProcessor {
         match std::mem::replace(&mut self.state, ProcessorState::Finished) {
             ProcessorState::Detecting => {
                 self.state = self.detect(
+                    background,
                     pid,
                     #[cfg(feature = "k8s")]
                     pod_info.as_ref(),
@@ -419,23 +519,28 @@ impl StreamProcessor {
             ProcessorState::ProcessingRequest { start_time, parser }
             | ProcessorState::ProcessingResponse { start_time, parser } => {
                 // Parse once the SSL call's last fragment is in, not on a partial record
-                if complete
-                    && let Some(usage) = match &mut self.past_limit {
+                if complete {
+                    let usage = match &mut self.past_limit {
                         Some(followed) => followed.take_usage(),
                         None => parser.parse_response_from(&self.read_buf, &mut self.read_progress),
-                    }
-                {
-                    record_usage(
-                        &usage,
+                    };
+                    let state = self.read_progress.take_background();
+                    if let Some(outcome) = self.settle(
+                        usage,
+                        state,
                         start_time,
+                        background,
                         pid,
                         #[cfg(feature = "k8s")]
                         pod_info,
-                    );
-                    return Outcome::Recorded;
+                    ) {
+                        return outcome;
+                    }
                 }
                 self.state = ProcessorState::ProcessingResponse { start_time, parser };
             }
+            // handle_fragment routes HTTP/2 before this point, so it is never reached here.
+            ProcessorState::Http2(conn) => self.state = ProcessorState::Http2(conn),
             ProcessorState::Finished => {}
         }
         Outcome::Pending
@@ -494,13 +599,24 @@ impl StreamProcessor {
 
     /// Next state for the request bytes buffered so far.
     fn detect(
-        &self,
+        &mut self,
+        background: &BackgroundCalls,
         pid: u32,
         #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
     ) -> ProcessorState {
         let (version, path, parser): (&str, String, Box<dyn ProtocolParser>) =
             if let Some(path) = http::Http11Parser.detect_request(&self.write_buf) {
                 ("HTTP/1.1", path, Box::new(http::Http11Parser))
+            } else if let Some(id) = http::Http11Parser::retrieved_response_id(&self.write_buf)
+                .filter(|id| background.contains(id))
+            {
+                // Only a call this node saw queued: other GETs read stored objects already recorded.
+                self.continuation = Some(id.into());
+                (
+                    "HTTP/1.1",
+                    format!("poll of background call {id}"),
+                    Box::new(http::Http11Parser),
+                )
             } else if let Some(path) = http::Http2Parser.detect_request(&self.write_buf) {
                 ("HTTP/2", path, Box::new(http::Http2Parser))
             } else if self.write_buf.len() > DETECTION_BUFFER_THRESHOLD {
@@ -532,7 +648,141 @@ impl StreamProcessor {
         self.read_progress = http::ResponseProgress::default();
         self.past_limit = None;
         self.next_request = None;
+        self.continuation = None;
     }
+
+    /// Record, defer or drop the call once its response parsed to `usage` and `state`; None keeps waiting.
+    fn settle(
+        &mut self,
+        usage: Option<UsageInfo>,
+        state: Option<BackgroundState>,
+        start_time: Instant,
+        background: &mut BackgroundCalls,
+        pid: u32,
+        #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
+    ) -> Option<Outcome> {
+        match self.continuation.take() {
+            Some(id) => self.settle_poll(id, usage, state, background),
+            None => settle_create(
+                usage,
+                state,
+                start_time,
+                background,
+                pid,
+                #[cfg(feature = "k8s")]
+                pod_info,
+            ),
+        }
+    }
+
+    /// A poll of background call `id`: its result is recorded once, against the create request.
+    fn settle_poll(
+        &mut self,
+        id: Box<str>,
+        usage: Option<UsageInfo>,
+        state: Option<BackgroundState>,
+        background: &mut BackgroundCalls,
+    ) -> Option<Outcome> {
+        // A body past the buffer limit keeps no state; usage with tokens is still the call's result.
+        let state = state.or_else(|| {
+            usage
+                .as_ref()
+                .filter(|u| u.prompt_tokens > 0 || u.completion_tokens > 0)
+                .map(|_| BackgroundState::Ended)
+        });
+        let end = match state {
+            Some(BackgroundState::Running(_)) => {
+                background.touch(&id);
+                return Some(Outcome::Pending);
+            }
+            Some(end) => end,
+            // An error body (unknown id, 5xx) settles nothing; the call waits for a result or its TTL.
+            None if usage.is_some() => return Some(Outcome::Pending),
+            None => {
+                // A resumed stream can outlast the TTL.
+                background.touch(&id);
+                self.continuation = Some(id);
+                return None;
+            }
+        };
+        let Some(call) = background.take(&id) else {
+            // Another poll recorded it already.
+            return Some(Outcome::Pending);
+        };
+        let usage = match (usage, end) {
+            (Some(usage), _) => usage,
+            // A cancel can come before any token was counted: one failed call.
+            (None, BackgroundState::Cancelled) => UsageInfo::default(),
+            (None, _) => return Some(give_up(call)),
+        };
+        record_usage(
+            &usage,
+            call.start_time,
+            call.pid,
+            #[cfg(feature = "k8s")]
+            call.pod_info,
+        );
+        Some(Outcome::Recorded)
+    }
+}
+
+/// Any call but a poll: recorded with usage, deferred when it was queued in background mode.
+fn settle_create(
+    usage: Option<UsageInfo>,
+    state: Option<BackgroundState>,
+    start_time: Instant,
+    background: &mut BackgroundCalls,
+    pid: u32,
+    #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
+) -> Option<Outcome> {
+    match (usage, state) {
+        (Some(usage), _) => {
+            record_usage(
+                &usage,
+                start_time,
+                pid,
+                #[cfg(feature = "k8s")]
+                pod_info,
+            );
+            Some(Outcome::Recorded)
+        }
+        (None, Some(BackgroundState::Running(id))) => {
+            let call = PendingCall::new(
+                start_time,
+                pid,
+                #[cfg(feature = "k8s")]
+                pod_info,
+            );
+            Some(defer(id, call, background))
+        }
+        (None, _) => None,
+    }
+}
+
+/// Keep a queued background call until a poll brings its result.
+fn defer(id: Box<str>, call: PendingCall, background: &mut BackgroundCalls) -> Outcome {
+    #[cfg(feature = "k8s")]
+    let pod_str = fmt_pod(&call.pod_info);
+    #[cfg(not(feature = "k8s"))]
+    let pod_str = "";
+    info!(
+        "LLM BACKGROUND | PID: {} | {} queued, waiting for its result{}",
+        call.pid, id, pod_str
+    );
+    if let Some(evicted) = background.insert(id, call) {
+        give_up(evicted);
+    }
+    Outcome::Deferred
+}
+
+/// Count a background call whose usage will not be seen: evicted, idle past its TTL, or ended without it.
+pub(super) fn give_up(call: PendingCall) -> Outcome {
+    StreamProcessor::count_unparsed(
+        call.pid,
+        UnparsedReason::BackgroundUnfinished,
+        #[cfg(feature = "k8s")]
+        call.pod_info.as_ref(),
+    )
 }
 
 /// How a response past the buffer limit is followed without keeping its body.

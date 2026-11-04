@@ -3,7 +3,7 @@
 use aya_ebpf::helpers::{bpf_get_current_pid_tgid, bpf_probe_read_user};
 use honeybeepf_llm_common::{
     LlmDirection,
-    ssl_class::{self, ClassEntry},
+    ssl_class::{self, ClassEntry, GetHead},
 };
 
 use super::{helpers::SslCall, maps::SSL_CLASS};
@@ -23,7 +23,15 @@ pub fn drops(call: &SslCall, rw: u8) -> bool {
         } else {
             [0; 8]
         };
-        ssl_class::after_write(entry, head, call.len)
+        let gets_response = || {
+            if (call.len as usize) < size_of::<GetHead>() {
+                return false;
+            }
+            // SAFETY: the helper checks the user address; a fault returns Err, read as not a Responses GET.
+            unsafe { bpf_probe_read_user(call.buf_addr as *const GetHead) }
+                .is_ok_and(|words| ssl_class::requests_response(&words))
+        };
+        ssl_class::after_write(entry, head, call.len, gets_response)
     } else {
         ssl_class::after_read(entry)
     };

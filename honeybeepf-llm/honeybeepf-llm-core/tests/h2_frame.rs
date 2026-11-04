@@ -8,6 +8,8 @@ enum Ev {
     BlockTooLarge(u32),
     Data(u32, Vec<u8>),
     End(u32),
+    Reset(u32),
+    Goaway(u32),
 }
 
 type Read = (Vec<Ev>, Option<Broken>);
@@ -31,6 +33,8 @@ fn read_pieces<'a>(mut r: FrameReader, pieces: impl IntoIterator<Item = &'a [u8]
             (Frame::Headers { stream, block }, _) => evs.push(Ev::Headers(stream, block.to_vec())),
             (Frame::HeadersTooLarge { stream }, _) => evs.push(Ev::BlockTooLarge(stream)),
             (Frame::StreamEnd { stream }, _) => evs.push(Ev::End(stream)),
+            (Frame::Reset { stream }, _) => evs.push(Ev::Reset(stream)),
+            (Frame::Goaway { last_stream }, _) => evs.push(Ev::Goaway(last_stream)),
             (other, _) => panic!("unexpected {other:?}"),
         });
     }
@@ -64,9 +68,14 @@ fn test_frames_read_the_same_at_any_split() {
             [frame(1, 0x1, 3, b"ab"), frame(9, 0, 3, b"cd"), frame(9, 0x4, 3, b"e")].concat(), vec![Headers(3, d(b"abcde")), End(3)], None),
         ("empty DATA with END_STREAM, padding only", [frame(0, 0x1, 1, b""), frame(0, 0x8, 3, b"\x02\0\0")].concat(), vec![End(1)], None),
         ("DATA that looks like a preface and a frame head", frame(0, 0, 1, lookalike), vec![Data(1, d(lookalike))], None),
-        ("SETTINGS, PING, WINDOW_UPDATE, PRIORITY, RST_STREAM, GOAWAY, unknown type skipped", [
+        ("SETTINGS, PING, WINDOW_UPDATE, PRIORITY, unknown type skipped", [
             frame(4, 0, 0, b"\0\x01\0\0\x10\0"), frame(6, 0, 0, &[0; 8]), frame(8, 0, 1, b"\0\0\x10\0"), frame(2, 0, 1, &[0; 5]),
-            frame(3, 0, 1, b"\0\0\0\x08"), frame(7, 0, 0, b"\0\0\0\x05\0\0\0\0debug"), frame(0x42, 0x8, 1, b"zz"), late.clone()].concat(),
+            frame(0x42, 0x8, 1, b"zz"), late.clone()].concat(),
+            vec![Data(1, d(b"late"))], None),
+        ("RST_STREAM gives its stream, GOAWAY its last-stream from the payload head", [
+            frame(3, 0, 1, b"\0\0\0\x08"), frame(7, 0, 0, b"\0\0\0\x05\0\0\0\0debug"), late.clone()].concat(),
+            vec![Reset(1), Goaway(5), Data(1, d(b"late"))], None),
+        ("a GOAWAY shorter than its last-stream-id yields no event", [frame(7, 0, 0, b"\0\0\x05"), late.clone()].concat(),
             vec![Data(1, d(b"late"))], None),
         ("CONTINUATION without HEADERS", [frame(9, 0x4, 1, b"x"), late.clone()].concat(), vec![], Some(Continuation)),
         ("DATA inside a header block", [frame(1, 0, 1, b"a"), late.clone()].concat(), vec![], Some(Continuation)),
@@ -192,6 +201,8 @@ fn test_recorded_connections_read_into_their_streams_at_any_split() {
                     Ev::End(s) => ends.push(s),
                     Ev::Data(s, d) => data.entry(s).or_default().extend(d),
                     Ev::BlockTooLarge(s) => panic!("{name}.{dir}: block of stream {s} too large"),
+                    // A real capture ends with a connection-close GOAWAY; it is not part of the streams.
+                    Ev::Reset(_) | Ev::Goaway(_) => {}
                 }
             }
             assert_eq!(
