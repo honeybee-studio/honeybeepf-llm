@@ -50,6 +50,50 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  build-arm64:
+    name: Build (release, arm64 cross)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: nightly-2026-04-30
+          components: rust-src
+          targets: aarch64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: honeybeepf-llm
+          key: arm64
+
+      - name: Install aarch64 cross linker
+        # libc6-dev-arm64-cross is only a Recommends of gcc-aarch64-linux-gnu, so
+        # --no-install-recommends drops the arm64 crt objects and the link fails.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+
+      - name: Install bpf-linker
+        run: cargo install bpf-linker --locked --version 0.10.3
+
+      # The eBPF object (bpfel) is architecture-neutral; only the userspace crate
+      # cross-compiles, exactly as the Dockerfile does for the arm64 image.
+      - name: Build release (aarch64)
+        working-directory: honeybeepf-llm
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release -p honeybeepf-llm --target aarch64-unknown-linux-gnu
+
+      - name: Upload binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: honeybeepf-llm-bin-arm64
+          path: honeybeepf-llm/target/aarch64-unknown-linux-gnu/release/honeybeepf-llm
+          if-no-files-found: error
+          retention-days: 1
+
   matrix:
     name: lvh ${{ matrix.kernel }}
     needs: build
@@ -92,4 +136,68 @@ jobs:
           image-version: ${{ matrix.kernel }}
           host-mount: ./
           install-dependencies: 'true'
+          cmd: bash /host/ci/smoke.sh
+
+  matrix-arm64:
+    name: lvh ${{ matrix.kernel }} (arm64)
+    needs: build-arm64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    # Public arm64 runners expose no /dev/kvm, so the guest runs under slow TCG
+    # emulation (the "Report KVM" step confirms this per run). The lanes are
+    # non-blocking until a green run lets us make them required and update the README.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        # 5.15 (<6.0, no fentry) exercises the kprobe fallback for the libssl open
+        # watch; 6.1 (>=6.0) exercises fentry. Two lanes only, because of TCG.
+        kernel:
+          - '5.15-20261013.143814'
+          - '6.1-20261013.143814'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: honeybeepf-llm-bin-arm64
+          path: ./bin
+
+      - run: chmod +x bin/honeybeepf-llm
+
+      - name: Report KVM availability
+        run: |
+          echo "runner arch: $(uname -m)"
+          if [ -e /dev/kvm ]; then
+            echo "/dev/kvm present: $(ls -l /dev/kvm)"
+          else
+            echo "/dev/kvm absent — qemu runs under TCG emulation"
+          fi
+
+      # lvh's own dependency step runs `kvm-ok`, which exits non-zero on a
+      # KVM-less runner and fails the job before the VM boots. There is no input
+      # to skip just that check, so install qemu here and set
+      # install-dependencies: false; lvh itself falls back to TCG without KVM.
+      - name: Install qemu (arm64)
+        # ipxe-qemu ships the virtio-net option ROM (efi-virtio.rom) qemu needs;
+        # it is only a Recommends of qemu-system-*, so name it explicitly here.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-utils ipxe-qemu
+
+      # arm64 lvh disk images are not self-booting (no firmware, Bootable()=false),
+      # so a matching host kernel is pulled from the multi-arch
+      # quay.io/lvh-images/kernel-images and passed to qemu with --kernel.
+      - uses: cilium/little-vm-helper@c8b0bfbae3bdda7bc69fb9cd370e4b74ce84986d # v0.0.33
+        with:
+          test-name: smoke-${{ matrix.kernel }}-arm64
+          arch: arm64
+          image: 'kind'
+          image-version: ${{ matrix.kernel }}-arm64
+          kernel-version: ${{ matrix.kernel }}
+          # Leave empty so lvh uses "-cpu max" (valid under TCG); "host" needs KVM.
+          cpu-kind: ''
+          host-mount: ./
+          # qemu is installed above; this skips lvh's kvm-ok dependency step.
+          install-dependencies: 'false'
           cmd: bash /host/ci/smoke.sh
