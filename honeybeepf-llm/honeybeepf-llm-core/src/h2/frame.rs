@@ -191,6 +191,22 @@ impl FrameReader {
         self.state = State::Scan;
     }
 
+    /// Skip `n` lost bytes known to fall inside the current DATA frame's payload, keeping framing aligned
+    /// (its body just has a hole). Returns false — so the caller resyncs — when the gap is not safely inside
+    /// a DATA payload (a header block, or an unknown frame boundary).
+    pub fn skip_gap(&mut self, n: usize) -> bool {
+        if matches!(self.state, State::Payload)
+            && self.kind == FrameType::DATA
+            && self.front == 0
+            && n <= self.left.saturating_sub(self.pad)
+        {
+            self.left -= n;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Reads all of `input`, passing what it completes to `on` and keeping a cut frame for the next call.
     pub fn read(&mut self, input: &[u8], mut on: impl FnMut(Frame<'_>)) {
         // Once a resync re-anchors, `input` is repointed at the bytes kept past the anchor so they feed the
