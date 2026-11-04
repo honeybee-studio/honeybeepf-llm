@@ -178,8 +178,9 @@ impl H2Stream {
                 }
                 let text = String::from_utf8_lossy(&body);
                 let json = text.trim_start();
+                // Background Responses polling is HTTP/1.1 only (see PR notes); drop the state here.
                 json.starts_with('{')
-                    .then(|| parse_response_json(json))
+                    .then(|| parse_response_json(json, &mut None))
                     .flatten()
             }
         }
