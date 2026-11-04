@@ -215,32 +215,20 @@ impl StreamProcessor {
             );
         }
 
-        // A connection joined after its preface: no preface was seen, but the client bytes form a run of
-        // frame heads (HTTP/1.1, which starts with an uppercase method, never does). Classify it HTTP/2,
-        // start both directions unknown, and feed what was buffered as the first (lost) client bytes.
+        // A connection joined after its preface is recognized by a run of client frame heads.
         if matches!(self.state, ProcessorState::Detecting)
             && direction == LlmDirection::Write
-            && !starts_ascii_upper(&self.write_buf, data)
+            && let Some(outcome) = self.detect_h2_midjoin(
+                data,
+                complete,
+                end,
+                direction,
+                pid,
+                #[cfg(feature = "k8s")]
+                pod_info.as_ref(),
+            )
         {
-            let client = [&self.write_buf[..], data].concat();
-            if http::looks_like_http2(&client) {
-                info!("[LLM] Detected HTTP/2 (mid-stream join) (PID: {})", pid);
-                self.write_buf = Vec::new();
-                self.state = ProcessorState::Http2(Box::new(http::H2Conn::new_midjoin()));
-                self.h2_gap_client = H2Gap::Resync;
-                self.h2_gap_server = H2Gap::Resync;
-                self.frag_next = if complete { 0 } else { end };
-                self.frag_dir = direction;
-                let gap = self.take_h2_gap(direction);
-                return self.feed_http2(
-                    direction,
-                    &client,
-                    gap,
-                    pid,
-                    #[cfg(feature = "k8s")]
-                    pod_info,
-                );
-            }
+            return outcome;
         }
 
         let lost_tail = out_of_order && offset == 0 && self.frag_dir == LlmDirection::Read;
@@ -301,6 +289,43 @@ impl StreamProcessor {
         } else {
             fed
         }
+    }
+
+    /// Classify a connection joined after its preface: no preface was seen, but the client bytes form a run
+    /// of frame heads (HTTP/1.1, which starts with an uppercase method, never does). On a match it starts an
+    /// HTTP/2 connection with both directions unknown and feeds what was buffered, returning its outcome.
+    fn detect_h2_midjoin(
+        &mut self,
+        data: &[u8],
+        complete: bool,
+        end: u32,
+        direction: LlmDirection,
+        pid: u32,
+        #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
+    ) -> Option<Outcome> {
+        if starts_ascii_upper(&self.write_buf, data) {
+            return None;
+        }
+        let client = [&self.write_buf[..], data].concat();
+        if !http::looks_like_http2(&client) {
+            return None;
+        }
+        info!("[LLM] Detected HTTP/2 (mid-stream join) (PID: {})", pid);
+        self.write_buf = Vec::new();
+        self.state = ProcessorState::Http2(Box::new(http::H2Conn::new_midjoin()));
+        self.h2_gap_client = H2Gap::Resync;
+        self.h2_gap_server = H2Gap::Resync;
+        self.frag_next = if complete { 0 } else { end };
+        self.frag_dir = direction;
+        let gap = self.take_h2_gap(direction);
+        Some(self.feed_http2(
+            direction,
+            &client,
+            gap,
+            pid,
+            #[cfg(feature = "k8s")]
+            pod_info.cloned(),
+        ))
     }
 
     /// Feed one fragment to the HTTP/2 connection, recording each stream whose response ended. `gap` tells

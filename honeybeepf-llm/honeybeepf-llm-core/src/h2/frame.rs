@@ -192,9 +192,8 @@ impl FrameReader {
     }
 
     /// Skip `n` lost bytes known to fall inside the current DATA frame's payload, keeping framing aligned
-    /// (the frame's body just has a hole). Returns false when the gap is not safely inside a DATA payload —
-    /// a header block (its HPACK updates would be lost) or a frame boundary is unknown — so the caller
-    /// resyncs instead.
+    /// (its body just has a hole). Returns false — so the caller resyncs — when the gap is not safely inside
+    /// a DATA payload (a header block, or an unknown frame boundary).
     pub fn skip_gap(&mut self, n: usize) -> bool {
         if matches!(self.state, State::Payload)
             && self.kind == FrameType::DATA
