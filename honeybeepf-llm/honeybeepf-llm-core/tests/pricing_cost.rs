@@ -2,6 +2,7 @@ mod common;
 
 use common::{CallExt, MISSING, UNKNOWN, UNSUPPORTED, call, total};
 use honeybeepf_llm_core::pricing::{PriceTable, Unpriced};
+use honeybeepf_llm_core::types::UsageInfo;
 
 // Prices from the providers' pricing pages (2026-10-26), in USD per million tokens.
 const TABLE: &str = include_str!("fixtures/prices_test.json");
@@ -71,4 +72,42 @@ fn test_calls_are_priced_or_counted_as_unpriced() {
     }
     let huge = call("gpt-5", u64::MAX, u64::MAX).read(u64::MAX);
     assert!(table.cost(&huge).map(total).is_ok_and(f64::is_finite));
+}
+
+#[test]
+fn cache_savings_ceiling_uses_the_model_cache_price_or_a_conservative_bound() {
+    let table = PriceTable::from_json(TABLE).expect("test table loads");
+    let micro = |u: &UsageInfo| {
+        table
+            .cache_savings_ceiling(u)
+            .map(|(usd, exact)| ((usd * 1e6).round(), exact))
+    };
+    // sonnet: input $3, cache read $0.30 per million → 1000 uncached could save 1000×$2.70.
+    assert_eq!(
+        micro(&call("claude-sonnet-4-5", 1000, 0)),
+        Ok((2700.0, true))
+    );
+    // Tokens already read from cache are not counted; only the 300 uncached can still be saved.
+    assert_eq!(
+        micro(&call("claude-sonnet-4-5", 1000, 0).read(700)),
+        Ok((810.0, true))
+    );
+    // gpt-5.5-pro has an input price but no cache-read price → full input cost, flagged inexact.
+    assert_eq!(micro(&call("gpt-5.5-pro", 1000, 0)), Ok((30000.0, false)));
+    // Unknown model and inconsistent cache counts give the same reasons as cost().
+    assert_eq!(
+        table.cache_savings_ceiling(&call("my-vllm-llama", 1000, 0)),
+        Err(Unpriced::UnknownModel)
+    );
+    assert_eq!(
+        table.cache_savings_ceiling(&call("claude-opus-5-5", 100, 0).read(50).write(80)),
+        Err(Unpriced::InconsistentUsage)
+    );
+    // A u64::MAX prompt stays finite and non-negative, never a panic.
+    let huge = call("gpt-5", u64::MAX, 0);
+    assert!(
+        table
+            .cache_savings_ceiling(&huge)
+            .is_ok_and(|(usd, _)| usd.is_finite() && usd >= 0.0)
+    );
 }
