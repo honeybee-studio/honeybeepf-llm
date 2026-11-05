@@ -1365,7 +1365,7 @@ mod tests {
             ]
         );
         assert!(cost.data_points.iter().all(|p| {
-            label(&p.attributes, "price_table_version").as_deref() == Some("2026-10-28")
+            label(&p.attributes, "price_table_version").as_deref() == Some("2026-11-03")
         }));
         let unpriced = find("llm_unpriced_tokens_total")?
             .data
