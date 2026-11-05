@@ -93,46 +93,72 @@ pub fn capture_limit(dir: LlmDirection) -> usize {
     }
 }
 
+/// Fixed-size prefix of an SSL event; `buf` follows it, so a record can be sent as header + the
+/// payload bytes it actually holds rather than the whole struct.
 #[repr(C)]
-#[derive(Clone, Copy)]
-pub struct LlmEvent {
+#[derive(Clone, Copy, Default)]
+pub struct LlmEventHeader {
     pub metadata: EventMetadata,
-    pub is_handshake: u8, // 0 or 1 - separate from rw since handshake can occur during read/write
-    pub rw: u8,           // Uses LlmDirection
-    pub truncated: u8,    // 1 when len > capture_limit(rw): bytes past it are never sent
-    pub closed: u8,       // 1 for SSL_free: the connection is gone and carries no data
-    pub len: u32,         // total bytes of the SSL call, the same on each of its fragments
-    pub buf_filled: u32,
-    pub offset: u32,  // position of buf[0] within the call's data
     pub ssl_ptr: u64, // the call's SSL*, which identifies the connection
-    pub buf: [u8; MAX_SSL_BUF_SIZE],
     pub latency_ns: u64,
+    pub len: u32, // total bytes of the SSL call, the same on each of its fragments
+    pub buf_filled: u32, // 0 when the record carries no payload (SSL_free, handshake, read error)
+    pub offset: u32, // position of buf[0] within the call's data
+    pub is_handshake: u8, // 0 or 1 - separate from rw since handshake can occur during read/write
+    pub rw: u8,   // Uses LlmDirection
+    pub truncated: u8, // 1 when len > capture_limit(rw): bytes past it are never sent
+    pub closed: u8, // 1 for SSL_free: the connection is gone and carries no data
     pub comm: [u8; 16],
 }
 
-// Manual Default implementation for LlmEvent (derives don't work well with large arrays in no_std)
-impl Default for LlmEvent {
-    fn default() -> Self {
-        Self {
-            metadata: EventMetadata::default(),
-            is_handshake: 0,
-            rw: 0,
-            truncated: 0,
-            closed: 0,
-            len: 0,
-            buf_filled: 0,
-            offset: 0,
-            ssl_ptr: 0,
-            buf: [0u8; MAX_SSL_BUF_SIZE],
-            latency_ns: 0,
-            comm: [0u8; 16],
+impl LlmEventHeader {
+    /// Payload bytes this fragment carries in `buf`, from the capture window; 0 when `buf_filled` is 0.
+    pub fn payload_len(&self) -> usize {
+        if self.buf_filled == 0 {
+            return 0;
+        }
+        let avail = self.len.saturating_sub(self.offset) as usize;
+        if avail < MAX_SSL_BUF_SIZE {
+            avail
+        } else {
+            MAX_SSL_BUF_SIZE
         }
     }
 }
 
-// No padding (ssl_ptr sits at offset 40); a bigger event means fewer ringbuf slots.
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for LlmEventHeader {}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LlmEvent {
+    pub header: LlmEventHeader,
+    pub buf: [u8; MAX_SSL_BUF_SIZE],
+}
+
+// Manual Default (derives don't work well with large arrays in no_std).
+impl Default for LlmEvent {
+    fn default() -> Self {
+        Self {
+            header: LlmEventHeader::default(),
+            buf: [0u8; MAX_SSL_BUF_SIZE],
+        }
+    }
+}
+
+#[cfg(feature = "user")]
+impl LlmEvent {
+    /// The payload bytes in `buf`, sized by the header's capture window.
+    pub fn payload(&self) -> &[u8] {
+        &self.buf[..self.header.payload_len()]
+    }
+}
+
+// No padding: the header packs to 72 B and buf follows it; a bigger event means fewer ringbuf slots.
+const _: () = assert!(core::mem::size_of::<LlmEventHeader>() == 72);
+const _: () = assert!(core::mem::offset_of!(LlmEventHeader, ssl_ptr) == 24);
 const _: () = assert!(core::mem::size_of::<LlmEvent>() == 4168);
-const _: () = assert!(core::mem::offset_of!(LlmEvent, ssl_ptr) == 40);
+const _: () = assert!(core::mem::offset_of!(LlmEvent, buf) == 72);
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for LlmEvent {}

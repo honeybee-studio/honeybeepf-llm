@@ -150,16 +150,16 @@ pub trait LlmEventExt {
 impl LlmEventExt for LlmEvent {
     #[inline(always)]
     fn fill(&mut self, call: &SslCall, rw: u8, is_handshake: bool, offset: u32) -> Result<(), u32> {
-        self.metadata = call.metadata;
-        self.rw = rw;
-        self.is_handshake = if is_handshake { 1 } else { 0 };
-        self.truncated = (call.len as usize > capture_limit(LlmDirection::from(rw))) as u8;
-        self.closed = call.closed;
-        self.len = call.len;
-        self.offset = offset;
-        self.ssl_ptr = call.ssl;
-        self.latency_ns = call.latency_ns;
-        self.comm = call.comm;
+        self.header.metadata = call.metadata;
+        self.header.rw = rw;
+        self.header.is_handshake = if is_handshake { 1 } else { 0 };
+        self.header.truncated = (call.len as usize > capture_limit(LlmDirection::from(rw))) as u8;
+        self.header.closed = call.closed;
+        self.header.len = call.len;
+        self.header.offset = offset;
+        self.header.ssl_ptr = call.ssl;
+        self.header.latency_ns = call.latency_ns;
+        self.header.comm = call.comm;
 
         if call.buf_addr > 0 {
             let to_read =
@@ -167,12 +167,12 @@ impl LlmEventExt for LlmEvent {
             let src = (call.buf_addr + offset as u64) as *const u8;
             // Read directly into self.buf to avoid 4KB stack allocation
             if unsafe { bpf_probe_read_user_buf(src, &mut self.buf[..to_read]) }.is_err() {
-                self.buf_filled = 0;
+                self.header.buf_filled = 0;
                 return Err(1);
             }
-            self.buf_filled = 1;
+            self.header.buf_filled = 1;
         } else {
-            self.buf_filled = 0;
+            self.header.buf_filled = 0;
         }
         Ok(())
     }

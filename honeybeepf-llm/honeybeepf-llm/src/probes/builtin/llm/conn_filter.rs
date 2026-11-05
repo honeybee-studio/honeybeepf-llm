@@ -5,7 +5,7 @@ use aya::{
     Ebpf,
     maps::{HashMap as BpfHashMap, MapData},
 };
-use honeybeepf_llm_common::{LlmEvent, MAX_SSL_BUF_SIZE, ssl_class::ClassEntry};
+use honeybeepf_llm_common::{LlmEventHeader, ssl_class::ClassEntry};
 use honeybeepf_llm_core::types::LlmDirection;
 
 use super::{StreamMap, http, processor::StreamProcessor};
@@ -30,11 +30,16 @@ impl ConnFilter {
 
     /// Whether the event opens a request to a non-provider host and was consumed: its stream dropped, its
     /// connection skipped in the kernel.
-    pub fn skip_if_foreign(&mut self, event: &LlmEvent, streams: &StreamMap) -> bool {
-        if !opens_foreign_request(event) {
+    pub fn skip_if_foreign(
+        &mut self,
+        header: &LlmEventHeader,
+        data: &[u8],
+        streams: &StreamMap,
+    ) -> bool {
+        if !opens_foreign_request(header, data) {
             return false;
         }
-        let key = (event.metadata.pid, event.ssl_ptr);
+        let key = (header.metadata.pid, header.ssl_ptr);
         {
             let mut map = streams.lock().unwrap_or_else(|e| e.into_inner());
             // A stream with an LLM call in progress keeps going, so it is still recorded or counted.
@@ -43,38 +48,26 @@ impl ConnFilter {
             }
             map.remove(&key);
         }
-        self.skip_connection(event);
+        self.skip_connection(header);
         true
     }
 
-    fn skip_connection(&mut self, event: &LlmEvent) {
-        let key = [u64::from(event.metadata.pid), event.ssl_ptr];
+    fn skip_connection(&mut self, header: &LlmEventHeader) {
+        let key = [u64::from(header.metadata.pid), header.ssl_ptr];
         if let Some(entry) = self
             .map
             .get(&key, 0)
             .ok()
-            .and_then(|v| ClassEntry(v).skip_connection(event.metadata.timestamp))
+            .and_then(|v| ClassEntry(v).skip_connection(header.metadata.timestamp))
         {
             let _ = self.map.insert(key, entry.0, BPF_EXIST);
         }
     }
 }
 
-/// The SSL call bytes this event carries.
-pub(super) fn payload(event: &LlmEvent) -> &[u8] {
-    if event.buf_filled == 0 {
-        return &[];
-    }
-    let len = std::cmp::min(
-        event.len.saturating_sub(event.offset) as usize,
-        MAX_SSL_BUF_SIZE,
-    );
-    &event.buf[..len]
-}
-
 /// Whether the event starts a request to a host no provider serves; an HTTP/1.1 connection keeps one Host.
-pub(super) fn opens_foreign_request(event: &LlmEvent) -> bool {
-    LlmDirection::from(event.rw) == LlmDirection::Write
-        && event.offset == 0
-        && http::Http11Parser::has_foreign_host(payload(event))
+pub(super) fn opens_foreign_request(header: &LlmEventHeader, data: &[u8]) -> bool {
+    LlmDirection::from(header.rw) == LlmDirection::Write
+        && header.offset == 0
+        && http::Http11Parser::has_foreign_host(data)
 }
