@@ -93,6 +93,23 @@ impl Prices {
     }
 }
 
+/// Which attempt of a server-side fallback a metric row is; a closed two-value `attempt` label
+/// so a declined attempt's billed tokens and cost are not read as a served call to that model.
+#[derive(Clone, Copy)]
+enum Attempt {
+    Served,
+    Declined,
+}
+
+impl Attempt {
+    fn as_str(self) -> &'static str {
+        match self {
+            Attempt::Served => "served",
+            Attempt::Declined => "declined",
+        }
+    }
+}
+
 impl HoneyBeeMetrics {
     fn new(meter: &Meter, prices: Option<Prices>) -> Self {
         Self {
@@ -238,23 +255,28 @@ impl HoneyBeeMetrics {
 
     /// Record a served call, then the billed tokens and cost of each earlier server-side fallback
     /// attempt under its own model. The served call owns the one request count and its latency;
-    /// `attrs_for(model, status)` builds the label set, pod labels included.
+    /// `attrs_for(model, status, attempt)` builds the label set, pod labels included.
     fn record_llm_call(
         &self,
         usage: &UsageInfo,
         model: &str,
         latency_secs: f64,
         is_error: bool,
-        attrs_for: impl Fn(&str, &str) -> Vec<KeyValue>,
+        attrs_for: impl Fn(&str, &str, Attempt) -> Vec<KeyValue>,
     ) {
         let status = if is_error { "error" } else { "success" };
-        self.record_llm(usage, latency_secs, is_error, attrs_for(model, status));
+        self.record_llm(
+            usage,
+            latency_secs,
+            is_error,
+            attrs_for(model, status, Attempt::Served),
+        );
         for attempt in &usage.iterations {
             if attempt.prompt_tokens == 0 && attempt.completion_tokens == 0 {
                 continue;
             }
             let model = attempt.model.as_deref().unwrap_or("unknown");
-            self.record_tokens(attempt, attrs_for(model, "success"));
+            self.record_tokens(attempt, attrs_for(model, "success", Attempt::Declined));
         }
     }
 
@@ -634,27 +656,36 @@ pub fn record_llm_request(
     #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
 ) {
     if let Some(m) = metrics() {
-        m.record_llm_call(usage, model, latency_secs, is_error, |model, status| {
-            llm_attrs(
-                model,
-                status,
-                #[cfg(feature = "k8s")]
-                pod_info,
-            )
-        });
+        m.record_llm_call(
+            usage,
+            model,
+            latency_secs,
+            is_error,
+            |model, status, attempt| {
+                llm_attrs(
+                    model,
+                    status,
+                    attempt,
+                    #[cfg(feature = "k8s")]
+                    pod_info,
+                )
+            },
+        );
     }
 }
 
-/// The model and status labels of an LLM call, plus the pod target labels when k8s is on.
+/// The model, status and attempt labels of an LLM call, plus the pod target labels when k8s is on.
 fn llm_attrs(
     model: &str,
     status: &str,
+    attempt: Attempt,
     #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
 ) -> Vec<KeyValue> {
     #[allow(unused_mut)]
     let mut attrs = vec![
         KeyValue::new("model", model.to_string()),
         KeyValue::new("status", status.to_string()),
+        KeyValue::new("attempt", attempt.as_str()),
     ];
     #[cfg(feature = "k8s")]
     push_pod_attrs(&mut attrs, pod_info);
@@ -1009,12 +1040,19 @@ mod tests {
             }],
             ..UsageInfo::default()
         };
-        metrics.record_llm_call(&usage, "claude-opus-4-8", 1.0, false, |model, status| {
-            vec![
-                KeyValue::new("model", model.to_string()),
-                KeyValue::new("status", status.to_string()),
-            ]
-        });
+        metrics.record_llm_call(
+            &usage,
+            "claude-opus-4-8",
+            1.0,
+            false,
+            |model, status, attempt| {
+                vec![
+                    KeyValue::new("model", model.to_string()),
+                    KeyValue::new("status", status.to_string()),
+                    KeyValue::new("attempt", attempt.as_str()),
+                ]
+            },
+        );
 
         let mut rm = ResourceMetrics {
             resource: Resource::empty(),
@@ -1059,6 +1097,95 @@ mod tests {
     }
 
     #[test]
+    fn llm_fallback_attempt_label_separates_declined_tokens_from_served() -> Result<()> {
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(None));
+        // Same model is declined once and serves once; only attempt tells the two rows apart.
+        let usage = UsageInfo {
+            prompt_tokens: 100,
+            completion_tokens: 40,
+            model: Some("claude-opus-4-8".to_string()),
+            iterations: vec![UsageInfo {
+                prompt_tokens: 70,
+                completion_tokens: 0,
+                model: Some("claude-opus-4-8".to_string()),
+                ..UsageInfo::default()
+            }],
+            ..UsageInfo::default()
+        };
+        metrics.record_llm_call(
+            &usage,
+            "claude-opus-4-8",
+            1.0,
+            false,
+            |model, status, attempt| {
+                llm_attrs(
+                    model,
+                    status,
+                    attempt,
+                    #[cfg(feature = "k8s")]
+                    None,
+                )
+            },
+        );
+
+        let mut rm = ResourceMetrics {
+            resource: Resource::empty(),
+            scope_metrics: vec![],
+        };
+        reader.collect(&mut rm)?;
+        let get = |key: &str, attrs: &[KeyValue]| {
+            attrs
+                .iter()
+                .find(|kv| kv.key.as_str() == key)
+                .map(|kv| kv.value.to_string())
+        };
+        // Prompt tokens by attempt: served carries the served call, declined the fallback attempt.
+        let prompt_by_attempt = |want: &str| -> u64 {
+            rm.scope_metrics
+                .iter()
+                .flat_map(|s| &s.metrics)
+                .find(|m| m.name == "llm_tokens_total")
+                .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
+                .map(|sum| {
+                    sum.data_points
+                        .iter()
+                        .filter(|p| get("token_type", &p.attributes).as_deref() == Some("prompt"))
+                        .filter(|p| get("attempt", &p.attributes).as_deref() == Some(want))
+                        .map(|p| p.value)
+                        .sum()
+                })
+                .unwrap_or(0)
+        };
+        // Distinct series, so a dashboard can read a declined attempt's tokens on their own
+        // rather than summed into the served call to the same model.
+        assert_eq!(prompt_by_attempt("served"), 100);
+        assert_eq!(prompt_by_attempt("declined"), 70);
+        // The declined attempt's cost lands on its own attempt="declined" row (the #152/#154
+        // visibility this label exists for), not inside the served model's cost.
+        let cost_attempts: std::collections::BTreeSet<String> = rm
+            .scope_metrics
+            .iter()
+            .flat_map(|s| &s.metrics)
+            .find(|m| m.name == "llm_cost_usd_total")
+            .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<f64>>())
+            .map(|sum| {
+                sum.data_points
+                    .iter()
+                    .filter(|p| p.value > 0.0)
+                    .filter_map(|p| get("attempt", &p.attributes))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(cost_attempts.contains("served"));
+        assert!(cost_attempts.contains("declined"));
+        Ok(())
+    }
+
+    #[test]
     fn llm_suppressed_fallback_attempt_records_tokens_but_no_cost() -> Result<()> {
         let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
         let provider = SdkMeterProvider::builder()
@@ -1079,10 +1206,11 @@ mod tests {
             }],
             ..UsageInfo::default()
         };
-        metrics.record_llm_call(&usage, "served-m", 1.0, false, |model, status| {
+        metrics.record_llm_call(&usage, "served-m", 1.0, false, |model, status, attempt| {
             vec![
                 KeyValue::new("model", model.to_string()),
                 KeyValue::new("status", status.to_string()),
+                KeyValue::new("attempt", attempt.as_str()),
             ]
         });
 
