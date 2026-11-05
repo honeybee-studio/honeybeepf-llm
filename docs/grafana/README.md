@@ -12,7 +12,7 @@ HoneybeePF eBPF agent via OpenTelemetry → Prometheus.
 
 ### Cost Observability (`honeybeepf-cost.json`)
 
-Three sections — **External LLM API**, **On-Premise LLM**, and **Cost-Waste Signals** — with:
+Four sections — **External LLM API**, **On-Premise LLM**, **Cost-Waste Signals**, and **Cost (estimate)** — with:
 
 - Requests / minute (by team, by model)
 - Token usage / minute (prompt vs completion, by team, by model)
@@ -22,8 +22,11 @@ Three sections — **External LLM API**, **On-Premise LLM**, and **Cost-Waste Si
 - Per-pod token usage and p95 latency
 - Top 10 pods by token usage
 - Fallback refusal cost per workload (`attempt="declined"`, **measured**), prompt cache hit rate per pod / model, and an **upper-bound** estimate of the input cost caching could save
+- Estimated spend per workload and per model, and a total, in USD from the price table (`llm_cost_usd_total` summed over all `cost_type` and all `attempt`)
 
 The **Cost-Waste Signals** section mixes one measured panel and two estimates, labelled as such. The refusal-cost panel is a real billed amount (`attempt="declined"`). The two cache panels are leads for human review, not measured losses: they are computed only from counters, so a low cache hit rate flags waste only where the prompt prefix actually repeats, which the agent cannot see, and the savings figure assumes every input token is a repeated cacheable prefix, priced at each model's own cache-read rate, so it is a ceiling. Each panel says so in its description.
+
+The **Cost (estimate)** section sums `llm_cost_usd_total` over every `cost_type` and every `attempt` (served and the separately-billed declined fallback attempts) by workload and by model. It is an estimate from the built-in price table, not an invoice; an unpriced model is absent here and counted in `llm_unpriced_tokens_total` instead.
 
 Template variables: `$datasource`, `$team`, `$pod`, `$model`.
 
