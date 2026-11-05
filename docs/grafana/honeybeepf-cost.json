@@ -909,7 +909,7 @@
     },
     {
       "title": "Potential Input-Cost Savings from Caching — upper bound (estimate)",
-      "description": "UPPER-BOUND ESTIMATE, not a measured loss. Input cost over the selected range × 0.975 — the ceiling if every input token were a repeated cacheable prefix priced at the table's most cache-favorable rate (cache read as low as 0.025× input). Real savings are lower, by both the non-repeated share (which needs prompt content the agent never reads) and the model's actual cache-read price (0.025–0.5× input across the table). A lead for human review, never a bill.",
+      "description": "UPPER-BOUND ESTIMATE, not a measured loss. Per model, each call's uncached input tokens rebilled at that model's own cache-read price (metric honeybeepf_llm_llm_cache_savings_ceiling_usd_total). Where a model has no cache-read price the ceiling uses the full input cost (cache_price=\"assumed_free\", a looser bound). Real savings are lower than this by the non-repeated share, which needs prompt content the agent never reads. A lead for human review, never a bill.",
       "type": "bargauge",
       "datasource": {
         "type": "prometheus",
@@ -954,7 +954,7 @@
       },
       "targets": [
         {
-          "expr": "topk(10, sum by (target_namespace, target_workload_name) (increase(honeybeepf_llm_llm_cost_usd_total{cost_type=\"input\", target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__range])) * 0.975)",
+          "expr": "topk(10, sum by (target_namespace, target_workload_name) (increase(honeybeepf_llm_llm_cache_savings_ceiling_usd_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__range])))",
           "legendFormat": "{{ target_namespace }} / {{ target_workload_name }}",
           "refId": "A"
         }
