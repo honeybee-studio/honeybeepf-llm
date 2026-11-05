@@ -16,21 +16,21 @@
 
 use aya_ebpf::{
     EbpfContext,
-    helpers::r#gen,
+    helpers::{bpf_probe_read_user_buf, r#gen},
     macros::{tracepoint, uprobe, uretprobe},
     programs::{ProbeContext, RetProbeContext, TracePointContext},
 };
 use honeybeepf_llm_common::{
     LLM_STAT_DISCARD, LLM_STAT_EMPTY, LLM_STAT_ENTER, LLM_STAT_FILTERED, LLM_STAT_FRAGMENT,
     LLM_STAT_HANDSHAKE, LLM_STAT_RESERVE_FAIL, LLM_STAT_SUBMIT, LLM_STAT_TRUNCATED, LlmDirection,
-    LlmEvent, MAX_SSL_BUF_SIZE, MAX_SSL_FRAGMENTS, capture_limit,
+    LlmEventHeader, MAX_SSL_BUF_SIZE, MAX_SSL_FRAGMENTS, capture_limit,
 };
 
 mod filter;
 mod helpers;
 pub mod maps;
 
-use helpers::{LlmEventExt, Session, SslCall, count, get_current_tid};
+use helpers::{Session, SslCall, count, fill_header, get_current_tid};
 use maps::*;
 
 /// Entry probe for SSL_read/SSL_write. Captures buffer pointer from arg1.
@@ -164,10 +164,86 @@ fn keep_task_stack<C: EbpfContext>(ctx: &C) {
     }
 }
 
-/// Send the call's data as up to MAX_SSL_FRAGMENTS events of MAX_SSL_BUF_SIZE bytes each.
+/// Payload buckets: each event reserves the smallest that holds its bytes. Largest is
+/// `MAX_SSL_BUF_SIZE`; writes are capped at 4 KB and SSE read fragments are usually small, so a
+/// short read or an empty event takes only a small ring slot.
+const BUCKET_SMALL: usize = 512;
+const BUCKET_MED: usize = 2048;
+
+/// One ring record sized to a bucket: `header` sits at offset 0, `buf` holds `N` payload bytes.
+#[repr(C)]
+struct VarEvent<const N: usize> {
+    header: LlmEventHeader,
+    buf: [u8; N],
+}
+
+enum Emitted {
+    Payload,
+    Empty,
+    NoRoom,
+    ReadFail,
+}
+
+/// Reserve an `N`-byte-payload record, fill it, and submit; the size is constant for the verifier.
+#[inline(always)]
+fn emit_bucket<const N: usize>(
+    call: &SslCall,
+    rw: u8,
+    is_handshake: bool,
+    truncated: u8,
+    offset: u32,
+    to_read: usize,
+) -> Emitted {
+    let Some(mut slot) = SSL_EVENTS.reserve::<VarEvent<N>>(0) else {
+        return Emitted::NoRoom;
+    };
+    // SAFETY: the slot is reserved for a VarEvent<N>; every header field is set before submit.
+    let ev = unsafe { &mut *slot.as_mut_ptr() };
+    fill_header(&mut ev.header, call, rw, is_handshake, truncated, offset);
+    if N == 0 || call.buf_addr == 0 {
+        ev.header.buf_filled = 0;
+        slot.submit(0);
+        return Emitted::Empty;
+    }
+    // The dispatch already keeps to_read <= N, but the compiler spills it and the verifier loses
+    // that bound; a volatile reload makes the min(.., N) survive so the copy length stays <= N.
+    // SAFETY: &to_read is a valid initialized local.
+    let n = core::cmp::min(unsafe { core::ptr::read_volatile(&to_read) }, N);
+    let src = (call.buf_addr + offset as u64) as *const u8;
+    // SAFETY: src is the user buffer at this fragment's offset; n <= N keeps the ring write in bounds.
+    if unsafe { bpf_probe_read_user_buf(src, &mut ev.buf[..n]) }.is_err() {
+        slot.discard(0);
+        return Emitted::ReadFail;
+    }
+    ev.header.buf_filled = 1;
+    slot.submit(0);
+    Emitted::Payload
+}
+
+/// Emit one fragment at `offset`, choosing the smallest bucket that fits its payload.
+#[inline(never)]
+fn emit_one(call: &SslCall, rw: u8, is_handshake: bool, truncated: u8, offset: u32) -> Emitted {
+    let to_read = if call.buf_addr > 0 {
+        core::cmp::min(call.len.saturating_sub(offset) as usize, MAX_SSL_BUF_SIZE)
+    } else {
+        0
+    };
+    if to_read == 0 {
+        emit_bucket::<0>(call, rw, is_handshake, truncated, offset, 0)
+    } else if to_read <= BUCKET_SMALL {
+        emit_bucket::<BUCKET_SMALL>(call, rw, is_handshake, truncated, offset, to_read)
+    } else if to_read <= BUCKET_MED {
+        emit_bucket::<BUCKET_MED>(call, rw, is_handshake, truncated, offset, to_read)
+    } else {
+        emit_bucket::<MAX_SSL_BUF_SIZE>(call, rw, is_handshake, truncated, offset, to_read)
+    }
+}
+
+/// Send the call's data as up to MAX_SSL_FRAGMENTS events, each sized to its payload.
 #[inline(always)]
 fn emit_fragments(call: &SslCall, rw: u8, is_handshake: bool) {
     let limit = capture_limit(LlmDirection::from(rw));
+    let truncated = (call.len as usize > limit) as u8;
     // Calls over the limit were counted as truncated at fragment 0.
     let tail_lost = |i: usize| {
         if i > 0 && call.len as usize <= limit {
@@ -180,32 +256,33 @@ fn emit_fragments(call: &SslCall, rw: u8, is_handshake: bool) {
             return;
         }
         let offset = offset as u32;
-        let Some(mut slot) = SSL_EVENTS.reserve::<LlmEvent>(0) else {
-            if i == 0 {
-                count(LLM_STAT_RESERVE_FAIL);
+        match emit_one(call, rw, is_handshake, truncated, offset) {
+            Emitted::NoRoom => {
+                if i == 0 {
+                    count(LLM_STAT_RESERVE_FAIL);
+                }
+                tail_lost(i);
+                return;
             }
-            tail_lost(i);
-            return;
-        };
-        let event = unsafe { &mut *slot.as_mut_ptr() };
-        if event.fill(call, rw, is_handshake, offset).is_err() {
-            if i == 0 {
-                count(LLM_STAT_DISCARD);
+            Emitted::ReadFail => {
+                if i == 0 {
+                    count(LLM_STAT_DISCARD);
+                }
+                tail_lost(i);
+                return;
             }
-            tail_lost(i);
-            slot.discard(0);
-            return;
+            outcome => {
+                if i > 0 {
+                    count(LLM_STAT_FRAGMENT);
+                } else if is_handshake {
+                    count(LLM_STAT_HANDSHAKE);
+                } else if matches!(outcome, Emitted::Empty) {
+                    count(LLM_STAT_EMPTY);
+                } else if truncated != 0 {
+                    count(LLM_STAT_TRUNCATED);
+                }
+                count(LLM_STAT_SUBMIT);
+            }
         }
-        if i > 0 {
-            count(LLM_STAT_FRAGMENT);
-        } else if is_handshake {
-            count(LLM_STAT_HANDSHAKE);
-        } else if event.header.buf_filled == 0 {
-            count(LLM_STAT_EMPTY);
-        } else if event.header.truncated != 0 {
-            count(LLM_STAT_TRUNCATED);
-        }
-        count(LLM_STAT_SUBMIT);
-        slot.submit(0);
     }
 }
