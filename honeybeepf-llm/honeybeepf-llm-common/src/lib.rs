@@ -5,6 +5,20 @@ pub const MAX_SSL_BUF_SIZE: usize = 4096;
 pub const MAX_SSL_FRAGMENTS: usize = 4;
 pub const MAX_SSL_CAPTURE: usize = MAX_SSL_BUF_SIZE * MAX_SSL_FRAGMENTS;
 
+/// Key into the plaintext endpoint map: destination IPv4 and port in network byte order, so the
+/// kernel (`remote_ip4` is already network order, port via [`sock_ops_remote_port`]) and userspace
+/// (`to_be()` on both) build the same bits.
+pub const fn plain_endpoint_key(ip_be: u32, port_be: u16) -> u64 {
+    ((ip_be as u64) << 16) | (port_be as u64)
+}
+
+/// Network-order destination port from a `bpf_sock_ops.remote_port`: the kernel packs the be16 port
+/// into the high 16 bits (little-endian `skc_dport << 16`), so the low bits are zero. Recovers the
+/// htons(port) bits a userspace key is built from.
+pub const fn sock_ops_remote_port(remote_port: u32) -> u16 {
+    (u32::from_be(remote_port) as u16).to_be()
+}
+
 // Indices into the LLM_STATS per-CPU counter map (kernel increments, userspace sums).
 pub const LLM_STAT_ENTER: u32 = 0; // entry uprobe hits (SSL_read/write/_ex, SSL_do_handshake, SSL_free)
 pub const LLM_STAT_SUBMIT: u32 = 1; // events submitted to SSL_EVENTS (every fragment)
@@ -251,3 +265,20 @@ impl Default for FileAccessEvent {
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for FileAccessEvent {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_port_reads_the_high_16_bits() {
+        // Port 18090 = 0x46AA; the kernel stores htons(18090)=0xAA46 in the high half.
+        assert_eq!(sock_ops_remote_port(0xAA46_0000), 0xAA46);
+        // And the key then matches a userspace-built one (ip network-order, port htons).
+        let ip_be = u32::from_be_bytes([127, 0, 0, 1]).to_be();
+        assert_eq!(
+            plain_endpoint_key(ip_be, sock_ops_remote_port(0xAA46_0000)),
+            plain_endpoint_key(ip_be, 18090u16.to_be()),
+        );
+    }
+}
