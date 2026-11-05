@@ -4,6 +4,10 @@ pub mod telemetry;
 #[cfg(feature = "k8s")]
 pub mod k8s;
 
+// Plaintext (non-TLS) capture endpoint resolution (userspace).
+#[cfg(feature = "k8s")]
+pub mod plaintext;
+
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},

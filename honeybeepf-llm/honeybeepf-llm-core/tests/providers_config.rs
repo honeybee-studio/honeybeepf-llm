@@ -36,7 +36,7 @@ fn test_default_providers_json_parses_with_known_keys_only() {
     let json = include_str!("../src/providers/default_providers.json");
     ProviderRegistry::from_json(json).unwrap();
 
-    let provider_keys = "name note hosts paths response request_extractor";
+    let provider_keys = "name note hosts paths response request_extractor plaintext";
     let response_keys = "usage_path prompt_tokens completion_tokens completion_optional extra_prompt_tokens thoughts_tokens \
         completion_excludes_thoughts cache_read_tokens cache_write_tokens cache_write_long_ttl_tokens \
         speed inference_geo prompt_excludes_cache required_field model_path service_tier_path iterations_path billed_categories";

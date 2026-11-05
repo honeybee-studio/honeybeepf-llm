@@ -13,6 +13,7 @@ fn openai_config() -> ProviderConfig {
         paths: vec!["/chat/completions".to_string()],
         response: ResponseConfig::default(),
         request_extractor: RequestExtractorType::Messages,
+        plaintext: None,
     }
 }
 
@@ -36,6 +37,7 @@ fn gemini_config() -> ProviderConfig {
             ..ResponseConfig::default()
         },
         request_extractor: RequestExtractorType::Contents,
+        plaintext: None,
     }
 }
 
@@ -181,6 +183,7 @@ fn provider_without_billed_categories() -> ConfigurableProvider {
             ..ResponseConfig::default()
         },
         request_extractor: RequestExtractorType::Messages,
+        plaintext: None,
     })
 }
 
