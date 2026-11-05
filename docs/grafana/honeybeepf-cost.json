@@ -820,7 +820,7 @@
       ]
     },
     {
-      "title": "Cost-Waste Signals — ④ refusal cost (measured) · ① cache (estimate)",
+      "title": "Cost-Waste Signals — fallback refusal cost (measured) · prompt cache (estimate)",
       "type": "row",
       "gridPos": {
         "h": 1,
@@ -908,7 +908,7 @@
       ]
     },
     {
-      "title": "Potential Input-Cost Savings from Caching — upper bound (추정)",
+      "title": "Potential Input-Cost Savings from Caching — upper bound (estimate)",
       "description": "UPPER-BOUND ESTIMATE, not a measured loss. Input cost over the selected range × 0.975 — the ceiling if every input token were a repeated cacheable prefix priced at the table's most cache-favorable rate (cache read as low as 0.025× input). Real savings are lower, by both the non-repeated share (which needs prompt content the agent never reads) and the model's actual cache-read price (0.025–0.5× input across the table). A lead for human review, never a bill.",
       "type": "bargauge",
       "datasource": {
