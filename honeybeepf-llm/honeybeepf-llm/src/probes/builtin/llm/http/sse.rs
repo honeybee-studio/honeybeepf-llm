@@ -7,8 +7,8 @@ use honeybeepf_llm_core::types::{SseChunkDelta, UsageInfo};
 use super::body::{is_responses_event, parse_response_json_value};
 
 /// End-of-stream markers: OpenAI `finish_reason`, Anthropic `message_stop`, Gemini `finishReason`
-/// or prompt `blockReason`, OpenAI Responses terminal event types.
-const SSE_END_MARKERS: [&str; 7] = [
+/// or prompt `blockReason`, OpenAI Responses terminal event types, Gemini Interactions completion.
+const SSE_END_MARKERS: [&str; 8] = [
     "\"finish_reason\"",
     "\"message_stop\"",
     "\"finishReason\"",
@@ -16,6 +16,7 @@ const SSE_END_MARKERS: [&str; 7] = [
     "\"response.completed\"",
     "\"response.failed\"",
     "\"response.incomplete\"",
+    "\"interaction.completed\"",
 ];
 
 /// Cap on captured fallback blocks per stream; a real fallback chain has a handful, so this only
@@ -75,12 +76,18 @@ fn read_lines(cursor: &mut SseCursor, bytes: &[u8]) {
     }
 }
 
-/// Merge a usage-bearing event into `acc`, unwrapping Anthropic `message_start` or a Responses event.
+/// Merge a usage-bearing event into `acc`, unwrapping Anthropic `message_start`, a Responses event
+/// or a Gemini Interactions event so the merged body carries usage and model at its top level.
 pub(super) fn merge_usage_event(acc: &mut Option<Value>, mut val: Value) {
     if val.get("message").is_some_and(|m| m.get("usage").is_some()) {
         val = val["message"].take();
     } else if is_responses_event(&val) {
         val = val["response"].take();
+    } else if val
+        .get("interaction")
+        .is_some_and(|i| i.get("usage").is_some())
+    {
+        val = val["interaction"].take();
     }
     match acc.as_mut() {
         Some(prev) => merge_sse_event(prev, val),
@@ -293,6 +300,83 @@ mod tests {
             .expect("usage");
         assert_eq!(info.iterations.len(), 1);
         assert!(info.iterations[0].cost_suppressed);
+    }
+
+    // Gemini Interactions streaming: usage rides inside `interaction`, cumulative, last event wins.
+    const INTERACTIONS_SSE: &str = concat!(
+        "event: interaction.created\n",
+        "data: {\"event_id\":\"e1\",\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"int_1\",",
+        "\"model\":\"gemini-3.6-flash\",\"status\":\"in_progress\",",
+        "\"usage\":{\"total_input_tokens\":7,\"total_output_tokens\":0,\"total_thought_tokens\":0,\"total_cached_tokens\":0,\"total_tokens\":7}}}\n\n",
+        "event: interaction.completed\n",
+        "data: {\"event_id\":\"e2\",\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"int_1\",",
+        "\"model\":\"gemini-3.6-flash\",\"status\":\"completed\",",
+        "\"usage\":{\"total_input_tokens\":7,\"total_output_tokens\":23,\"total_thought_tokens\":49,\"total_cached_tokens\":0,\"total_tokens\":79}}}\n\n",
+    );
+
+    #[test]
+    fn gemini_interactions_sse_ends_on_completed_and_sums_output_and_thoughts() {
+        let info = Http11Parser
+            .parse_response(&http11_sse(INTERACTIONS_SSE))
+            .expect("usage");
+        // Output excludes thoughts (7 + 23 + 49 = 79 = total), so completion is 23 + 49.
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (7, 72));
+        assert_eq!(info.thoughts_tokens, Some(49));
+        assert_eq!(info.model.as_deref(), Some("gemini-3.6-flash"));
+    }
+
+    #[test]
+    fn gemini_interactions_sse_created_usage_alone_does_not_end_the_stream() {
+        // Only the `interaction.created` event (cumulative usage, in_progress): no terminal marker yet.
+        let created = INTERACTIONS_SSE
+            .split("event: interaction.completed")
+            .next()
+            .expect("split yields a first element");
+        assert_eq!(
+            tokens(Http11Parser.parse_response(&http11_sse(created))),
+            None
+        );
+    }
+
+    #[test]
+    fn gemini_interactions_sse_null_usage_event_does_not_erase_earlier_usage() {
+        // A status_update carrying `usage: null` must not be treated as a usage event: otherwise its
+        // null would overwrite the accumulated usage, and a later completed event would still have to
+        // win cleanly.
+        let body = concat!(
+            "event: interaction.created\n",
+            "data: {\"event_id\":\"e1\",\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"int_1\",",
+            "\"model\":\"gemini-3.6-flash\",\"status\":\"in_progress\",",
+            "\"usage\":{\"total_input_tokens\":7,\"total_output_tokens\":0,\"total_thought_tokens\":0,\"total_cached_tokens\":0,\"total_tokens\":7}}}\n\n",
+            "event: interaction.status_update\n",
+            "data: {\"event_id\":\"e2\",\"event_type\":\"interaction.status_update\",\"interaction\":{\"id\":\"int_1\",\"status\":\"in_progress\",\"usage\":null}}\n\n",
+            "event: interaction.completed\n",
+            "data: {\"event_id\":\"e3\",\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"int_1\",\"status\":\"completed\",",
+            "\"usage\":{\"total_input_tokens\":7,\"total_output_tokens\":23,\"total_thought_tokens\":49,\"total_cached_tokens\":0,\"total_tokens\":79}}}\n\n",
+        );
+        let info = Http11Parser
+            .parse_response(&http11_sse(body))
+            .expect("usage");
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (7, 72));
+    }
+
+    #[test]
+    fn gemini_interactions_sse_model_text_naming_the_marker_does_not_end_early() {
+        // A step event whose model text mentions interaction.completed unquoted must not end the
+        // stream; only the quoted event_type token does.
+        let body = concat!(
+            "event: interaction.status_update\n",
+            "data: {\"event_id\":\"e1\",\"event_type\":\"interaction.status_update\",\"interaction\":{\"id\":\"int_1\",",
+            "\"status\":\"in_progress\",\"step\":{\"text\":\"I will send interaction.completed to finish\"}}}\n\n",
+            "event: interaction.completed\n",
+            "data: {\"event_id\":\"e2\",\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"int_1\",",
+            "\"model\":\"gemini-3.6-flash\",\"status\":\"completed\",",
+            "\"usage\":{\"total_input_tokens\":7,\"total_output_tokens\":23,\"total_thought_tokens\":49,\"total_cached_tokens\":0,\"total_tokens\":79}}}\n\n",
+        );
+        let info = Http11Parser
+            .parse_response(&http11_sse(body))
+            .expect("usage");
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (7, 72));
     }
 
     const DONE_IN_TEXT: &str = "The stream ends with data: [DONE]";

@@ -1009,3 +1009,74 @@ fn test_extract_request_text() {
     let text = provider.extract_request_text(&request);
     assert_eq!(text, "Hello, world!");
 }
+
+// Gemini Interactions non-streaming body, with the usage numbers from the API reference example.
+#[test]
+fn test_gemini_interactions_non_streaming_parses_usage() {
+    let provider = default_provider("generativelanguage.googleapis.com", "/v1beta/interactions");
+    let response = json!({
+        "model": "gemini-3.6-flash",
+        "status": "completed",
+        "usage": {
+            "total_input_tokens": 7,
+            "total_output_tokens": 23,
+            "total_thought_tokens": 49,
+            "total_cached_tokens": 0,
+            "total_tool_use_tokens": 0,
+            "total_tokens": 79
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!(usage.prompt_tokens, 7);
+    // total_output_tokens excludes thoughts (7 + 23 + 49 = 79 = total_tokens), so output is 23 + 49.
+    assert_eq!(usage.completion_tokens, 72);
+    assert_eq!(usage.thoughts_tokens, Some(49));
+    assert_eq!(usage.cache_read_tokens, Some(0));
+    assert_eq!(usage.model, Some("gemini-3.6-flash".to_string()));
+}
+
+// total_cached_tokens is part of total_input_tokens, so the prompt is not grown by the cache read.
+#[test]
+fn test_gemini_interactions_cached_is_part_of_input() {
+    let provider = default_provider("generativelanguage.googleapis.com", "/v1/interactions");
+    let response = json!({
+        "model": "gemini-3.6-flash",
+        "usage": {
+            "total_input_tokens": 1000,
+            "total_output_tokens": 40,
+            "total_cached_tokens": 200,
+            "total_tokens": 1240
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!(usage.prompt_tokens, 1000);
+    assert_eq!(usage.cache_read_tokens, Some(200));
+}
+
+// A zero-output interaction may omit total_output_tokens, as generateContent omits candidatesTokenCount;
+// completion_optional keeps the call (output 0) instead of dropping it and losing the input tokens.
+#[test]
+fn test_gemini_interactions_missing_output_tokens_records_zero() {
+    let provider = default_provider("generativelanguage.googleapis.com", "/v1beta/interactions");
+    let response = json!({
+        "model": "gemini-3.6-flash",
+        "usage": {"total_input_tokens": 12, "total_tokens": 12}
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (12, 0));
+}
+
+// required_field keeps the Interactions entry from claiming another provider's top-level `usage`.
+#[test]
+fn test_gemini_interactions_requires_total_input_tokens() {
+    let provider = default_provider("generativelanguage.googleapis.com", "/v1beta/interactions");
+    // An OpenAI-shaped usage reaches this entry (usage_path "usage") but has no total_input_tokens.
+    let openai = json!({
+        "model": "gpt-4o",
+        "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+    });
+    assert!(provider.parse_usage(&openai).is_none());
+}

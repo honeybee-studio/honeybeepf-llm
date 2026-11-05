@@ -70,6 +70,10 @@ gemini = [
   # Basic detection
   { url = "generativelanguage.googleapis.com/v1/models/gemini:generateContent", reason = "Gemini API" },
   { url = "generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse", reason = "Gemini stream; path match is case-sensitive" },
+  # Interactions API: streaming is the same path with `stream: true` in the body
+  { url = "generativelanguage.googleapis.com/v1beta/interactions", reason = "Interactions API" },
+  { url = "generativelanguage.googleapis.com/v1beta/interactions?alt=sse", reason = "Interactions API, query ignored by the anchor" },
+  { url = "generativelanguage.googleapis.com/v1/interactions", reason = "Interactions API, stable v1" },
 ]
 
 none = [
@@ -88,6 +92,7 @@ none = [
   { url = "us-east5-aiplatform.googleapis.com/v1/projects/p/locations/us-east5/publishers/anthropic/models/count-tokens:rawPredict", reason = "Vertex Claude token counting" },
   { url = "us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/endpoints/123:rawPredict", reason = "Vertex custom endpoint" },
   { url = "us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/gemini-3.5-flash:countTokens", reason = "Gemini token counting" },
+  { url = "generativelanguage.googleapis.com/v1beta/interactions/int_123", reason = "Interactions retrieval/polling (GET), path continues past the anchor" },
   { url = "myres.openai.azure.com/openai/deployments/d1/embeddings?api-version=2024-10-21", reason = "Azure embeddings" },
   { url = "myres.openai.azure.com/openai/deployments/d1/audio/transcriptions?api-version=2024-10-21", reason = "Azure audio" },
   { url = "myres.openai.azure.com/openai/v1/responses/resp_1", reason = "Azure v1 Responses retrieval" },

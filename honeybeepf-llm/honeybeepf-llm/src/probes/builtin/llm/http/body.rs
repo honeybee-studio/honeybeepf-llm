@@ -299,4 +299,17 @@ mod tests {
         let info = Http11Parser.parse_response(resp.as_bytes());
         assert_eq!(tokens(info), Some((30, 628)));
     }
+
+    #[test]
+    fn gemini_interactions_non_streaming_json_reads_usage() {
+        let resp = concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n",
+            "{\"model\":\"gemini-3.6-flash\",\"status\":\"completed\",",
+            "\"usage\":{\"total_input_tokens\":7,\"total_output_tokens\":23,\"total_thought_tokens\":49,",
+            "\"total_cached_tokens\":0,\"total_tool_use_tokens\":0,\"total_tokens\":79}}",
+        );
+        let info = Http11Parser.parse_response(resp.as_bytes()).expect("usage");
+        assert_eq!((info.prompt_tokens, info.completion_tokens), (7, 72));
+        assert_eq!(info.thoughts_tokens, Some(49));
+    }
 }
