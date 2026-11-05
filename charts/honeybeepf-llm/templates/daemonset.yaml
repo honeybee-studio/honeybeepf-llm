@@ -14,6 +14,13 @@ spec:
       maxUnavailable: 1
   template:
     metadata:
+      annotations:
+        # envFrom config is read once at container start, so roll pods when it changes; a plain
+        # helm upgrade touches only the ConfigMap otherwise. Prices hot-reload from their mount, so drop them.
+        checksum/config: {{ regexReplaceAll "LLM_PRICES_CONFIG:.*" (include (print $.Template.BasePath "/configmap.yaml") .) "" | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       labels:
         {{- include "honeybeepf-llm.selectorLabels" . | nindent 8 }}
     spec:
