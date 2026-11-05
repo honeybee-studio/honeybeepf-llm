@@ -1,13 +1,10 @@
 use aya_ebpf::{
     helpers::{
         bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_user,
-        bpf_probe_read_user_buf,
     },
     programs::RetProbeContext,
 };
-use honeybeepf_llm_common::{
-    EventMetadata, LlmDirection, LlmEvent, MAX_SSL_BUF_SIZE, capture_limit,
-};
+use honeybeepf_llm_common::{EventMetadata, LlmEventHeader};
 
 use crate::probes::builtin::llm::maps::{BUFS, LLM_STATS, READBYTES_PTRS, START_NS};
 
@@ -143,37 +140,24 @@ impl SslCall {
     }
 }
 
-pub trait LlmEventExt {
-    fn fill(&mut self, call: &SslCall, rw: u8, is_handshake: bool, offset: u32) -> Result<(), u32>;
-}
-
-impl LlmEventExt for LlmEvent {
-    #[inline(always)]
-    fn fill(&mut self, call: &SslCall, rw: u8, is_handshake: bool, offset: u32) -> Result<(), u32> {
-        self.header.metadata = call.metadata;
-        self.header.rw = rw;
-        self.header.is_handshake = if is_handshake { 1 } else { 0 };
-        self.header.truncated = (call.len as usize > capture_limit(LlmDirection::from(rw))) as u8;
-        self.header.closed = call.closed;
-        self.header.len = call.len;
-        self.header.offset = offset;
-        self.header.ssl_ptr = call.ssl;
-        self.header.latency_ns = call.latency_ns;
-        self.header.comm = call.comm;
-
-        if call.buf_addr > 0 {
-            let to_read =
-                core::cmp::min(call.len.saturating_sub(offset) as usize, MAX_SSL_BUF_SIZE);
-            let src = (call.buf_addr + offset as u64) as *const u8;
-            // Read directly into self.buf to avoid 4KB stack allocation
-            if unsafe { bpf_probe_read_user_buf(src, &mut self.buf[..to_read]) }.is_err() {
-                self.header.buf_filled = 0;
-                return Err(1);
-            }
-            self.header.buf_filled = 1;
-        } else {
-            self.header.buf_filled = 0;
-        }
-        Ok(())
-    }
+/// Fill every header field except `buf_filled`, which the caller sets after the payload read.
+#[inline(always)]
+pub(super) fn fill_header(
+    h: &mut LlmEventHeader,
+    call: &SslCall,
+    rw: u8,
+    is_handshake: bool,
+    truncated: u8,
+    offset: u32,
+) {
+    h.metadata = call.metadata;
+    h.rw = rw;
+    h.is_handshake = if is_handshake { 1 } else { 0 };
+    h.truncated = truncated;
+    h.closed = call.closed;
+    h.len = call.len;
+    h.offset = offset;
+    h.ssl_ptr = call.ssl;
+    h.latency_ns = call.latency_ns;
+    h.comm = call.comm;
 }
