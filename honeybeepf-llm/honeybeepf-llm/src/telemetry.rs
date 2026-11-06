@@ -75,6 +75,7 @@ pub struct HoneyBeeMetrics {
     pub llm_h2_resynced_total: Counter<u64>,
     pub llm_h2_midjoin_recorded_total: Counter<u64>,
     pub llm_cost_usd_total: Counter<f64>,
+    pub llm_cache_savings_ceiling_usd_total: Counter<f64>,
     pub llm_unpriced_tokens_total: Counter<u64>,
     /// Swapped whole when the user price file changes, so a call never waits on a reload.
     prices: ArcSwapOption<Prices>,
@@ -112,6 +113,8 @@ impl Attempt {
 
 impl HoneyBeeMetrics {
     fn new(meter: &Meter, prices: Option<Prices>) -> Self {
+        let (llm_cost_usd_total, llm_cache_savings_ceiling_usd_total, llm_unpriced_tokens_total) =
+            Self::cost_counters(meter);
         Self {
             block_io_events: meter
                 .u64_counter("block_io_events")
@@ -191,7 +194,9 @@ impl HoneyBeeMetrics {
                 .build(),
             llm_responses_unparsed_total: meter
                 .u64_counter("llm_responses_unparsed_total")
-                .with_description("LLM calls not recorded because no usage could be read, by reason")
+                .with_description(
+                    "LLM calls not recorded because no usage could be read, by reason",
+                )
                 .with_unit("responses")
                 .build(),
             llm_h2_resynced_total: meter
@@ -201,23 +206,40 @@ impl HoneyBeeMetrics {
                 .build(),
             llm_h2_midjoin_recorded_total: meter
                 .u64_counter("llm_h2_midjoin_recorded_total")
-                .with_description("LLM calls recorded on an HTTP/2 connection joined mid-stream (host unknown)")
+                .with_description(
+                    "LLM calls recorded on an HTTP/2 connection joined mid-stream (host unknown)",
+                )
                 .with_unit("responses")
                 .build(),
-            // No unit: the Prometheus exporter would append it to the name.
-            llm_cost_usd_total: meter
-                .f64_counter("llm_cost_usd_total")
-                .with_description("Cost of LLM calls in USD from the price table, by cost_type")
-                .build(),
-            llm_unpriced_tokens_total: meter
-                .u64_counter("llm_unpriced_tokens_total")
-                .with_description(
-                    "Tokens of LLM calls the price table could not price, by reason; never counted as $0",
-                )
-                .with_unit("tokens")
-                .build(),
+            llm_cost_usd_total,
+            llm_cache_savings_ceiling_usd_total,
+            llm_unpriced_tokens_total,
             prices: ArcSwapOption::from_pointee(prices),
         }
+    }
+
+    /// The cost-related LLM counters: realized cost, the cache-savings ceiling, unpriced tokens.
+    fn cost_counters(meter: &Meter) -> (Counter<f64>, Counter<f64>, Counter<u64>) {
+        // No unit on the USD counters: the Prometheus exporter would append it to the name.
+        let cost = meter
+            .f64_counter("llm_cost_usd_total")
+            .with_description("Cost of LLM calls in USD from the price table, by cost_type")
+            .build();
+        let savings = meter
+            .f64_counter("llm_cache_savings_ceiling_usd_total")
+            .with_description(
+                "Upper bound on USD caching could save: uncached input rebilled at the \
+                 model's cache-read price; cache_price=assumed_free when the model has none",
+            )
+            .build();
+        let unpriced = meter
+            .u64_counter("llm_unpriced_tokens_total")
+            .with_description(
+                "Tokens of LLM calls the price table could not price, by reason; never counted as $0",
+            )
+            .with_unit("tokens")
+            .build();
+        (cost, savings, unpriced)
     }
 
     /// Record a call's cost by category, or its tokens as unpriced with the reason.
@@ -242,6 +264,18 @@ impl HoneyBeeMetrics {
                         self.llm_cost_usd_total.add(usd, labels);
                         labels.pop();
                     }
+                }
+                // Savings ceiling: most the uncached input could save if that prefix were cached.
+                // Only priced calls contribute, so a call absent from the cost panels never shows savings.
+                if let Ok((usd, exact)) = table.cache_savings_ceiling(usage)
+                    && usd > 0.0
+                {
+                    labels.push(KeyValue::new(
+                        "cache_price",
+                        if exact { "known" } else { "assumed_free" },
+                    ));
+                    self.llm_cache_savings_ceiling_usd_total.add(usd, labels);
+                    labels.pop();
                 }
             }
             Err(why) => {
@@ -1378,6 +1412,103 @@ mod tests {
             .map(|p| (label(&p.attributes, "reason"), p.value))
             .collect();
         assert_eq!(points, [(kind("unknown_model"), 42)]);
+        Ok(())
+    }
+
+    #[test]
+    fn llm_cache_savings_ceiling_is_emitted_with_the_cache_price_basis() -> Result<()> {
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(None));
+        // claude-opus-4-8: input $5, cache read $0.5 per million → 1000 uncached could save $0.0045.
+        let usage = UsageInfo {
+            prompt_tokens: 1000,
+            model: Some("claude-opus-4-8".to_string()),
+            ..UsageInfo::default()
+        };
+        metrics.record_llm(&usage, 1.0, false, vec![]);
+
+        let mut rm = ResourceMetrics {
+            resource: Resource::empty(),
+            scope_metrics: vec![],
+        };
+        reader.collect(&mut rm)?;
+        let ceiling = rm
+            .scope_metrics
+            .iter()
+            .flat_map(|s| &s.metrics)
+            .find(|m| m.name == "llm_cache_savings_ceiling_usd_total")
+            .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<f64>>())
+            .context("ceiling counter not collected")?;
+        let point = ceiling.data_points.first().context("one ceiling point")?;
+        assert_eq!((point.value * 1e6).round(), 4500.0);
+        let basis = point
+            .attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == "cache_price")
+            .map(|kv| kv.value.to_string());
+        assert_eq!(basis.as_deref(), Some("known"));
+        Ok(())
+    }
+
+    #[test]
+    fn llm_cache_savings_ceiling_skips_unpriced_calls_and_flags_assumed_free() -> Result<()> {
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(None));
+        // gpt-5.5-pro: input $30, no cache-read price → 1000 uncached bounds at the full input cost.
+        let priced = UsageInfo {
+            prompt_tokens: 1000,
+            model: Some("gpt-5.5-pro".to_string()),
+            ..UsageInfo::default()
+        };
+        metrics.record_llm(&priced, 1.0, false, vec![]);
+        // Same model reporting a cache read has no cache-read price, so cost() cannot price it;
+        // the ceiling must not be emitted for a call that never reaches the cost panels.
+        let unpriced = UsageInfo {
+            prompt_tokens: 1000,
+            cache_read_tokens: Some(300),
+            model: Some("gpt-5.5-pro".to_string()),
+            ..UsageInfo::default()
+        };
+        metrics.record_llm(&unpriced, 1.0, false, vec![]);
+
+        let mut rm = ResourceMetrics {
+            resource: Resource::empty(),
+            scope_metrics: vec![],
+        };
+        reader.collect(&mut rm)?;
+        let ceiling = rm
+            .scope_metrics
+            .iter()
+            .flat_map(|s| &s.metrics)
+            .find(|m| m.name == "llm_cache_savings_ceiling_usd_total")
+            .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<f64>>())
+            .context("ceiling counter not collected")?;
+        assert_eq!(
+            ceiling.data_points.len(),
+            1,
+            "only the priced call contributes"
+        );
+        let point = &ceiling.data_points[0];
+        assert_eq!((point.value * 1e6).round(), 30000.0);
+        let attr = |key| {
+            point
+                .attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == key)
+                .map(|kv| kv.value.to_string())
+        };
+        assert_eq!(attr("cache_price").as_deref(), Some("assumed_free"));
+        assert_eq!(
+            attr("reason"),
+            None,
+            "the unpriced reason label never leaks here"
+        );
         Ok(())
     }
 

@@ -643,7 +643,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 29
+        "y": 38
       },
       "collapsed": false,
       "panels": []
@@ -660,7 +660,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 30
+        "y": 39
       },
       "fieldConfig": {
         "defaults": {
@@ -718,7 +718,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 30
+        "y": 39
       },
       "fieldConfig": {
         "defaults": {
@@ -771,7 +771,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 47
       },
       "fieldConfig": {
         "defaults": {
@@ -826,7 +826,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 46
+        "y": 55
       },
       "collapsed": false,
       "panels": []
@@ -843,7 +843,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 47
+        "y": 56
       },
       "fieldConfig": {
         "defaults": {
@@ -909,7 +909,7 @@
     },
     {
       "title": "Potential Input-Cost Savings from Caching — upper bound (estimate)",
-      "description": "UPPER-BOUND ESTIMATE, not a measured loss. Input cost over the selected range × 0.975 — the ceiling if every input token were a repeated cacheable prefix priced at the table's most cache-favorable rate (cache read as low as 0.025× input). Real savings are lower, by both the non-repeated share (which needs prompt content the agent never reads) and the model's actual cache-read price (0.025–0.5× input across the table). A lead for human review, never a bill.",
+      "description": "UPPER-BOUND ESTIMATE, not a measured loss. Per model, each call's uncached input tokens rebilled at that model's own cache-read price (metric honeybeepf_llm_llm_cache_savings_ceiling_usd_total). Where a model has no cache-read price the ceiling uses the full input cost (cache_price=\"assumed_free\", a looser bound). Real savings are lower than this by the non-repeated share, which needs prompt content the agent never reads. A lead for human review, never a bill.",
       "type": "bargauge",
       "datasource": {
         "type": "prometheus",
@@ -919,7 +919,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 47
+        "y": 56
       },
       "fieldConfig": {
         "defaults": {
@@ -954,7 +954,7 @@
       },
       "targets": [
         {
-          "expr": "topk(10, sum by (target_namespace, target_workload_name) (increase(honeybeepf_llm_llm_cost_usd_total{cost_type=\"input\", target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__range])) * 0.975)",
+          "expr": "topk(10, sum by (target_namespace, target_workload_name) (increase(honeybeepf_llm_llm_cache_savings_ceiling_usd_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__range])))",
           "legendFormat": "{{ target_namespace }} / {{ target_workload_name }}",
           "refId": "A"
         }
@@ -972,7 +972,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 55
+        "y": 64
       },
       "fieldConfig": {
         "defaults": {
@@ -1009,6 +1009,168 @@
         {
           "expr": "topk(10, sum by (target_namespace, target_workload_name) (increase(honeybeepf_llm_llm_cost_usd_total{attempt=\"declined\", target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__range])))",
           "legendFormat": "{{ target_namespace }} / {{ target_workload_name }}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Cost (estimate) — spend by workload and model, from the price table",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "Estimated Spend by Workload ($) — all attempts (estimate)",
+      "description": "ESTIMATE from the price table (not an invoice): USD across every billed attempt — the served call and the separately-billed declined fallback attempts (#162) — summed over all cost_type parts, by workload. A lead for cost attribution.",
+      "type": "bargauge",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-RdYlGr"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyUSD",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "showUnfilled": true,
+        "minVizWidth": 0,
+        "minVizHeight": 10
+      },
+      "targets": [
+        {
+          "expr": "topk(10, sum by (target_namespace, target_workload_name) (increase(honeybeepf_llm_llm_cost_usd_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__range])))",
+          "legendFormat": "{{ target_namespace }} / {{ target_workload_name }}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Estimated Spend by Model ($) (estimate)",
+      "description": "ESTIMATE from the price table: USD across every billed attempt summed over all cost_type parts, by model. Unpriced models never appear; their tokens are counted in llm_unpriced_tokens_total instead.",
+      "type": "bargauge",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 12,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-RdYlGr"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyUSD",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "showUnfilled": true,
+        "minVizWidth": 0,
+        "minVizHeight": 10
+      },
+      "targets": [
+        {
+          "expr": "topk(10, sum by (model) (increase(honeybeepf_llm_llm_cost_usd_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__range])))",
+          "legendFormat": "{{ model }}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Total Estimated Spend (range)",
+      "description": "ESTIMATE from the price table: total USD across every billed attempt and cost_type in the selected range and filters.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 20,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyUSD",
+          "decimals": 2
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(honeybeepf_llm_llm_cost_usd_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__range]))",
+          "legendFormat": "Total",
           "refId": "A"
         }
       ]
@@ -1063,7 +1225,8 @@
         "query": "label_values(honeybeepf_llm_llm_requests_total, target_namespace)",
         "refresh": 2,
         "sort": 1,
-        "type": "query"
+        "type": "query",
+        "allValue": ".*"
       },
       {
         "current": {
@@ -1116,7 +1279,8 @@
         "query": "label_values(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\", target_workload_name=~\"$workload\"}, target_pod_name)",
         "refresh": 2,
         "sort": 1,
-        "type": "query"
+        "type": "query",
+        "allValue": ".*"
       },
       {
         "current": {
@@ -1142,7 +1306,8 @@
         "query": "label_values(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\"}, model)",
         "refresh": 2,
         "sort": 1,
-        "type": "query"
+        "type": "query",
+        "allValue": ".*"
       }
     ]
   },
