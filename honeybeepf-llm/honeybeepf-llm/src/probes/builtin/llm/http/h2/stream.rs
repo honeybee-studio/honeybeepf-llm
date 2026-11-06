@@ -56,17 +56,21 @@ pub(super) struct H2Stream {
     got_data: bool,
     /// Tracked without a matched request (mid-join or lost request headers), so its host is unknown.
     speculative: bool,
+    /// A record-only provider (Managed Agents session): counted under `agent_session` at its end,
+    /// its running session total never read.
+    record_only: bool,
 }
 
 impl H2Stream {
     /// A stream matched to a provider by its request headers.
-    pub(super) fn open(start: Instant) -> Self {
+    pub(super) fn open(start: Instant, record_only: bool) -> Self {
         Self {
             start,
             last: start,
             body: Body::plain_json(),
             got_data: false,
             speculative: false,
+            record_only,
         }
     }
 
@@ -74,8 +78,13 @@ impl H2Stream {
     pub(super) fn open_speculative(start: Instant) -> Self {
         Self {
             speculative: true,
-            ..Self::open(start)
+            ..Self::open(start, false)
         }
+    }
+
+    /// Whether the matched provider is record-only, so its end is counted without reading usage.
+    pub(super) fn record_only(&self) -> bool {
+        self.record_only
     }
 
     pub(super) fn start(&self) -> Instant {
@@ -217,7 +226,7 @@ mod tests {
         b"{\"model\":\"gpt-4o\",\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}";
 
     fn usage(content_type: Option<&[u8]>, coding: &[u8], body: &[u8]) -> Option<(u64, u64)> {
-        let mut s = H2Stream::open(Instant::now());
+        let mut s = H2Stream::open(Instant::now(), false);
         s.response_headers(content_type, coding);
         s.data(body, usize::MAX);
         s.finish().map(|u| (u.prompt_tokens, u.completion_tokens))
@@ -258,7 +267,7 @@ mod tests {
     #[test]
     fn a_later_headers_block_does_not_reset_the_body() {
         // Trailers (HEADERS after DATA): the body kind and buffer must survive so usage is still read.
-        let mut s = H2Stream::open(Instant::now());
+        let mut s = H2Stream::open(Instant::now(), false);
         s.response_headers(Some(b"application/json"), b"");
         s.data(JSON, usize::MAX);
         s.response_headers(None, b"");
@@ -270,7 +279,7 @@ mod tests {
 
     #[test]
     fn an_sse_line_without_a_newline_is_bounded() {
-        let mut s = H2Stream::open(Instant::now());
+        let mut s = H2Stream::open(Instant::now(), false);
         s.response_headers(Some(b"text/event-stream"), b"");
         let chunk = vec![b'a'; 16 * 1024];
         for _ in 0..(MAX_RESPONSE_BUFFER_SIZE / chunk.len() + 2) {
