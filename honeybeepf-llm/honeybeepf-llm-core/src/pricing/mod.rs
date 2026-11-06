@@ -171,14 +171,54 @@ impl PriceTable {
 
     /// Cost of one call at today's (UTC) prices; see [`PriceTable::cost_on`].
     pub fn cost(&self, usage: &UsageInfo) -> Result<Cost, Unpriced> {
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        self.cost_on(usage, u32::try_from(secs / 86_400).unwrap_or(u32::MAX))
+        self.cost_on(usage, today())
     }
 
     /// Cost of one call on `day` (days since 1970-01-01 UTC); an amount only when every price it needs is known.
     pub fn cost_on(&self, usage: &UsageInfo, day: u32) -> Result<Cost, Unpriced> {
+        let (rates, factor) = self.resolve(usage, day)?;
+        let read = usage.cache_read_tokens.unwrap_or(0);
+        let write = usage.cache_write_tokens.unwrap_or(0);
+        let long = usage.cache_write_long_ttl_tokens.unwrap_or(0).min(write);
+        let uncached = uncached_input(usage)?;
+        let price = |tokens: u64, rate: Option<f64>| match (tokens, rate) {
+            (0, _) => Ok(0.0),
+            (_, Some(rate)) => Ok(tokens as f64 * rate * factor / 1_000_000.0),
+            (_, None) => Err(Unpriced::MissingPrice),
+        };
+        Ok(Cost {
+            input: price(uncached, rates.input)?,
+            cache_read: price(read, rates.cache_read)?,
+            cache_write: price(write - long, rates.cache_write)?
+                + price(long, rates.cache_write_long)?,
+            output: price(usage.completion_tokens, rates.output)?,
+        })
+    }
+
+    /// Most USD a call's uncached input could save if cached, rebilled at the model's cache-read price.
+    /// The bool is false when the model has no cache-read price and the bound falls back to full input cost.
+    pub fn cache_savings_ceiling(&self, usage: &UsageInfo) -> Result<(f64, bool), Unpriced> {
+        self.cache_savings_ceiling_on(usage, today())
+    }
+
+    /// [`PriceTable::cache_savings_ceiling`] on `day` (days since 1970-01-01 UTC).
+    pub fn cache_savings_ceiling_on(
+        &self,
+        usage: &UsageInfo,
+        day: u32,
+    ) -> Result<(f64, bool), Unpriced> {
+        let (rates, factor) = self.resolve(usage, day)?;
+        let uncached = uncached_input(usage)?;
+        let input = rates.input.ok_or(Unpriced::MissingPrice)?;
+        let usd = |rate: f64| uncached as f64 * rate * factor / 1_000_000.0;
+        match rates.cache_read {
+            Some(cache_read) => Ok(((usd(input) - usd(cache_read)).max(0.0), true)),
+            None => Ok((usd(input), false)),
+        }
+    }
+
+    /// The rates and price factor for a call, after service tier, the prompt-size threshold and date.
+    fn resolve(&self, usage: &UsageInfo, day: u32) -> Result<(&Rates, f64), Unpriced> {
         let name = usage.model.as_deref().ok_or(Unpriced::UnknownModel)?;
         let model = self
             .models
@@ -207,26 +247,25 @@ impl PriceTable {
         let factor = model.price_multiplier
             * multiplier(&model.speed, usage.speed.as_deref(), "standard")?
             * multiplier(&model.geo, usage.inference_geo.as_deref(), "global")?;
-        let read = usage.cache_read_tokens.unwrap_or(0);
-        let write = usage.cache_write_tokens.unwrap_or(0);
-        let long = usage.cache_write_long_ttl_tokens.unwrap_or(0).min(write);
-        let uncached = read
-            .checked_add(write)
-            .and_then(|cached| usage.prompt_tokens.checked_sub(cached))
-            .ok_or(Unpriced::InconsistentUsage)?;
-        let price = |tokens: u64, rate: Option<f64>| match (tokens, rate) {
-            (0, _) => Ok(0.0),
-            (_, Some(rate)) => Ok(tokens as f64 * rate * factor / 1_000_000.0),
-            (_, None) => Err(Unpriced::MissingPrice),
-        };
-        Ok(Cost {
-            input: price(uncached, rates.input)?,
-            cache_read: price(read, rates.cache_read)?,
-            cache_write: price(write - long, rates.cache_write)?
-                + price(long, rates.cache_write_long)?,
-            output: price(usage.completion_tokens, rates.output)?,
-        })
+        Ok((rates, factor))
     }
+}
+
+/// Prompt tokens billed at the input price: the prompt minus the cache reads and writes within it.
+fn uncached_input(usage: &UsageInfo) -> Result<u64, Unpriced> {
+    let read = usage.cache_read_tokens.unwrap_or(0);
+    let write = usage.cache_write_tokens.unwrap_or(0);
+    read.checked_add(write)
+        .and_then(|cached| usage.prompt_tokens.checked_sub(cached))
+        .ok_or(Unpriced::InconsistentUsage)
+}
+
+/// Days since 1970-01-01 (UTC) today, saturating if the clock is implausibly far ahead.
+fn today() -> u32 {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    u32::try_from(secs / 86_400).unwrap_or(u32::MAX)
 }
 
 fn invalid(provider: &str, why: impl fmt::Display) -> serde_json::Error {

@@ -10,7 +10,7 @@ honeybeepf-llm is a Rust eBPF agent that runs as a DaemonSet. It attaches uprobe
 `SSL_read`, reads the plaintext HTTP of calls to LLM providers, and exports token usage, request counts and
 latency per Kubernetes namespace and pod over OpenTelemetry.
 
-![Agent log on k3s: LLM calls from pods in team-a, team-b and team-c, with tokens per call](docs/images/demo.svg)
+![Agent log on k3s: LLM calls from pods in team-a (OpenAI), team-b (Anthropic) and team-c (Gemini), each line showing the model and the token counts the agent recorded](docs/images/demo.svg)
 
 <sub>Real output from a single-node k3s cluster with the charts from this repository and a locally built agent
 image; the client pods call a local mock of the provider APIs with fake keys.</sub>
@@ -30,6 +30,9 @@ image; the client pods call a local mock of the provider APIs with fake keys.</s
   and checks every log record at every level ([#45](https://github.com/honeybee-studio/honeybeepf-llm/pull/45)).
 - **Per pod.** Calls from pods are labelled with `target_namespace` and `target_pod_name`, so cost can be split
   by team or workload without tagging requests.
+- **Negligible overhead.** In an A/B run on a 4-vCPU kernel-7.0 VM, the agent used about 0.01 s of CPU over 60 s
+  idle, and about 7.7 microseconds of CPU per request (about 5% of one core) under ~6.8k HTTPS requests/s, at ~31 MB RSS
+  (measured in #163).
 
 ## Quickstart
 
@@ -246,7 +249,11 @@ kubectl -n monitoring create configmap honeybeepf-dashboards \
 kubectl -n monitoring label configmap honeybeepf-dashboards grafana_dashboard=1
 ```
 
-![LLM Cost Observability dashboard on the demo cluster: requests and tokens per minute and latency percentiles for team-a, team-b and team-c, token share by team, and usage by model](docs/images/grafana.png)
+The cost dashboard splits token usage, requests and latency by namespace, pod and workload, estimates spend per
+workload and per model in USD from the built-in price table, and surfaces Cost-Waste Signals — the measured USD of
+refused server-side fallback attempts and the estimated USD a prompt cache could save.
+
+![LLM Cost Observability dashboard on the demo cluster: token usage, requests and latency by namespace, pod and workload; estimated spend per workload and per model in USD; and Cost-Waste Signals showing the measured cost of refused fallback attempts and the estimated savings from prompt caching, across team-a, team-b and team-c](docs/images/grafana.png)
 
 See [`docs/grafana/README.md`](docs/grafana/README.md) for the template variables and other options.
 
