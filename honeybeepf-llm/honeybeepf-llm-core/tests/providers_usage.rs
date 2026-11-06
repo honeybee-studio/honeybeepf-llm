@@ -969,8 +969,8 @@ fn test_bedrock_converse_prompt_adds_cache_read_and_write() {
 #[test]
 fn test_new_defaults_parse_existing_bodies_like_before() {
     let registry = ProviderRegistry::with_defaults();
-    // Entries 0-3 are the OpenAI (chat, Responses), Anthropic and Gemini first-party providers.
-    let (before, _) = registry.providers.split_at(4);
+    // Entries 0-5 are the OpenAI (chat, image, Responses, transcription), Anthropic and Gemini first-party providers.
+    let (before, _) = registry.providers.split_at(6);
 
     for response in [
         json!({"model": "gpt-4o", "usage": {"prompt_tokens": 2000, "completion_tokens": 40,
@@ -1082,4 +1082,161 @@ fn test_gemini_interactions_requires_total_input_tokens() {
         "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
     });
     assert!(provider.parse_usage(&openai).is_none());
+}
+
+// Image generation reports input_tokens/output_tokens, the Responses key names; the per-modality
+// text/image split is a follow-up, so only the totals are read here. gpt-image-1 is not in the
+// price table, so the call stays unpriced rather than recording $0.
+#[test]
+fn test_openai_image_generation_records_totals() {
+    let response = json!({
+        "created": 1731459200,
+        "data": [{"b64_json": "iVBORw0KGgo="}],
+        "usage": {
+            "input_tokens": 50,
+            "input_tokens_details": {"text_tokens": 50, "image_tokens": 0},
+            "output_tokens": 1024,
+            "output_tokens_details": {"text_tokens": 0, "image_tokens": 1024},
+            "total_tokens": 1074
+        }
+    });
+    let usage = default_provider("api.openai.com", "/v1/images/generations")
+        .parse_usage(&response)
+        .unwrap();
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (50, 1024));
+    assert_eq!(usage.model, None);
+}
+
+// output_tokens_details.image_tokens tells image responses apart from Responses, which has
+// output_tokens_details.reasoning_tokens instead, so the image entry must not claim a Responses body.
+#[test]
+fn test_image_entry_does_not_claim_responses_usage() {
+    let registry = ProviderRegistry::with_defaults();
+    let responses = json!({
+        "model": "gpt-6", "status": "completed", "error": null,
+        "usage": {
+            "input_tokens": 30, "input_tokens_details": {"cached_tokens": 12},
+            "output_tokens": 9, "output_tokens_details": {"reasoning_tokens": 2}, "total_tokens": 39
+        }
+    });
+    let usage = parse_in_order(&registry.providers, &responses).unwrap();
+    // Parsed by the Responses entry (reasoning and cache read), not the image entry.
+    assert_eq!(usage.thoughts_tokens, Some(2));
+    assert_eq!(usage.cache_read_tokens, Some(12));
+}
+
+// The token-usage transcription variant carries usage.type=tokens with input_tokens/output_tokens.
+#[test]
+fn test_openai_transcription_tokens_records_totals() {
+    let response = json!({
+        "text": "hello world",
+        "usage": {
+            "type": "tokens",
+            "input_tokens": 14,
+            "input_token_details": {"text_tokens": 0, "audio_tokens": 14},
+            "output_tokens": 4,
+            "total_tokens": 18
+        }
+    });
+    let usage = default_provider("api.openai.com", "/v1/audio/transcriptions")
+        .parse_usage(&response)
+        .unwrap();
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (14, 4));
+}
+
+// The duration-billed variant has seconds, not tokens, so it records nothing here (a follow-up),
+// and no other provider claims it either.
+#[test]
+fn test_openai_transcription_duration_is_not_recorded() {
+    let registry = ProviderRegistry::with_defaults();
+    let response = json!({"text": "hi", "usage": {"type": "duration", "seconds": 3.2}});
+    assert!(
+        default_provider("api.openai.com", "/v1/audio/transcriptions")
+            .parse_usage(&response)
+            .is_none()
+    );
+    assert!(parse_in_order(&registry.providers, &response).is_none());
+}
+
+// usage.type keeps the transcription entry off the anthropic body, which has no usage.type and must
+// still be read by the anthropic entry (prompt includes cache).
+#[test]
+fn test_transcription_entry_does_not_claim_anthropic_usage() {
+    let transcription = default_provider("api.openai.com", "/v1/audio/transcriptions");
+    let anthropic = json!({
+        "type": "message", "model": "claude-opus-5-5",
+        "usage": {"input_tokens": 50, "cache_read_input_tokens": 100000, "output_tokens": 300}
+    });
+    assert!(transcription.parse_usage(&anthropic).is_none());
+}
+
+// An image response may omit output_tokens_details (optional), so the image entry's required_field is
+// unmet; the Responses entry then reads the same input_tokens/output_tokens totals and the call is
+// still recorded.
+#[test]
+fn test_image_without_output_details_is_recorded_via_responses() {
+    let registry = ProviderRegistry::with_defaults();
+    let response = json!({"created": 1, "data": [{"b64_json": "AA=="}], "usage": {
+        "input_tokens": 50, "input_tokens_details": {"text_tokens": 50, "image_tokens": 0},
+        "output_tokens": 1024, "total_tokens": 1074}});
+    assert!(
+        default_provider("api.openai.com", "/v1/images/generations")
+            .parse_usage(&response)
+            .is_none()
+    );
+    let usage = parse_in_order(&registry.providers, &response).unwrap();
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (50, 1024));
+}
+
+// Audio tokens stay folded into the chat totals; splitting them by modality is a follow-up.
+#[test]
+fn test_chat_audio_tokens_stay_on_the_chat_entry() {
+    let registry = ProviderRegistry::with_defaults();
+    let response = json!({"model": "gpt-4o-audio-preview", "usage": {
+        "prompt_tokens": 100, "completion_tokens": 200,
+        "prompt_tokens_details": {"audio_tokens": 30, "cached_tokens": 10},
+        "completion_tokens_details": {"audio_tokens": 150, "reasoning_tokens": 5}}});
+    let usage = parse_in_order(&registry.providers, &response).unwrap();
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (100, 200));
+    assert_eq!(usage.thoughts_tokens, Some(5));
+    assert_eq!(usage.cache_read_tokens, Some(10));
+}
+
+// The media entries' required_field keeps them from claiming another provider's usage shape that
+// reaches them while parsing tries providers in order.
+#[test]
+fn test_media_entries_do_not_claim_other_providers_usage() {
+    let image = default_provider("api.openai.com", "/v1/images/generations");
+    let transcription = default_provider("api.openai.com", "/v1/audio/transcriptions");
+    for body in [
+        json!({"usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 3}}),
+        json!({"usage": {"total_input_tokens": 7, "total_output_tokens": 2}}),
+        json!({"usage": {"inputTokens": 30, "outputTokens": 628, "totalTokens": 658}}),
+        json!({"amazon-bedrock-invocationMetrics": {"inputTokenCount": 3, "outputTokenCount": 4}}),
+        json!({"type": "message", "usage": {"input_tokens": 5, "output_tokens": 6}}),
+    ] {
+        assert!(image.parse_usage(&body).is_none(), "image claimed {body}");
+        assert!(
+            transcription.parse_usage(&body).is_none(),
+            "transcription claimed {body}"
+        );
+    }
+}
+
+// A token-variant transcription with a missing or non-integer count is not usable, so nothing records it.
+#[test]
+fn test_transcription_tokens_with_bad_counts_is_not_recorded() {
+    let registry = ProviderRegistry::with_defaults();
+    for usage in [
+        json!({"type": "tokens", "output_tokens": 4}),
+        json!({"type": "tokens", "input_tokens": 14}),
+        json!({"type": "tokens", "input_tokens": "14", "output_tokens": 4}),
+        json!({"type": "tokens", "input_tokens": 14.0, "output_tokens": 4}),
+    ] {
+        let body = json!({"text": "hi", "usage": usage});
+        assert!(
+            parse_in_order(&registry.providers, &body).is_none(),
+            "{body}"
+        );
+    }
 }

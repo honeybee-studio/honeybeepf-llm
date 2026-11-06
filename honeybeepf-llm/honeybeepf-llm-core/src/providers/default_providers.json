@@ -24,6 +24,20 @@
     },
     {
       "name": "openai",
+      "note": "Image generation and edits (gpt-image-1). Usage shares input_tokens/output_tokens with the Responses API, so this entry stays before Responses and requires output_tokens_details.image_tokens, which image responses carry and Responses does not. Hosts: OpenAI API only; Azure/Foundry (/openai/deployments/... paths) and Bedrock (/openai/v1) media share hosts with chat and are a follow-up. A streamed image (image_generation.completed, no [DONE]) is not an SSE end marker so its usage is not read yet. Totals only; the per-modality image/text split is a follow-up.",
+      "hosts": ["api.openai.com"],
+      "paths": ["/v1/images/generations$", "/v1/images/edits$"],
+      "response": {
+        "usage_path": "usage",
+        "prompt_tokens": "input_tokens",
+        "completion_tokens": "output_tokens",
+        "required_field": "output_tokens_details.image_tokens",
+        "model_path": "model"
+      },
+      "request_extractor": "none"
+    },
+    {
+      "name": "openai",
       "note": "Responses API, same hosts as Chat Completions. Usage parsing tries providers in order without a host check and anthropic has the same input/output_tokens keys, so this entry stays before anthropic and requires input_tokens_details. `$` keeps GET /v1/responses/{id} and the unbilled /responses/input_tokens out; /compact is billed. Azure api-version clients post to /openai/responses, or under /deployments/{d}. cached_tokens leaves writes out and input_tokens counts both, so no adding back.",
       "hosts": [
         "api.openai.com",
@@ -53,6 +67,20 @@
         "service_tier_path": "service_tier"
       },
       "request_extractor": "input"
+    },
+    {
+      "name": "openai",
+      "note": "Audio transcription and translation (gpt-4o-transcribe). The token-usage variant reports usage.type with input_tokens/output_tokens; required_field type keeps it before and apart from anthropic, which has input_tokens/output_tokens but no usage.type. The duration variant (type=duration, seconds, no tokens) has no input_tokens and is skipped here, and a streamed transcription (transcript.text.done, no [DONE]) is not an SSE end marker so its usage is not read yet. Hosts: OpenAI API only; Azure audio (shared host, /openai/deployments/... path) and recording duration-billed or streamed transcription are follow-ups.",
+      "hosts": ["api.openai.com"],
+      "paths": ["/v1/audio/transcriptions$", "/v1/audio/translations$"],
+      "response": {
+        "usage_path": "usage",
+        "prompt_tokens": "input_tokens",
+        "completion_tokens": "output_tokens",
+        "required_field": "type",
+        "model_path": "model"
+      },
+      "request_extractor": "none"
     },
     {
       "name": "anthropic",
