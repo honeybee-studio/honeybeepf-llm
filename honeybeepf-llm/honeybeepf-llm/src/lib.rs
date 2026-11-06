@@ -16,7 +16,7 @@ use std::{
 };
 
 use anyhow::Result;
-use aya::{Ebpf, EbpfLoader, VerifierLogLevel, util::KernelVersion};
+use aya::{Ebpf, EbpfLoader, util::KernelVersion};
 use aya_log::EbpfLogger;
 use log::{debug, info, warn};
 use tokio::{signal, time::Instant};
@@ -61,7 +61,8 @@ impl HoneyBeeEngine {
         #[cfg(feature = "k8s")]
         if !plaintext::configured_specs().is_empty() {
             loader.set_max_entries("PLAIN_EVENTS", plaintext::PLAIN_EVENTS_FULL_BYTES);
-            loader.verifier_log_level(VerifierLogLevel::VERBOSE | VerifierLogLevel::STATS);
+            loader
+                .verifier_log_level(aya::VerifierLogLevel::VERBOSE | aya::VerifierLogLevel::STATS);
         }
         let mut bpf = loader.load(bytecode)?;
 
