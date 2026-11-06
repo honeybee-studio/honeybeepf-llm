@@ -187,3 +187,34 @@ fn cap_truncates_to_the_map_bound() {
     assert_eq!(cap(addrs(10)), addrs(10));
     assert_eq!(cap(addrs(MAX_ENDPOINTS as u32 + 5)).len(), MAX_ENDPOINTS);
 }
+
+#[test]
+fn endpoint_key_encodes_ipv4_and_skips_ipv6() {
+    // 10.0.0.1:8000 → IP network-order bits in the high 32, htons(port) in the low 16.
+    let ip = u32::from(Ipv4Addr::new(10, 0, 0, 1)).to_be() as u64;
+    let want = (ip << 16) | (8000u16.to_be() as u64);
+    assert_eq!(
+        endpoint_key(&"10.0.0.1:8000".parse().expect("addr")),
+        Some(want)
+    );
+    assert_eq!(endpoint_key(&"[::1]:8000".parse().expect("addr")), None);
+}
+
+#[test]
+fn cgroup_gate_picks_unified_then_hybrid_else_none() {
+    let unified = "cgroup2 /sys/fs/cgroup cgroup2 rw 0 0";
+    assert_eq!(
+        cgroup_v2_root_from(unified),
+        Some(PathBuf::from("/sys/fs/cgroup"))
+    );
+    let hybrid = "tmpfs /sys/fs/cgroup tmpfs rw 0 0\n\
+                  cgroup2 /sys/fs/cgroup/unified cgroup2 rw 0 0\n\
+                  cgroup /sys/fs/cgroup/memory cgroup rw 0 0";
+    assert_eq!(
+        cgroup_v2_root_from(hybrid),
+        Some(PathBuf::from("/sys/fs/cgroup/unified"))
+    );
+    let v1 = "tmpfs /sys/fs/cgroup tmpfs rw 0 0\n\
+              cgroup /sys/fs/cgroup/memory cgroup rw,memory 0 0";
+    assert_eq!(cgroup_v2_root_from(v1), None);
+}
