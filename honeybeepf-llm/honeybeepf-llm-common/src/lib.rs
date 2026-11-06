@@ -53,6 +53,13 @@ pub const fn plain_flow_key(
     }
 }
 
+/// Plaintext parser stream id, built the same way on send and receive. The parser key is `(pid, id)`,
+/// and within one pid `remote_ip4`, `local_port` and `remote_port` already identify the connection,
+/// so `local_ip4` is left out; packing instead of hashing keeps the value exact to test.
+pub const fn plain_stream_id(key: &PlainFlowKey) -> u64 {
+    ((key.remote_ip4 as u64) << 32) | ((key.local_port as u64) << 16) | key.remote_port as u64
+}
+
 /// Full max-entries the eBPF object declares for the plaintext maps; the loader keeps them this big
 /// only when capture is on. Hash maps prealloc, so PLAIN_CONNS alone costs ~6.5 MB at full size.
 pub const PLAIN_ENDPOINTS_ENTRIES: u32 = 8192;
@@ -358,6 +365,27 @@ mod tests {
         assert_eq!(key.local_port, 33000);
         assert_eq!(key.local_ip4, local_ip);
         assert_eq!(key.remote_ip4, remote_ip);
+    }
+
+    #[test]
+    fn stream_id_packs_remote_ip_and_ports_and_ignores_local_ip() {
+        let remote_ip = u32::from_be_bytes([127, 0, 0, 1]).to_be();
+        let key = plain_flow_key(
+            u32::from_be_bytes([10, 0, 0, 5]).to_be(),
+            remote_ip,
+            33000,
+            0xAA46_0000,
+        );
+        let want = ((remote_ip as u64) << 32) | (33000u64 << 16) | 18090u16.to_be() as u64;
+        assert_eq!(plain_stream_id(&key), want);
+        // Same connection from the other local_ip4 still yields the same id (local_ip4 is dropped).
+        let other = plain_flow_key(
+            u32::from_be_bytes([10, 0, 0, 9]).to_be(),
+            remote_ip,
+            33000,
+            0xAA46_0000,
+        );
+        assert_eq!(plain_stream_id(&other), want);
     }
 
     #[test]

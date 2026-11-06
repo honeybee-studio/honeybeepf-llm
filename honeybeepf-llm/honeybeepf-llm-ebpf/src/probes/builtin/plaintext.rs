@@ -18,7 +18,7 @@ use aya_ebpf::{
 use honeybeepf_llm_common::{
     EventMetadata, LlmDirection, LlmEventHeader, MAX_SSL_BUF_SIZE, PLAIN_CONNS_ENTRIES,
     PLAIN_ENDPOINTS_ENTRIES, PLAIN_SOCKS_ENTRIES, PlainFlowKey, plain_endpoint_key, plain_flow_key,
-    sock_ops_remote_port,
+    plain_stream_id, sock_ops_remote_port,
 };
 
 /// Minimum when plaintext is off; the loader bumps it to the full size when enabled.
@@ -49,7 +49,7 @@ pub static PLAIN_EVENTS: RingBuf = RingBuf::with_byte_size(PLAIN_RINGBUF_MIN, 0)
 pub fn plaintext_sockops(ctx: SockOpsContext) -> u32 {
     let op = ctx.op();
     if op == BPF_SOCK_OPS_STATE_CB {
-        // Fires only on sockets we flagged (watched ones); free their attribution when they close.
+        // Fires only on sockets we flagged (watched ones); end their stream and free attribution.
         if ctx.arg(1) == BPF_TCP_CLOSE {
             let flow = plain_flow_key(
                 ctx.local_ip4(),
@@ -57,6 +57,11 @@ pub fn plaintext_sockops(ctx: SockOpsContext) -> u32 {
                 ctx.local_port(),
                 ctx.remote_port(),
             );
+            // SAFETY: map lookup with a stack key; the value is copied out before the remove below.
+            if let Some(meta) = unsafe { PLAIN_CONNS.get(&flow) } {
+                let meta = *meta;
+                emit_close(&flow, &meta);
+            }
             let _ = PLAIN_CONNS.remove(&flow);
         }
         return 0;
@@ -95,8 +100,8 @@ pub fn plaintext_sockops(ctx: SockOpsContext) -> u32 {
     0
 }
 
-/// Fill a reserved record's header; the caller sets `buf_filled` after the copy. `ssl_ptr` stays 0
-/// until a later PR joins the parser and supplies a stream key.
+/// Fill a reserved record's header; the caller sets `buf_filled` after the copy. `ssl_ptr` is the
+/// connection's stream id, so the userspace parser groups a connection's records.
 #[inline(always)]
 fn init_header(
     h: &mut LlmEventHeader,
@@ -104,9 +109,10 @@ fn init_header(
     len: u32,
     rw: LlmDirection,
     truncated: u8,
+    ssl_ptr: u64,
 ) {
     h.metadata = *meta;
-    h.ssl_ptr = 0;
+    h.ssl_ptr = ssl_ptr;
     h.latency_ns = 0;
     h.len = len;
     h.offset = 0;
@@ -120,7 +126,7 @@ fn init_header(
 /// Copy a watched send into PLAIN_EVENTS as an `N`-byte-payload record; `N` is constant so the
 /// verifier can bound the copy. The record is `LlmEventHeader` + payload, the SSL ring's shape.
 #[inline(always)]
-fn emit_send<const N: usize>(ctx: &SkMsgContext, meta: &EventMetadata, size: u32) {
+fn emit_send<const N: usize>(ctx: &SkMsgContext, meta: &EventMetadata, size: u32, stream: u64) {
     let Some(mut slot) = PLAIN_EVENTS.reserve::<PlainEvent<N>>(0) else {
         return;
     };
@@ -132,6 +138,7 @@ fn emit_send<const N: usize>(ctx: &SkMsgContext, meta: &EventMetadata, size: u32
         size,
         LlmDirection::Write,
         (size as usize > N) as u8,
+        stream,
     );
     // The dispatch keeps `size` within the chosen bucket, but the compiler spills it and the verifier
     // loses that bound; a volatile reload makes the min(.., N) survive so the copy stays <= N.
@@ -151,7 +158,7 @@ fn emit_send<const N: usize>(ctx: &SkMsgContext, meta: &EventMetadata, size: u32
 /// Copy a watched receive into PLAIN_EVENTS; mirrors `emit_send` but reads from the (possibly
 /// non-linear) skb with the bounded `bpf_skb_load_bytes` helper, so no pull is needed.
 #[inline(always)]
-fn emit_recv<const N: usize>(ctx: &SkBuffContext, meta: &EventMetadata, size: u32) {
+fn emit_recv<const N: usize>(ctx: &SkBuffContext, meta: &EventMetadata, size: u32, stream: u64) {
     let Some(mut slot) = PLAIN_EVENTS.reserve::<PlainEvent<N>>(0) else {
         return;
     };
@@ -163,6 +170,7 @@ fn emit_recv<const N: usize>(ctx: &SkBuffContext, meta: &EventMetadata, size: u3
         size,
         LlmDirection::Read,
         (size as usize > N) as u8,
+        stream,
     );
     // SAFETY: &size is a valid initialized local; the volatile reload keeps the min(.., N) bound.
     let n = core::cmp::min(unsafe { core::ptr::read_volatile(&size) } as usize, N);
@@ -199,7 +207,7 @@ fn emit_recv<const N: usize>(ctx: &SkBuffContext, meta: &EventMetadata, size: u3
 
 /// Linearize the send's first bytes and emit them in the smallest bucket that fits.
 #[inline(never)]
-fn capture_send(ctx: &SkMsgContext, meta: &EventMetadata) {
+fn capture_send(ctx: &SkMsgContext, meta: &EventMetadata, stream: u64) {
     let size = ctx.size();
     if size == 0 {
         return;
@@ -211,11 +219,11 @@ fn capture_send(ctx: &SkMsgContext, meta: &EventMetadata) {
         return;
     }
     if to_read <= PLAIN_BUCKET_SMALL {
-        emit_send::<PLAIN_BUCKET_SMALL>(ctx, meta, size);
+        emit_send::<PLAIN_BUCKET_SMALL>(ctx, meta, size, stream);
     } else if to_read <= PLAIN_BUCKET_MED {
-        emit_send::<PLAIN_BUCKET_MED>(ctx, meta, size);
+        emit_send::<PLAIN_BUCKET_MED>(ctx, meta, size, stream);
     } else {
-        emit_send::<MAX_SSL_BUF_SIZE>(ctx, meta, size);
+        emit_send::<MAX_SSL_BUF_SIZE>(ctx, meta, size, stream);
     }
 }
 
@@ -236,25 +244,25 @@ pub fn plaintext_skmsg(ctx: SkMsgContext) -> u32 {
         return SK_PASS;
     };
     let meta = *meta;
-    capture_send(&ctx, &meta);
+    capture_send(&ctx, &meta, plain_stream_id(&flow));
     SK_PASS
 }
 
 /// Emit the receive's first bytes in the smallest bucket that fits; `bpf_skb_load_bytes` copies
 /// directly from the skb, so no pull is needed.
 #[inline(never)]
-fn capture_recv(ctx: &SkBuffContext, meta: &EventMetadata) {
+fn capture_recv(ctx: &SkBuffContext, meta: &EventMetadata, stream: u64) {
     let size = ctx.len();
     if size == 0 {
         return;
     }
     let to_read = core::cmp::min(size as usize, MAX_SSL_BUF_SIZE);
     if to_read <= PLAIN_BUCKET_SMALL {
-        emit_recv::<PLAIN_BUCKET_SMALL>(ctx, meta, size);
+        emit_recv::<PLAIN_BUCKET_SMALL>(ctx, meta, size, stream);
     } else if to_read <= PLAIN_BUCKET_MED {
-        emit_recv::<PLAIN_BUCKET_MED>(ctx, meta, size);
+        emit_recv::<PLAIN_BUCKET_MED>(ctx, meta, size, stream);
     } else {
-        emit_recv::<MAX_SSL_BUF_SIZE>(ctx, meta, size);
+        emit_recv::<MAX_SSL_BUF_SIZE>(ctx, meta, size, stream);
     }
 }
 
@@ -273,8 +281,23 @@ pub fn plaintext_skskb(ctx: SkBuffContext) -> u32 {
         return SK_PASS;
     };
     let meta = *meta;
-    capture_recv(&ctx, &meta);
+    capture_recv(&ctx, &meta, plain_stream_id(&flow));
     SK_PASS
+}
+
+/// Emit a header-only record marking the connection closed, so the userspace parser ends this
+/// connection's stream and records any pending response.
+#[inline(always)]
+fn emit_close(flow: &PlainFlowKey, meta: &EventMetadata) {
+    let Some(mut slot) = PLAIN_EVENTS.reserve::<LlmEventHeader>(0) else {
+        return;
+    };
+    // SAFETY: the slot is reserved for one header; every field is set before submit.
+    let h = unsafe { &mut *slot.as_mut_ptr() };
+    init_header(h, meta, 0, LlmDirection::Unknown, 0, plain_stream_id(flow));
+    h.buf_filled = 0;
+    h.closed = 1;
+    slot.submit(0);
 }
 
 const MAX_COMM: usize = 16;
