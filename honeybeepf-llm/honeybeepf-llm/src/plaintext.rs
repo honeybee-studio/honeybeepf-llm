@@ -5,7 +5,8 @@
 use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -15,7 +16,7 @@ use honeybeepf_llm_core::providers::ProviderRegistry;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{Api, Client, api::ListParams};
-use log::warn;
+use log::{debug, info, warn};
 
 use crate::probes::shutdown_flag;
 
@@ -24,6 +25,8 @@ use crate::probes::shutdown_flag;
 pub const PLAIN_EVENTS_FULL_BYTES: u32 = 4 * 1024 * 1024;
 /// Seconds between reconcile passes (re-list Services, re-resolve external DNS).
 const RECONCILE_SECONDS: u64 = 30;
+/// Seconds between plaintext capture summaries (logged only when the count changed).
+const CAPTURE_REPORT_SECONDS: u64 = 5;
 const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 
 /// Upper bound for the fixed-size BPF map; beyond it extra endpoints are dropped with a warning.
@@ -306,10 +309,11 @@ pub fn configured_specs() -> Vec<EndpointSpec> {
     specs_from_registry(&registry)
 }
 
-/// Gate on cgroup v2 + kernel 5.10, attach the sockops program to the cgroup, fill the endpoint map,
-/// and run the reconcile driver. Returns Err (logged as disabled) when the node cannot support it.
+/// Gate on cgroup v2 + kernel 5.10, attach the sockops and sk_msg programs, start the capture
+/// reader, fill the endpoint map, and run the reconcile driver; a failure after the sockops attach
+/// undoes it. Returns Err (logged as disabled) when the node cannot support it.
 pub async fn start(bpf: &mut aya::Ebpf, specs: Vec<EndpointSpec>) -> Result<()> {
-    use aya::programs::{CgroupAttachMode, SockOps};
+    use aya::programs::{CgroupAttachMode, SkMsg, SockOps};
 
     if !KernelVersion::current().is_ok_and(|v| v >= KernelVersion::new(5, 10, 0)) {
         anyhow::bail!("kernel older than 5.10");
@@ -317,12 +321,32 @@ pub async fn start(bpf: &mut aya::Ebpf, specs: Vec<EndpointSpec>) -> Result<()> 
     let cgroup = cgroup_v2_root().context("no cgroup v2 hierarchy (pure cgroup v1 node)")?;
     let cgroup_fd = std::fs::File::open(&cgroup)?;
 
-    let prog: &mut SockOps = bpf
+    // Verify both programs before attaching either: a verifier rejection then leaves nothing attached.
+    {
+        let p: &mut SockOps = bpf
+            .program_mut("plaintext_sockops")
+            .context("plaintext_sockops program missing")?
+            .try_into()?;
+        p.load().map_err(|e| load_error("plaintext_sockops", e))?;
+    }
+    {
+        let p: &mut SkMsg = bpf
+            .program_mut("plaintext_skmsg")
+            .context("plaintext_skmsg program missing")?
+            .try_into()?;
+        p.load().map_err(|e| load_error("plaintext_skmsg", e))?;
+    }
+
+    let sockops: &mut SockOps = bpf
         .program_mut("plaintext_sockops")
         .context("plaintext_sockops program missing")?
         .try_into()?;
-    prog.load()?;
-    prog.attach(cgroup_fd, CgroupAttachMode::Single)?;
+    let sockops_link = sockops.attach(cgroup_fd, CgroupAttachMode::Single)?;
+
+    if let Err(e) = attach_skmsg_and_read(bpf) {
+        detach_sockops(bpf, sockops_link);
+        return Err(e);
+    }
 
     let map = aya::maps::HashMap::<_, u64, u8>::try_from(
         bpf.take_map("PLAIN_ENDPOINTS")
@@ -334,6 +358,88 @@ pub async fn start(bpf: &mut aya::Ebpf, specs: Vec<EndpointSpec>) -> Result<()> 
     };
     tokio::spawn(resolver.run(client, MapEndpointSink::new(map)));
     Ok(())
+}
+
+/// Attach the sk_msg program to the sockhash of watched sockets and start draining PLAIN_EVENTS.
+fn attach_skmsg_and_read(bpf: &mut aya::Ebpf) -> Result<()> {
+    use aya::programs::SkMsg;
+    let socks = aya::maps::SockHash::<_, u64>::try_from(
+        bpf.map("PLAIN_SOCKS").context("PLAIN_SOCKS map missing")?,
+    )?
+    .fd()
+    .try_clone()?;
+    let skmsg: &mut SkMsg = bpf
+        .program_mut("plaintext_skmsg")
+        .context("plaintext_skmsg program missing")?
+        .try_into()?;
+    skmsg.attach(&socks)?;
+    start_capture_reader(bpf)
+}
+
+/// Detach the sockops program so a failed later step leaves nothing attached to the cgroup.
+fn detach_sockops(bpf: &mut aya::Ebpf, link: aya::programs::sock_ops::SockOpsLinkId) {
+    use aya::programs::SockOps;
+    let prog = bpf
+        .program_mut("plaintext_sockops")
+        .expect("plaintext_sockops present after it was attached");
+    if let Ok(prog) = TryInto::<&mut SockOps>::try_into(prog) {
+        let _ = prog.detach(link);
+    }
+}
+
+/// Log a program's verifier rejection — the last lines at warn, the whole log at debug so the kernel
+/// matrix shows the cause — and return a short error for the caller.
+fn load_error(name: &str, e: aya::programs::ProgramError) -> anyhow::Error {
+    use aya::programs::ProgramError;
+    if let ProgramError::LoadError { verifier_log, .. } = &e {
+        let full = verifier_log.to_string();
+        let lines: Vec<&str> = full.lines().collect();
+        let keep = lines.len().min(25);
+        let tail = lines[lines.len() - keep..].join("\n");
+        warn!(
+            "{name}: verifier rejected the program; last {keep} of {} log lines:\n{tail}",
+            lines.len()
+        );
+        debug!("{name}: full verifier log:\n{full}\n--- end verifier log ---");
+        return anyhow::anyhow!("{name}: verifier rejected the program");
+    }
+    anyhow::anyhow!("{name}: {e}")
+}
+
+/// Drain captured sends from `PLAIN_EVENTS`, counting them; each record carries the sender's
+/// pid/cgroup for the parser join a later PR adds. A periodic task logs the running total.
+fn start_capture_reader(bpf: &mut aya::Ebpf) -> Result<()> {
+    let sends = Arc::new(AtomicU64::new(0));
+    let bytes = Arc::new(AtomicU64::new(0));
+    let (s, b) = (sends.clone(), bytes.clone());
+    crate::probes::spawn_ringbuf_handler_var(bpf, "PLAIN_EVENTS", move |_header, payload| {
+        s.fetch_add(1, Ordering::Relaxed);
+        b.fetch_add(payload.len() as u64, Ordering::Relaxed);
+    })?;
+    tokio::spawn(report_captures(sends, bytes));
+    Ok(())
+}
+
+/// Log the plaintext send/byte total every `CAPTURE_REPORT_SECONDS` while it changes, until shutdown.
+async fn report_captures(sends: Arc<AtomicU64>, bytes: Arc<AtomicU64>) {
+    let shutdown = shutdown_flag();
+    let mut last = 0u64;
+    loop {
+        for _ in 0..CAPTURE_REPORT_SECONDS {
+            if shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        let n = sends.load(Ordering::Relaxed);
+        if n != last {
+            info!(
+                "Plaintext sends captured: {n} ({} bytes)",
+                bytes.load(Ordering::Relaxed)
+            );
+            last = n;
+        }
+    }
 }
 
 #[cfg(test)]

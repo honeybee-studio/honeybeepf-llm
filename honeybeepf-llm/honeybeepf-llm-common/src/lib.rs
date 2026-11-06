@@ -12,11 +12,45 @@ pub const fn plain_endpoint_key(ip_be: u32, port_be: u16) -> u64 {
     ((ip_be as u64) << 16) | (port_be as u64)
 }
 
-/// Network-order destination port from a `bpf_sock_ops.remote_port`: the kernel packs the be16 port
-/// into the high 16 bits (little-endian `skc_dport << 16`), so the low bits are zero. Recovers the
-/// htons(port) bits a userspace key is built from.
+/// Network-order destination port from a context's `remote_port`: both `bpf_sock_ops` and
+/// `sk_msg_md` pack the be16 port into the high 16 bits (little-endian `skc_dport << 16`), so the
+/// low bits are zero. Recovers the htons(port) bits a userspace key is built from.
 pub const fn sock_ops_remote_port(remote_port: u32) -> u16 {
     (u32::from_be(remote_port) as u16).to_be()
+}
+
+/// Source port from a context's `local_port`: both `bpf_sock_ops` and `sk_msg_md` store it in host
+/// byte order, so the low 16 bits are the port number.
+pub const fn flow_local_port(local_port: u32) -> u16 {
+    local_port as u16
+}
+
+/// 4-tuple identifying a TCP connection, built identically from `bpf_sock_ops` (at connect) and
+/// `sk_msg_md` (at send) so both key `PLAIN_CONNS` the same without the socket cookie (a helper
+/// `sk_msg` may not call). No padding: four fields pack to 12 bytes, so the key bytes are stable.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PlainFlowKey {
+    pub local_ip4: u32,
+    pub remote_ip4: u32,
+    pub local_port: u16,
+    pub remote_port: u16,
+}
+
+/// Build the flow key from a context's raw 4-tuple fields; `*_ip4` are network order on both
+/// contexts, and the ports are normalized by [`sock_ops_remote_port`] and [`flow_local_port`].
+pub const fn plain_flow_key(
+    local_ip4: u32,
+    remote_ip4: u32,
+    local_port: u32,
+    remote_port: u32,
+) -> PlainFlowKey {
+    PlainFlowKey {
+        local_ip4,
+        remote_ip4,
+        local_port: flow_local_port(local_port),
+        remote_port: sock_ops_remote_port(remote_port),
+    }
 }
 
 // Indices into the LLM_STATS per-CPU counter map (kernel increments, userspace sums).
@@ -280,5 +314,18 @@ mod tests {
             plain_endpoint_key(ip_be, sock_ops_remote_port(0xAA46_0000)),
             plain_endpoint_key(ip_be, 18090u16.to_be()),
         );
+    }
+
+    #[test]
+    fn flow_key_normalizes_ports_from_raw_context_fields() {
+        // Raw 4-tuple as both contexts present it: ip4 network order, remote_port be16 in the high
+        // 16 bits, local_port host order. 10.0.0.5:33000 -> 127.0.0.1:18090.
+        let local_ip = u32::from_be_bytes([10, 0, 0, 5]).to_be();
+        let remote_ip = u32::from_be_bytes([127, 0, 0, 1]).to_be();
+        let key = plain_flow_key(local_ip, remote_ip, 33000, 0xAA46_0000);
+        assert_eq!(key.remote_port, 18090u16.to_be()); // htons(18090) = 0xAA46
+        assert_eq!(key.local_port, 33000);
+        assert_eq!(key.local_ip4, local_ip);
+        assert_eq!(key.remote_ip4, remote_ip);
     }
 }

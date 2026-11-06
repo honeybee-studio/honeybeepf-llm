@@ -56,10 +56,13 @@ impl HoneyBeeEngine {
         // Not required to exist: test objects without the LLM programs still load.
         let mut loader = EbpfLoader::new();
         loader.set_global("TAIL_CALL_OK", &tail_call_ok, false);
-        // Keep PLAIN_EVENTS at its tiny default unless plaintext capture is configured.
+        // Keep PLAIN_EVENTS at its tiny default unless plaintext capture is configured; when it is,
+        // raise the verifier log level so a socket-program rejection prints its full cause.
         #[cfg(feature = "k8s")]
         if !plaintext::configured_specs().is_empty() {
             loader.set_max_entries("PLAIN_EVENTS", plaintext::PLAIN_EVENTS_FULL_BYTES);
+            loader
+                .verifier_log_level(aya::VerifierLogLevel::VERBOSE | aya::VerifierLogLevel::STATS);
         }
         let mut bpf = loader.load(bytecode)?;
 
