@@ -105,18 +105,19 @@
     },
     {
       "name": "gemini",
-      "note": "Gemini Interactions API (POST /v1beta/interactions, also stable /v1); Deep Research runs only through it since 2026-10-08. Same hosts as generateContent. Streaming nests the interaction (with its usage) under `interaction`, unwrapped in the SSE merge; non-streaming carries usage and model at the top level, so one usage_path fits both. total_output_tokens excludes thoughts (docs example 7+23+49=79=total_tokens), so completion is output + thoughts as in generateContent. total_cached_tokens is part of total_input_tokens. required_field keeps this entry off other providers' top-level usage. total_tool_use_tokens is not mapped (its billing relation to input is unconfirmed) and the Vertex interactions:create paths are deferred.",
+      "note": "Gemini Interactions API (POST /v1beta/interactions, also stable /v1); Deep Research runs only through it since 2026-10-08. Same hosts as generateContent. Vertex AI posts to /projects/{p}/locations/{l}/interactions (streaming via body `\"stream\":true`, no custom verb), covered by /locations/*/interactions$. Streaming nests the interaction (with its usage) under `interaction`, unwrapped in the SSE merge; non-streaming carries usage and model at the top level, so one usage_path fits both. total_output_tokens excludes thoughts (docs example 7+23+49=79=total_tokens), so completion is output + thoughts as in generateContent. total_cached_tokens is part of total_input_tokens. total_tool_use_tokens is tool-use prompt tokens counted outside total_input_tokens (like generateContent's toolUsePromptTokenCount), added to input. required_field keeps this entry off other providers' top-level usage. A failed/cancelled/incomplete interaction, or an `error` event, ends the stream (the SSE parser records a terminal call, zero tokens when no usage). background interactions polled by GET are a separate follow-up (as in #66).",
       "hosts": [
         "generativelanguage.googleapis.com",
         "aiplatform.googleapis.com",
         "aiplatform.*.rep.googleapis.com"
       ],
-      "paths": ["/v1beta/interactions$", "/v1/interactions$"],
+      "paths": ["/v1beta/interactions$", "/v1/interactions$", "/locations/*/interactions$"],
       "response": {
         "usage_path": "usage",
         "prompt_tokens": "total_input_tokens",
         "completion_tokens": "total_output_tokens",
         "completion_optional": true,
+        "extra_prompt_tokens": "total_tool_use_tokens",
         "thoughts_tokens": "total_thought_tokens",
         "completion_excludes_thoughts": true,
         "cache_read_tokens": "total_cached_tokens",
