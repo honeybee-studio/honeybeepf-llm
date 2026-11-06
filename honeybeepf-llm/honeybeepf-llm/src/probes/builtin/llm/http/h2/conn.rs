@@ -205,11 +205,11 @@ fn on_frame(
         // Decode the request block (to keep the client table in sync) and track it only when it matched a
         // provider, so non-LLM streams never take a map slot.
         Frame::Headers { stream, block } if request => {
-            if let Some(path) = match_request(decoder, block)
+            if let Some((path, record_only)) = match_request(decoder, block)
                 && !streams.contains_key(&stream)
                 && streams.len() < MAX_STREAMS
             {
-                streams.insert(stream, H2Stream::open(Instant::now()));
+                streams.insert(stream, H2Stream::open(Instant::now(), record_only));
                 on(H2Event::Detected { path });
             }
         }
@@ -251,7 +251,12 @@ fn on_frame(
         }
         Frame::StreamEnd { stream } if !request => {
             if let Some(s) = streams.get_mut(&stream) {
-                if let Some(usage) = s.finish() {
+                if s.record_only() {
+                    // A Managed Agents session call: counted at its end, its running session total not read.
+                    on(H2Event::Unparsed {
+                        reason: UnparsedReason::AgentSession,
+                    });
+                } else if let Some(usage) = s.finish() {
                     on(H2Event::Recorded {
                         usage: Box::new(usage),
                         start: s.start(),
@@ -329,9 +334,10 @@ fn drop_stream(
     }
 }
 
-/// Decode a request header block (keeping the HPACK table in sync) and return the matched path when it is a
-/// POST a provider serves. A block that failed to decode stays unmatched: its fields are unreliable (hpack.rs).
-fn match_request(decoder: &mut Decoder, block: &[u8]) -> Option<String> {
+/// Decode a request header block (keeping the HPACK table in sync) and return the matched path and whether
+/// its provider is record-only, when it is a POST a provider serves. A block that failed to decode stays
+/// unmatched: its fields are unreliable (hpack.rs).
+fn match_request(decoder: &mut Decoder, block: &[u8]) -> Option<(String, bool)> {
     let mut is_post = false;
     let mut authority: Option<Vec<u8>> = None;
     let mut path: Option<Vec<u8>> = None;
@@ -352,9 +358,12 @@ fn match_request(decoder: &mut Decoder, block: &[u8]) -> Option<String> {
     }
     let authority = std::str::from_utf8(authority.as_deref()?).ok()?;
     let path = std::str::from_utf8(path.as_deref()?).ok()?;
-    PROVIDER_REGISTRY
-        .find_provider(authority, path)
-        .map(|_| path.split_once('?').map_or(path, |(p, _)| p).to_string())
+    PROVIDER_REGISTRY.find_provider(authority, path).map(|p| {
+        (
+            path.split_once('?').map_or(path, |(p, _)| p).to_string(),
+            p.record_only,
+        )
+    })
 }
 
 /// Decode a response header block (keeping the table in sync) and return its content type and the content
@@ -424,7 +433,13 @@ mod tests {
         };
         let m = |b: &[u8]| match_request(&mut Decoder::new(), b);
         let openai = block(b"POST", "api.openai.com", "/v1/chat/completions?x=1");
-        assert_eq!(m(&openai).as_deref(), Some("/v1/chat/completions"));
+        assert_eq!(
+            m(&openai),
+            Some(("/v1/chat/completions".to_string(), false))
+        );
+        // A Managed Agents session POST is matched as record-only.
+        let session = block(b"POST", "api.anthropic.com", "/v1/sessions");
+        assert_eq!(m(&session), Some(("/v1/sessions".to_string(), true)));
         assert_eq!(m(&block(b"POST", "noise.internal", "/p")), None);
         assert_eq!(
             m(&block(b"GET", "api.openai.com", "/v1/chat/completions")),
@@ -597,6 +612,59 @@ mod tests {
         reads.extend(std::iter::repeat_n((LlmDirection::Read, chunk), n));
         reads.push((LlmDirection::Read, frame(0, 0x1, 1, b"")));
         assert_eq!(drive(&reads), (0, 0, 1));
+    }
+
+    #[test]
+    fn a_managed_agents_session_stream_is_counted_agent_session_not_recorded() {
+        let session_req = |stream, path: &[u8]| {
+            let block = [
+                lit(b":method", b"POST"),
+                lit(b":authority", b"api.anthropic.com"),
+                lit(b":path", path),
+            ]
+            .concat();
+            frame(1, 0x4 | 0x1, stream, &block)
+        };
+        let head = |stream| frame(1, 0x4, stream, &lit(b":status", b"200"));
+        // Stream 1's body carries a cumulative session total; it must not be recorded as a message.
+        let session_body = frame(
+            0,
+            0x1,
+            1,
+            b"{\"usage\":{\"input_tokens\":5000,\"output_tokens\":3200,\"list_cost\":{\"amount\":\"187\"}}}",
+        );
+        // Stream 3's events send is acked with no usage; it is still counted, completion being the signal.
+        let ack_body = frame(0, 0x1, 3, b"{\"data\":[{\"id\":\"evt_1\"}]}");
+
+        let mut conn = H2Conn::new();
+        let (mut recorded, mut agent) = (0, 0);
+        {
+            let mut on = |event| match event {
+                H2Event::Recorded { .. } => recorded += 1,
+                H2Event::Unparsed {
+                    reason: UnparsedReason::AgentSession,
+                } => agent += 1,
+                _ => {}
+            };
+            conn.feed(LlmDirection::Write, PREFACE, H2Gap::None, &mut on);
+            conn.feed(
+                LlmDirection::Write,
+                &session_req(1, b"/v1/sessions"),
+                H2Gap::None,
+                &mut on,
+            );
+            conn.feed(
+                LlmDirection::Write,
+                &session_req(3, b"/v1/sessions/sess_1/events"),
+                H2Gap::None,
+                &mut on,
+            );
+            conn.feed(LlmDirection::Read, &head(1), H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Read, &session_body, H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Read, &head(3), H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Read, &ack_body, H2Gap::None, &mut on);
+        }
+        assert_eq!((recorded, agent), (0, 2));
     }
 
     /// Opens stream 1 and feeds it `response` reads, returning the live `H2Conn` for an idle-sweep check.

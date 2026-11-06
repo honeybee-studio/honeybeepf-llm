@@ -14,6 +14,7 @@ fn openai_config() -> ProviderConfig {
         response: ResponseConfig::default(),
         request_extractor: RequestExtractorType::Messages,
         plaintext: None,
+        record_only: false,
     }
 }
 
@@ -38,6 +39,7 @@ fn gemini_config() -> ProviderConfig {
         },
         request_extractor: RequestExtractorType::Contents,
         plaintext: None,
+        record_only: false,
     }
 }
 
@@ -184,6 +186,7 @@ fn provider_without_billed_categories() -> ConfigurableProvider {
         },
         request_extractor: RequestExtractorType::Messages,
         plaintext: None,
+        record_only: false,
     })
 }
 
