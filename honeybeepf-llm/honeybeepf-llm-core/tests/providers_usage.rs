@@ -1039,6 +1039,32 @@ fn test_gemini_interactions_non_streaming_parses_usage() {
     assert_eq!(usage.model, Some("gemini-3.6-flash".to_string()));
 }
 
+// total_tool_use_tokens (tool results billed as input, outside total_input_tokens) is added to the
+// prompt as generateContent's toolUsePromptTokenCount is; a Vertex host/path reaches the same entry.
+#[test]
+fn test_gemini_interactions_tool_use_tokens_add_to_input() {
+    let provider = default_provider(
+        "aiplatform.googleapis.com",
+        "/v1/projects/p/locations/global/interactions",
+    );
+    let response = json!({
+        "model": "gemini-3.6-flash",
+        "status": "completed",
+        "usage": {
+            "total_input_tokens": 11,
+            "total_output_tokens": 90,
+            "total_thought_tokens": 245,
+            "total_cached_tokens": 0,
+            "total_tool_use_tokens": 100,
+            "total_tokens": 446
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    // Input grows by the tool-use tokens (11 + 100); output is total_output + thoughts (90 + 245).
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (111, 335));
+}
+
 // total_cached_tokens is part of total_input_tokens, so the prompt is not grown by the cache read.
 #[test]
 fn test_gemini_interactions_cached_is_part_of_input() {
