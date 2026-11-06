@@ -205,6 +205,19 @@ impl Default for IdentityConfig {
     }
 }
 
+/// Marks a provider's hosts as in-cluster plaintext (non-TLS) endpoints to capture at the socket
+/// level, and names the port they serve plain HTTP on. Absent = TLS-only (the default).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PlaintextConfig {
+    /// Service port the application connects to (e.g., 8000 for vLLM).
+    pub port: u16,
+
+    /// Kubernetes namespace of the host's Service, when the host is not an FQDN that carries it.
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
 /// Configuration for a single LLM provider
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderConfig {
@@ -226,6 +239,10 @@ pub struct ProviderConfig {
     /// Request text extraction type
     #[serde(default)]
     pub request_extractor: RequestExtractorType,
+
+    /// Present only for in-cluster plaintext capture; TLS-only providers leave it unset.
+    #[serde(default)]
+    pub plaintext: Option<PlaintextConfig>,
 }
 
 /// Registry of all configured providers
