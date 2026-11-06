@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use aya::util::KernelVersion;
-use honeybeepf_llm_common::plain_endpoint_key;
+use honeybeepf_llm_common::{LlmDirection, plain_endpoint_key};
 use honeybeepf_llm_core::providers::ProviderRegistry;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
@@ -313,7 +313,7 @@ pub fn configured_specs() -> Vec<EndpointSpec> {
 /// reader, fill the endpoint map, and run the reconcile driver; a failure after the sockops attach
 /// undoes it. Returns Err (logged as disabled) when the node cannot support it.
 pub async fn start(bpf: &mut aya::Ebpf, specs: Vec<EndpointSpec>) -> Result<()> {
-    use aya::programs::{CgroupAttachMode, SkMsg, SockOps};
+    use aya::programs::{CgroupAttachMode, SkMsg, SkSkb, SockOps};
 
     if !KernelVersion::current().is_ok_and(|v| v >= KernelVersion::new(5, 10, 0)) {
         anyhow::bail!("kernel older than 5.10");
@@ -336,6 +336,13 @@ pub async fn start(bpf: &mut aya::Ebpf, specs: Vec<EndpointSpec>) -> Result<()> 
             .try_into()?;
         p.load().map_err(|e| load_error("plaintext_skmsg", e))?;
     }
+    {
+        let p: &mut SkSkb = bpf
+            .program_mut("plaintext_skskb")
+            .context("plaintext_skskb program missing")?
+            .try_into()?;
+        p.load().map_err(|e| load_error("plaintext_skskb", e))?;
+    }
 
     let sockops: &mut SockOps = bpf
         .program_mut("plaintext_sockops")
@@ -343,7 +350,7 @@ pub async fn start(bpf: &mut aya::Ebpf, specs: Vec<EndpointSpec>) -> Result<()> 
         .try_into()?;
     let sockops_link = sockops.attach(cgroup_fd, CgroupAttachMode::Single)?;
 
-    if let Err(e) = attach_skmsg_and_read(bpf) {
+    if let Err(e) = attach_programs_and_read(bpf) {
         detach_sockops(bpf, sockops_link);
         return Err(e);
     }
@@ -360,19 +367,29 @@ pub async fn start(bpf: &mut aya::Ebpf, specs: Vec<EndpointSpec>) -> Result<()> 
     Ok(())
 }
 
-/// Attach the sk_msg program to the sockhash of watched sockets and start draining PLAIN_EVENTS.
-fn attach_skmsg_and_read(bpf: &mut aya::Ebpf) -> Result<()> {
-    use aya::programs::SkMsg;
+/// Attach the sk_msg (send) and sk_skb (receive) programs to the sockhash of watched sockets and
+/// start draining PLAIN_EVENTS.
+fn attach_programs_and_read(bpf: &mut aya::Ebpf) -> Result<()> {
+    use aya::programs::{SkMsg, SkSkb};
     let socks = aya::maps::SockHash::<_, u64>::try_from(
         bpf.map("PLAIN_SOCKS").context("PLAIN_SOCKS map missing")?,
     )?
     .fd()
     .try_clone()?;
-    let skmsg: &mut SkMsg = bpf
-        .program_mut("plaintext_skmsg")
-        .context("plaintext_skmsg program missing")?
-        .try_into()?;
-    skmsg.attach(&socks)?;
+    {
+        let skmsg: &mut SkMsg = bpf
+            .program_mut("plaintext_skmsg")
+            .context("plaintext_skmsg program missing")?
+            .try_into()?;
+        skmsg.attach(&socks)?;
+    }
+    {
+        let skskb: &mut SkSkb = bpf
+            .program_mut("plaintext_skskb")
+            .context("plaintext_skskb program missing")?
+            .try_into()?;
+        skskb.attach(&socks)?;
+    }
     start_capture_reader(bpf)
 }
 
@@ -406,24 +423,37 @@ fn load_error(name: &str, e: aya::programs::ProgramError) -> anyhow::Error {
     anyhow::anyhow!("{name}: {e}")
 }
 
-/// Drain captured sends from `PLAIN_EVENTS`, counting them; each record carries the sender's
-/// pid/cgroup for the parser join a later PR adds. A periodic task logs the running total.
+/// Drain captured records from `PLAIN_EVENTS`, counting sends and receives by direction; each
+/// record carries the pid/cgroup for the parser join a later PR adds. A periodic task logs the total.
 fn start_capture_reader(bpf: &mut aya::Ebpf) -> Result<()> {
-    let sends = Arc::new(AtomicU64::new(0));
-    let bytes = Arc::new(AtomicU64::new(0));
-    let (s, b) = (sends.clone(), bytes.clone());
-    crate::probes::spawn_ringbuf_handler_var(bpf, "PLAIN_EVENTS", move |_header, payload| {
-        s.fetch_add(1, Ordering::Relaxed);
-        b.fetch_add(payload.len() as u64, Ordering::Relaxed);
+    let counts = PlainCounts::default();
+    let c = counts.clone();
+    crate::probes::spawn_ringbuf_handler_var(bpf, "PLAIN_EVENTS", move |header, payload| {
+        let (frames, bytes) = if header.rw == LlmDirection::Read as u8 {
+            (&c.recvs, &c.recv_bytes)
+        } else {
+            (&c.sends, &c.send_bytes)
+        };
+        frames.fetch_add(1, Ordering::Relaxed);
+        bytes.fetch_add(payload.len() as u64, Ordering::Relaxed);
     })?;
-    tokio::spawn(report_captures(sends, bytes));
+    tokio::spawn(report_captures(counts));
     Ok(())
 }
 
-/// Log the plaintext send/byte total every `CAPTURE_REPORT_SECONDS` while it changes, until shutdown.
-async fn report_captures(sends: Arc<AtomicU64>, bytes: Arc<AtomicU64>) {
+/// Running send/receive frame and byte totals, shared between the reader and the report task.
+#[derive(Clone, Default)]
+struct PlainCounts {
+    sends: Arc<AtomicU64>,
+    send_bytes: Arc<AtomicU64>,
+    recvs: Arc<AtomicU64>,
+    recv_bytes: Arc<AtomicU64>,
+}
+
+/// Log the plaintext send/receive totals every `CAPTURE_REPORT_SECONDS` while they change, until shutdown.
+async fn report_captures(counts: PlainCounts) {
     let shutdown = shutdown_flag();
-    let mut last = 0u64;
+    let mut last = (0u64, 0u64);
     loop {
         for _ in 0..CAPTURE_REPORT_SECONDS {
             if shutdown.load(Ordering::Relaxed) {
@@ -431,13 +461,19 @@ async fn report_captures(sends: Arc<AtomicU64>, bytes: Arc<AtomicU64>) {
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        let n = sends.load(Ordering::Relaxed);
-        if n != last {
+        let now = (
+            counts.sends.load(Ordering::Relaxed),
+            counts.recvs.load(Ordering::Relaxed),
+        );
+        if now != last {
             info!(
-                "Plaintext sends captured: {n} ({} bytes)",
-                bytes.load(Ordering::Relaxed)
+                "Plaintext sends captured: {} ({} bytes); recvs captured: {} ({} bytes)",
+                now.0,
+                counts.send_bytes.load(Ordering::Relaxed),
+                now.1,
+                counts.recv_bytes.load(Ordering::Relaxed),
             );
-            last = n;
+            last = now;
         }
     }
 }
