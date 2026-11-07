@@ -5,28 +5,25 @@
 use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use aya::util::KernelVersion;
-use honeybeepf_llm_common::{LlmDirection, plain_endpoint_key};
+use honeybeepf_llm_common::plain_endpoint_key;
 use honeybeepf_llm_core::providers::ProviderRegistry;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{Api, Client, api::ListParams};
-use log::{debug, info, warn};
+use log::{debug, warn};
 
-use crate::probes::shutdown_flag;
+use crate::probes::{IdentityResolver, shutdown_flag};
 
 /// Full ring size once plaintext is enabled; the eBPF map declares a tiny default so a TLS-only
 /// node spends almost nothing on it.
 pub const PLAIN_EVENTS_FULL_BYTES: u32 = 4 * 1024 * 1024;
 /// Seconds between reconcile passes (re-list Services, re-resolve external DNS).
 const RECONCILE_SECONDS: u64 = 30;
-/// Seconds between plaintext capture summaries (logged only when the count changed).
-const CAPTURE_REPORT_SECONDS: u64 = 5;
 const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 
 /// Upper bound for the fixed-size BPF map; beyond it extra endpoints are dropped with a warning.
@@ -309,10 +306,14 @@ pub fn configured_specs() -> Vec<EndpointSpec> {
     specs_from_registry(&registry)
 }
 
-/// Gate on cgroup v2 + kernel 5.10, attach the sockops and sk_msg programs, start the capture
-/// reader, fill the endpoint map, and run the reconcile driver; a failure after the sockops attach
-/// undoes it. Returns Err (logged as disabled) when the node cannot support it.
-pub async fn start(bpf: &mut aya::Ebpf, specs: Vec<EndpointSpec>) -> Result<()> {
+/// Gate on cgroup v2 + kernel 5.10, attach the socket programs, start the parser, fill the endpoint
+/// map, and run the reconcile driver; a failure after the sockops attach undoes it. Returns Err
+/// (logged as disabled) when the node cannot support it.
+pub async fn start(
+    bpf: &mut aya::Ebpf,
+    specs: Vec<EndpointSpec>,
+    resolver: IdentityResolver,
+) -> Result<()> {
     use aya::programs::{CgroupAttachMode, SkMsg, SkSkb, SockOps};
 
     if !KernelVersion::current().is_ok_and(|v| v >= KernelVersion::new(5, 10, 0)) {
@@ -350,7 +351,7 @@ pub async fn start(bpf: &mut aya::Ebpf, specs: Vec<EndpointSpec>) -> Result<()> 
         .try_into()?;
     let sockops_link = sockops.attach(cgroup_fd, CgroupAttachMode::Single)?;
 
-    if let Err(e) = attach_programs_and_read(bpf) {
+    if let Err(e) = attach_programs_and_read(bpf, resolver) {
         detach_sockops(bpf, sockops_link);
         return Err(e);
     }
@@ -368,8 +369,8 @@ pub async fn start(bpf: &mut aya::Ebpf, specs: Vec<EndpointSpec>) -> Result<()> 
 }
 
 /// Attach the sk_msg (send) and sk_skb (receive) programs to the sockhash of watched sockets and
-/// start draining PLAIN_EVENTS.
-fn attach_programs_and_read(bpf: &mut aya::Ebpf) -> Result<()> {
+/// start parsing PLAIN_EVENTS into LLM calls.
+fn attach_programs_and_read(bpf: &mut aya::Ebpf, resolver: IdentityResolver) -> Result<()> {
     use aya::programs::{SkMsg, SkSkb};
     let socks = aya::maps::SockHash::<_, u64>::try_from(
         bpf.map("PLAIN_SOCKS").context("PLAIN_SOCKS map missing")?,
@@ -390,7 +391,7 @@ fn attach_programs_and_read(bpf: &mut aya::Ebpf) -> Result<()> {
             .try_into()?;
         skskb.attach(&socks)?;
     }
-    start_capture_reader(bpf)
+    crate::probes::builtin::llm::spawn_plaintext_parser(bpf, resolver)
 }
 
 /// Detach the sockops program so a failed later step leaves nothing attached to the cgroup.
@@ -421,61 +422,6 @@ fn load_error(name: &str, e: aya::programs::ProgramError) -> anyhow::Error {
         return anyhow::anyhow!("{name}: verifier rejected the program");
     }
     anyhow::anyhow!("{name}: {e}")
-}
-
-/// Drain captured records from `PLAIN_EVENTS`, counting sends and receives by direction; each
-/// record carries the pid/cgroup for the parser join a later PR adds. A periodic task logs the total.
-fn start_capture_reader(bpf: &mut aya::Ebpf) -> Result<()> {
-    let counts = PlainCounts::default();
-    let c = counts.clone();
-    crate::probes::spawn_ringbuf_handler_var(bpf, "PLAIN_EVENTS", move |header, payload| {
-        let (frames, bytes) = if header.rw == LlmDirection::Read as u8 {
-            (&c.recvs, &c.recv_bytes)
-        } else {
-            (&c.sends, &c.send_bytes)
-        };
-        frames.fetch_add(1, Ordering::Relaxed);
-        bytes.fetch_add(payload.len() as u64, Ordering::Relaxed);
-    })?;
-    tokio::spawn(report_captures(counts));
-    Ok(())
-}
-
-/// Running send/receive frame and byte totals, shared between the reader and the report task.
-#[derive(Clone, Default)]
-struct PlainCounts {
-    sends: Arc<AtomicU64>,
-    send_bytes: Arc<AtomicU64>,
-    recvs: Arc<AtomicU64>,
-    recv_bytes: Arc<AtomicU64>,
-}
-
-/// Log the plaintext send/receive totals every `CAPTURE_REPORT_SECONDS` while they change, until shutdown.
-async fn report_captures(counts: PlainCounts) {
-    let shutdown = shutdown_flag();
-    let mut last = (0u64, 0u64);
-    loop {
-        for _ in 0..CAPTURE_REPORT_SECONDS {
-            if shutdown.load(Ordering::Relaxed) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-        let now = (
-            counts.sends.load(Ordering::Relaxed),
-            counts.recvs.load(Ordering::Relaxed),
-        );
-        if now != last {
-            info!(
-                "Plaintext sends captured: {} ({} bytes); recvs captured: {} ({} bytes)",
-                now.0,
-                counts.send_bytes.load(Ordering::Relaxed),
-                now.1,
-                counts.recv_bytes.load(Ordering::Relaxed),
-            );
-            last = now;
-        }
-    }
 }
 
 #[cfg(test)]

@@ -157,7 +157,8 @@ impl HoneyBeeEngine {
         {
             let specs = plaintext::configured_specs();
             if !specs.is_empty() {
-                match plaintext::start(&mut self.bpf, specs).await {
+                let resolver = self.resolver.clone();
+                match plaintext::start(&mut self.bpf, specs, resolver).await {
                     Ok(()) => info!("Plaintext capture enabled"),
                     Err(e) => warn!("Plaintext capture disabled: {}", e),
                 }
