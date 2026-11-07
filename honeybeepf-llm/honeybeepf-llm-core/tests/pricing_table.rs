@@ -66,6 +66,12 @@ fn test_bad_tables_are_rejected() {
         (model(r#"{"input": 1e400}"#), "number out of range"),
         (model(r#"{"above_tokens": 5, "above": {"input": -2}}"#), "between 0 and 1e6"),
         (model(r#"{"until": "2026-11-30", "then": {"input": -2}}"#), "between 0 and 1e6"),
+        // Modality prices are range-checked like the rest, in nested rates too, and their keys are closed.
+        (model(r#"{"input": 1, "modalities": {"audio": {"input": -2}}}"#), "between 0 and 1e6"),
+        (model(r#"{"input": 1, "modalities": {"video": {"output": 1e7}}}"#), "between 0 and 1e6"),
+        (model(r#"{"input": 1, "above_tokens": 5, "above": {"modalities": {"image": {"input": -2}}}}"#), "between 0 and 1e6"),
+        (model(r#"{"modalities": {"audio": {"in": 2}}}"#), "unknown field `in`"),
+        (model(r#"{"modalities": {"speech": {}}}"#), "unknown field `speech`"),
         (model(r#"{"input": 1, "above": {"input": 2}}"#), "p: m: above needs above_tokens"),
         (flex(r#"{"input": 1, "above": {"input": 2}}"#), "p: m: above needs above_tokens"),
         (model(r#"{"above_tokens": 5, "above": {"above_tokens": 9}}"#), "cannot have its own"),

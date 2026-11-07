@@ -2,7 +2,7 @@
 #![allow(dead_code)] // Each test file uses a different subset of these helpers.
 
 use honeybeepf_llm_core::pricing::{Cost, Unpriced};
-use honeybeepf_llm_core::types::UsageInfo;
+use honeybeepf_llm_core::types::{ModalityTokens, UsageInfo};
 
 /// Expected total in USD, or why the call stays unpriced.
 pub type Want = Result<f64, Unpriced>;
@@ -29,6 +29,8 @@ pub trait CallExt {
     fn tier(self, name: &str) -> Self;
     fn speed(self, mode: &str) -> Self;
     fn geo(self, geo: &str) -> Self;
+    fn in_modalities(self, m: ModalityTokens) -> Self;
+    fn out_modalities(self, m: ModalityTokens) -> Self;
 }
 
 #[rustfmt::skip]
@@ -40,6 +42,8 @@ impl CallExt for UsageInfo {
     fn tier(self, name: &str) -> Self { UsageInfo { service_tier: Some(name.into()), ..self } }
     fn speed(self, mode: &str) -> Self { UsageInfo { speed: Some(mode.into()), ..self } }
     fn geo(self, geo: &str) -> Self { UsageInfo { inference_geo: Some(geo.into()), ..self } }
+    fn in_modalities(self, m: ModalityTokens) -> Self { UsageInfo { input_modalities: m, ..self } }
+    fn out_modalities(self, m: ModalityTokens) -> Self { UsageInfo { output_modalities: m, ..self } }
 }
 
 /// Total USD rounded to 1e-12, so hand-computed amounts compare exactly.

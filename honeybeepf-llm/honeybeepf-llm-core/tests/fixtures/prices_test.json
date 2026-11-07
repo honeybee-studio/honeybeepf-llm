@@ -14,8 +14,11 @@
      "gpt-5.5-pro": {"input": 30, "output": 180},
      "gpt-5": {"input": 1.25, "output": 10, "cache_read": 0.125},
      "gpt-4o": {"input": 2.5, "output": 10},
-     "gpt-4o-2024-05-13": {"input": 5, "output": 15}},
+     "gpt-4o-2024-05-13": {"input": 5, "output": 15},
+     "gpt-media-test": {"input": 1, "output": 5, "cache_read": 0.1,
+       "modalities": {"audio": {"input": 40, "output": 80}, "image": {"output": 30}, "video": {"output": 12}}}},
    "tiers": {
      "flex": {"gpt-6.1-sol": {"input": 1, "output": 5}},
-     "priority": {"gpt-6.1-sol": {"input": 4, "output": 20}}}}
+     "priority": {"gpt-6.1-sol": {"input": 4, "output": 20}}},
+   "speed": {"gpt-media-test": {"fast": 2}}}
 ]}

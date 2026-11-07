@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::Error as _;
 
-use crate::types::UsageInfo;
+use crate::types::{ModalityTokens, UsageInfo};
 use model_name::without_date;
 use table::{Rates, RawTable};
 
@@ -186,12 +186,31 @@ impl PriceTable {
             (_, Some(rate)) => Ok(tokens as f64 * rate * factor / 1_000_000.0),
             (_, None) => Err(Unpriced::MissingPrice),
         };
+        let m = &rates.modalities;
         Ok(Cost {
-            input: price(uncached, rates.input)?,
+            // Input and output are split by modality (text is the remainder); cache reads and writes
+            // keep the base cache rates, so a modality above the uncached input bills there as text.
+            input: direction_cost(
+                uncached,
+                usage.input_modalities,
+                factor,
+                rates.input,
+                m.audio.as_ref().and_then(|r| r.input),
+                m.image.as_ref().and_then(|r| r.input),
+                m.video.as_ref().and_then(|r| r.input),
+            )?,
             cache_read: price(read, rates.cache_read)?,
             cache_write: price(write - long, rates.cache_write)?
                 + price(long, rates.cache_write_long)?,
-            output: price(usage.completion_tokens, rates.output)?,
+            output: direction_cost(
+                usage.completion_tokens,
+                usage.output_modalities,
+                factor,
+                rates.output,
+                m.audio.as_ref().and_then(|r| r.output),
+                m.image.as_ref().and_then(|r| r.output),
+                m.video.as_ref().and_then(|r| r.output),
+            )?,
         })
     }
 
@@ -249,6 +268,35 @@ impl PriceTable {
             * multiplier(&model.geo, usage.inference_geo.as_deref(), "global")?;
         Ok((rates, factor))
     }
+}
+
+/// One direction's cost: each non-text modality takes from the total at its own rate (or the base)
+/// and the rest is text; modalities above the total are the cached part, billed in the cache bucket.
+fn direction_cost(
+    total: u64,
+    m: ModalityTokens,
+    factor: f64,
+    base: Option<f64>,
+    audio: Option<f64>,
+    image: Option<f64>,
+    video: Option<f64>,
+) -> Result<f64, Unpriced> {
+    let price = |tokens: u64, rate: Option<f64>| match (tokens, rate) {
+        (0, _) => Ok(0.0),
+        (_, Some(rate)) => Ok(tokens as f64 * rate * factor / 1_000_000.0),
+        (_, None) => Err(Unpriced::MissingPrice),
+    };
+    let mut left = total;
+    let audio_n = m.audio.min(left);
+    left -= audio_n;
+    let image_n = m.image.min(left);
+    left -= image_n;
+    let video_n = m.video.min(left);
+    left -= video_n;
+    Ok(price(left, base)?
+        + price(audio_n, audio.or(base))?
+        + price(image_n, image.or(base))?
+        + price(video_n, video.or(base))?)
 }
 
 /// Prompt tokens billed at the input price: the prompt minus the cache reads and writes within it.
