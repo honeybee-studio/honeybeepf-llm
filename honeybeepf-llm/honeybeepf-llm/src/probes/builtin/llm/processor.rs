@@ -942,6 +942,7 @@ impl PastLimit {
         http::JsonEnds::start(buffer)
             .map(Self::Json)
             .or_else(|| http::SseStream::start(buffer).map(Self::Sse))
+            .or_else(|| http::SseStream::start_encoded(buffer).map(Self::Sse))
     }
 
     fn feed(&mut self, data: &[u8]) -> bool {
