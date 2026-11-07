@@ -953,7 +953,7 @@ impl PastLimit {
 
     fn take_usage(&mut self) -> Option<UsageInfo> {
         match self {
-            Self::Json(ends) => ends.usage.take(),
+            Self::Json(ends) => ends.usage.take().map(|u| *u),
             Self::Sse(stream) => stream.usage(),
         }
     }

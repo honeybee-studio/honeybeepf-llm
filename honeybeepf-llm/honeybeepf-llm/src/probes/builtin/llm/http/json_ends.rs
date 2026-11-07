@@ -19,8 +19,8 @@ pub struct JsonEnds {
     walk: BodyWalk,
     head: Vec<u8>,
     tail: Vec<u8>,
-    /// Read once when the body ends.
-    pub usage: Option<UsageInfo>,
+    /// Read once when the body ends; boxed so `PastLimit::Json` stays small (clippy large_enum_variant).
+    pub usage: Option<Box<UsageInfo>>,
 }
 
 impl JsonEnds {
@@ -61,7 +61,7 @@ impl JsonEnds {
             tail.extend_from_slice(&data[cut..]);
         });
         if self.walk.ended() && self.usage.is_none() {
-            self.usage = self.read_usage();
+            self.usage = self.read_usage().map(Box::new);
             return self.usage.is_some();
         }
         followed
@@ -256,8 +256,14 @@ mod tests {
         let (last, most) = reads.split_last().expect("reads");
         assert!(most.iter().all(|read| ends.feed(read)));
         assert_eq!(ends.feed(last), ends.usage.is_some());
-        assert_eq!(ends.usage, parse_response_json(&body, &mut None));
-        (ends.usage, ends.head.capacity() + ends.tail.capacity())
+        assert_eq!(
+            ends.usage.as_deref(),
+            parse_response_json(&body, &mut None).as_ref()
+        );
+        (
+            ends.usage.map(|u| *u),
+            ends.head.capacity() + ends.tail.capacity(),
+        )
     }
 
     #[test]

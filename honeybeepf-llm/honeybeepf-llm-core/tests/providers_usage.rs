@@ -3,7 +3,7 @@ use honeybeepf_llm_core::providers::{
     ConfigurableProvider, IdentityConfig, ProviderConfig, ProviderRegistry, RequestExtractorType,
     ResponseConfig, TokenConfig,
 };
-use honeybeepf_llm_core::types::UsageInfo;
+use honeybeepf_llm_core::types::{ModalityTokens, UsageInfo};
 use serde_json::json;
 
 fn openai_config() -> ProviderConfig {
@@ -162,6 +162,97 @@ fn test_openai_responses_compact_parse_usage() {
 fn default_provider(host: &str, path: &str) -> ConfigurableProvider {
     let registry = ProviderRegistry::with_defaults();
     ConfigurableProvider::new(registry.find_provider(host, path).unwrap().clone())
+}
+
+#[test]
+fn test_openai_chat_splits_audio_tokens_by_modality() {
+    let provider = default_provider("api.openai.com", "/v1/chat/completions");
+    let response = json!({"model": "gpt-4o-audio", "usage": {
+        "prompt_tokens": 1200, "completion_tokens": 500,
+        "prompt_tokens_details": {"audio_tokens": 300, "cached_tokens": 0},
+        "completion_tokens_details": {"audio_tokens": 200, "reasoning_tokens": 0}}});
+    let u = provider.parse_usage(&response).expect("usage");
+    assert_eq!(u.input_modalities, audio(300));
+    assert_eq!(u.output_modalities, audio(200));
+    // The totals stay whole; text is the remainder (900 in, 300 out).
+    assert_eq!((u.prompt_tokens, u.completion_tokens), (1200, 500));
+}
+
+#[test]
+fn test_openai_image_splits_image_tokens_by_modality() {
+    let provider = default_provider("api.openai.com", "/v1/images/generations");
+    let response = json!({"model": "gpt-image-1", "usage": {
+        "input_tokens": 120, "output_tokens": 1600, "total_tokens": 1720,
+        "input_tokens_details": {"text_tokens": 20, "image_tokens": 100},
+        "output_tokens_details": {"text_tokens": 0, "image_tokens": 1600}}});
+    let u = provider.parse_usage(&response).expect("usage");
+    assert_eq!(u.input_modalities.image, 100);
+    assert_eq!(u.output_modalities.image, 1600);
+    assert_eq!(u.input_modalities.audio, 0);
+}
+
+#[test]
+fn test_openai_transcription_splits_input_audio() {
+    let provider = default_provider("api.openai.com", "/v1/audio/transcriptions");
+    let response = json!({"model": "gpt-4o-transcribe", "usage": {
+        "type": "tokens", "input_tokens": 58, "output_tokens": 12, "total_tokens": 70,
+        "input_token_details": {"audio_tokens": 50, "text_tokens": 8}}});
+    let u = provider.parse_usage(&response).expect("usage");
+    assert_eq!(u.input_modalities, audio(50));
+    assert_eq!(u.output_modalities, ModalityTokens::default());
+}
+
+#[test]
+fn test_gemini_splits_modalities_from_detail_arrays() {
+    let provider = default_provider(
+        "generativelanguage.googleapis.com",
+        "/v1/models/g:generateContent",
+    );
+    let response = json!({"modelVersion": "gemini-omni", "usageMetadata": {
+        "promptTokenCount": 1000, "candidatesTokenCount": 800, "totalTokenCount": 1800,
+        "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 600},
+            {"modality": "AUDIO", "tokenCount": 300}, {"modality": "DOCUMENT", "tokenCount": 100}],
+        "candidatesTokensDetails": [{"modality": "TEXT", "tokenCount": 500},
+            {"modality": "IMAGE", "tokenCount": 200}, {"modality": "VIDEO", "tokenCount": 100}]}});
+    let u = provider.parse_usage(&response).expect("usage");
+    // AUDIO/IMAGE/VIDEO are read; TEXT and DOCUMENT fall into the text remainder.
+    assert_eq!(u.input_modalities, audio(300));
+    assert_eq!(
+        u.output_modalities,
+        ModalityTokens {
+            image: 200,
+            video: 100,
+            ..Default::default()
+        }
+    );
+    assert_eq!((u.prompt_tokens, u.completion_tokens), (1000, 800));
+}
+
+#[test]
+fn test_text_only_call_has_no_modality_split() {
+    let provider = default_provider("api.openai.com", "/v1/chat/completions");
+    let response =
+        json!({"model": "gpt-4o", "usage": {"prompt_tokens": 40, "completion_tokens": 10}});
+    let u = provider.parse_usage(&response).expect("usage");
+    assert_eq!(u.input_modalities, ModalityTokens::default());
+    assert_eq!(u.output_modalities, ModalityTokens::default());
+}
+
+#[test]
+fn test_modalities_over_the_total_are_dropped() {
+    let provider = default_provider("api.openai.com", "/v1/chat/completions");
+    // Bad data: audio exceeds prompt_tokens, so the split is dropped and text stays the whole total.
+    let response = json!({"model": "m", "usage": {"prompt_tokens": 100, "completion_tokens": 10,
+        "prompt_tokens_details": {"audio_tokens": 500}}});
+    let u = provider.parse_usage(&response).expect("usage");
+    assert_eq!(u.input_modalities, ModalityTokens::default());
+}
+
+fn audio(n: u64) -> ModalityTokens {
+    ModalityTokens {
+        audio: n,
+        ..Default::default()
+    }
 }
 
 // A custom provider that opts into fallback iterations but declares no billed_categories.
@@ -769,6 +860,8 @@ fn test_custom_provider_reads_every_flat_field() -> Result<(), serde_json::Error
     let expected = UsageInfo {
         prompt_tokens: 19,
         completion_tokens: 5,
+        input_modalities: ModalityTokens::default(),
+        output_modalities: ModalityTokens::default(),
         thoughts_tokens: Some(5),
         cache_read_tokens: Some(3),
         cache_write_tokens: Some(4),

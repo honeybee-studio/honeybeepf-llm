@@ -12,7 +12,7 @@
 use anyhow::{Context, Result};
 use arc_swap::ArcSwapOption;
 use honeybeepf_llm_core::pricing::PriceTable;
-use honeybeepf_llm_core::types::UsageInfo;
+use honeybeepf_llm_core::types::{ModalityTokens, UsageInfo};
 use log::info;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 use opentelemetry::{KeyValue, global};
@@ -349,15 +349,48 @@ impl HoneyBeeMetrics {
             self.record_cost(usage, &mut attrs);
         }
 
-        let mut prompt_attrs = attrs.clone();
-        prompt_attrs.push(KeyValue::new("token_type", "prompt"));
-        self.llm_tokens_total
-            .add(usage.prompt_tokens, &prompt_attrs);
+        self.record_token_modalities(
+            usage.prompt_tokens,
+            usage.input_modalities,
+            "prompt",
+            &mut attrs,
+        );
+        self.record_token_modalities(
+            usage.completion_tokens,
+            usage.output_modalities,
+            "completion",
+            &mut attrs,
+        );
+    }
 
-        let mut comp_attrs = attrs; // move ownership
-        comp_attrs.push(KeyValue::new("token_type", "completion"));
-        self.llm_tokens_total
-            .add(usage.completion_tokens, &comp_attrs);
+    /// Split one direction's tokens across `llm_tokens_total` by modality; text is the remainder, so
+    /// the modality series still sum to the total. Only the non-text modalities present are emitted.
+    fn record_token_modalities(
+        &self,
+        total: u64,
+        modalities: ModalityTokens,
+        token_type: &'static str,
+        attrs: &mut Vec<KeyValue>,
+    ) {
+        attrs.push(KeyValue::new("token_type", token_type));
+        self.add_modality(attrs, "text", total.saturating_sub(modalities.non_text()));
+        if modalities.audio > 0 {
+            self.add_modality(attrs, "audio", modalities.audio);
+        }
+        if modalities.image > 0 {
+            self.add_modality(attrs, "image", modalities.image);
+        }
+        if modalities.video > 0 {
+            self.add_modality(attrs, "video", modalities.video);
+        }
+        attrs.pop();
+    }
+
+    /// Add one `modality` label, record, and restore `attrs`, so the label vector is reused, not cloned.
+    fn add_modality(&self, attrs: &mut Vec<KeyValue>, modality: &'static str, n: u64) {
+        attrs.push(KeyValue::new("modality", modality));
+        self.llm_tokens_total.add(n, attrs);
+        attrs.pop();
     }
 
     fn record_unparsed(&self, reason: &'static str, mut attrs: Vec<KeyValue>) {
@@ -1052,6 +1085,79 @@ mod tests {
 
         assert_eq!(total("llm_reasoning_tokens_total")?, 4);
         assert_eq!(total("llm_tokens_total")?, 9);
+        Ok(())
+    }
+
+    #[test]
+    fn llm_tokens_split_by_modality_with_text_as_the_remainder() -> Result<()> {
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(None));
+        let usage = UsageInfo {
+            prompt_tokens: 1000,
+            completion_tokens: 500,
+            input_modalities: ModalityTokens {
+                audio: 200,
+                image: 100,
+                video: 100,
+            },
+            // All output is image, so the output text remainder is exactly 0.
+            output_modalities: ModalityTokens {
+                image: 500,
+                ..Default::default()
+            },
+            ..UsageInfo::default()
+        };
+        metrics.record_llm(&usage, 1.0, false, vec![]);
+
+        let mut rm = ResourceMetrics {
+            resource: Resource::empty(),
+            scope_metrics: vec![],
+        };
+        reader.collect(&mut rm)?;
+        let attr = |a: &[KeyValue], k: &str| {
+            a.iter()
+                .find(|kv| kv.key.as_str() == k)
+                .map(|kv| kv.value.to_string())
+        };
+        let by = |token_type: &str, modality: &str| -> u64 {
+            rm.scope_metrics
+                .iter()
+                .flat_map(|s| &s.metrics)
+                .find(|m| m.name == "llm_tokens_total")
+                .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
+                .map(|sum| {
+                    sum.data_points
+                        .iter()
+                        .filter(|p| {
+                            attr(&p.attributes, "token_type").as_deref() == Some(token_type)
+                        })
+                        .filter(|p| attr(&p.attributes, "modality").as_deref() == Some(modality))
+                        .map(|p| p.value)
+                        .sum()
+                })
+                .unwrap_or(0)
+        };
+        // text is the remainder, and the modality series sum back to each total.
+        let prompt = (
+            by("prompt", "text"),
+            by("prompt", "audio"),
+            by("prompt", "image"),
+            by("prompt", "video"),
+        );
+        assert_eq!(prompt, (600, 200, 100, 100));
+        // An all-image output still emits text=0, and the series sum to the completion total.
+        assert_eq!(
+            (by("completion", "text"), by("completion", "image")),
+            (0, 500)
+        );
+        // A modality with no tokens in a direction gets no series.
+        assert_eq!(
+            (by("completion", "audio"), by("completion", "video")),
+            (0, 0)
+        );
         Ok(())
     }
 
