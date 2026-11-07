@@ -111,6 +111,23 @@ impl Attempt {
     }
 }
 
+/// How a call was captured: `tls` from the OpenSSL uprobes, `plain` from the socket-level plaintext
+/// path. A label on request, token and latency metrics.
+#[derive(Clone, Copy)]
+pub enum Transport {
+    Tls,
+    Plain,
+}
+
+impl Transport {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Transport::Tls => "tls",
+            Transport::Plain => "plain",
+        }
+    }
+}
+
 impl HoneyBeeMetrics {
     fn new(meter: &Meter, prices: Option<Prices>) -> Self {
         let (llm_cost_usd_total, llm_cache_savings_ceiling_usd_total, llm_unpriced_tokens_total) =
@@ -154,12 +171,12 @@ impl HoneyBeeMetrics {
             // === LLM ===
             llm_requests_total: meter
                 .u64_counter("llm_requests_total")
-                .with_description("Total number of LLM requests")
+                .with_description("Total number of LLM requests, by transport (tls|plain)")
                 .with_unit("requests")
                 .build(),
             llm_tokens_total: meter
                 .u64_counter("llm_tokens_total")
-                .with_description("Total number of LLM tokens processed")
+                .with_description("Total number of LLM tokens processed, by transport (tls|plain)")
                 .with_unit("tokens")
                 .build(),
             // Separate counters, not token_type values: these are subsets of the prompt count,
@@ -188,7 +205,7 @@ impl HoneyBeeMetrics {
                 .build(),
             llm_latency_seconds: meter
                 .f64_histogram("llm_latency_seconds")
-                .with_description("Latency of LLM requests")
+                .with_description("Latency of LLM requests, by transport (tls|plain)")
                 .with_unit("s")
                 .with_boundaries(LLM_LATENCY_BOUNDARIES_SECS.to_vec())
                 .build(),
@@ -296,6 +313,7 @@ impl HoneyBeeMetrics {
         model: &str,
         latency_secs: f64,
         is_error: bool,
+        transport: Transport,
         attrs_for: impl Fn(&str, &str, Attempt) -> Vec<KeyValue>,
     ) {
         let status = if is_error { "error" } else { "success" };
@@ -303,6 +321,7 @@ impl HoneyBeeMetrics {
             usage,
             latency_secs,
             is_error,
+            transport,
             attrs_for(model, status, Attempt::Served),
         );
         for attempt in &usage.iterations {
@@ -310,7 +329,11 @@ impl HoneyBeeMetrics {
                 continue;
             }
             let model = attempt.model.as_deref().unwrap_or("unknown");
-            self.record_tokens(attempt, attrs_for(model, "success", Attempt::Declined));
+            self.record_tokens(
+                attempt,
+                transport,
+                attrs_for(model, "success", Attempt::Declined),
+            );
         }
     }
 
@@ -319,22 +342,22 @@ impl HoneyBeeMetrics {
         usage: &UsageInfo,
         latency_secs: f64,
         is_error: bool,
+        transport: Transport,
         attrs: Vec<KeyValue>,
     ) {
-        // 1. total requests
-        self.llm_requests_total.add(1, &attrs);
-
-        // 2. latency
-        self.llm_latency_seconds.record(latency_secs, &attrs);
-
-        // 3. tokens
+        // Request and latency carry the transport label; cost and cache (in record_tokens) do not.
+        let mut call_attrs = attrs.clone();
+        call_attrs.push(KeyValue::new("transport", transport.as_str()));
+        self.llm_requests_total.add(1, &call_attrs);
+        self.llm_latency_seconds.record(latency_secs, &call_attrs);
         if !is_error {
-            self.record_tokens(usage, attrs);
+            self.record_tokens(usage, transport, attrs);
         }
     }
 
-    /// The tokens, cache, reasoning and cost of one billed attempt.
-    fn record_tokens(&self, usage: &UsageInfo, mut attrs: Vec<KeyValue>) {
+    /// The tokens, cache, reasoning and cost of one billed attempt; only the token counts carry the
+    /// transport label.
+    fn record_tokens(&self, usage: &UsageInfo, transport: Transport, mut attrs: Vec<KeyValue>) {
         if let Some(n) = usage.cache_read_tokens {
             self.llm_cache_read_tokens_total.add(n, &attrs);
         }
@@ -348,6 +371,7 @@ impl HoneyBeeMetrics {
         if !usage.cost_suppressed {
             self.record_cost(usage, &mut attrs);
         }
+        attrs.push(KeyValue::new("transport", transport.as_str()));
 
         let mut prompt_attrs = attrs.clone();
         prompt_attrs.push(KeyValue::new("token_type", "prompt"));
@@ -687,6 +711,7 @@ pub fn record_llm_request(
     model: &str,
     latency_secs: f64,
     is_error: bool,
+    transport: Transport,
     #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
 ) {
     if let Some(m) = metrics() {
@@ -695,6 +720,7 @@ pub fn record_llm_request(
             model,
             latency_secs,
             is_error,
+            transport,
             |model, status, attempt| {
                 llm_attrs(
                     model,
@@ -1031,8 +1057,8 @@ mod tests {
             thoughts_tokens: Some(4),
             ..UsageInfo::default()
         };
-        metrics.record_llm(&usage, 1.0, false, vec![]);
-        metrics.record_llm(&usage, 1.0, true, vec![]);
+        metrics.record_llm(&usage, 1.0, false, Transport::Tls, vec![]);
+        metrics.record_llm(&usage, 1.0, true, Transport::Tls, vec![]);
 
         let mut rm = ResourceMetrics {
             resource: Resource::empty(),
@@ -1079,6 +1105,7 @@ mod tests {
             "claude-opus-4-8",
             1.0,
             false,
+            Transport::Tls,
             |model, status, attempt| {
                 vec![
                     KeyValue::new("model", model.to_string()),
@@ -1155,6 +1182,7 @@ mod tests {
             "claude-opus-4-8",
             1.0,
             false,
+            Transport::Tls,
             |model, status, attempt| {
                 llm_attrs(
                     model,
@@ -1240,13 +1268,20 @@ mod tests {
             }],
             ..UsageInfo::default()
         };
-        metrics.record_llm_call(&usage, "served-m", 1.0, false, |model, status, attempt| {
-            vec![
-                KeyValue::new("model", model.to_string()),
-                KeyValue::new("status", status.to_string()),
-                KeyValue::new("attempt", attempt.as_str()),
-            ]
-        });
+        metrics.record_llm_call(
+            &usage,
+            "served-m",
+            1.0,
+            false,
+            Transport::Tls,
+            |model, status, attempt| {
+                vec![
+                    KeyValue::new("model", model.to_string()),
+                    KeyValue::new("status", status.to_string()),
+                    KeyValue::new("attempt", attempt.as_str()),
+                ]
+            },
+        );
 
         let mut rm = ResourceMetrics {
             resource: Resource::empty(),
@@ -1355,9 +1390,9 @@ mod tests {
             model: Some("my-vllm-llama".to_string()),
             ..UsageInfo::default()
         };
-        metrics.record_llm(&priced, 1.0, false, vec![]);
-        metrics.record_llm(&priced, 1.0, true, vec![]);
-        metrics.record_llm(&unknown, 1.0, false, vec![]);
+        metrics.record_llm(&priced, 1.0, false, Transport::Tls, vec![]);
+        metrics.record_llm(&priced, 1.0, true, Transport::Tls, vec![]);
+        metrics.record_llm(&unknown, 1.0, false, Transport::Tls, vec![]);
 
         let mut rm = ResourceMetrics {
             resource: Resource::empty(),
@@ -1428,7 +1463,7 @@ mod tests {
             model: Some("claude-opus-4-8".to_string()),
             ..UsageInfo::default()
         };
-        metrics.record_llm(&usage, 1.0, false, vec![]);
+        metrics.record_llm(&usage, 1.0, false, Transport::Tls, vec![]);
 
         let mut rm = ResourceMetrics {
             resource: Resource::empty(),
@@ -1466,7 +1501,7 @@ mod tests {
             model: Some("gpt-5.5-pro".to_string()),
             ..UsageInfo::default()
         };
-        metrics.record_llm(&priced, 1.0, false, vec![]);
+        metrics.record_llm(&priced, 1.0, false, Transport::Tls, vec![]);
         // Same model reporting a cache read has no cache-read price, so cost() cannot price it;
         // the ceiling must not be emitted for a call that never reaches the cost panels.
         let unpriced = UsageInfo {
@@ -1475,7 +1510,7 @@ mod tests {
             model: Some("gpt-5.5-pro".to_string()),
             ..UsageInfo::default()
         };
-        metrics.record_llm(&unpriced, 1.0, false, vec![]);
+        metrics.record_llm(&unpriced, 1.0, false, Transport::Tls, vec![]);
 
         let mut rm = ResourceMetrics {
             resource: Resource::empty(),
@@ -1654,10 +1689,10 @@ mod tests {
         dir.publish(vllm_prices("1"))?;
         let mut file = PriceFile::new(dir.path());
         let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(file.changed()));
-        metrics.record_llm(&vllm_call(), 1.0, false, vec![]);
+        metrics.record_llm(&vllm_call(), 1.0, false, Transport::Tls, vec![]);
         dir.publish(vllm_prices("3"))?;
         reload_prices(&metrics.prices, &mut file);
-        metrics.record_llm(&vllm_call(), 1.0, false, vec![]);
+        metrics.record_llm(&vllm_call(), 1.0, false, Transport::Tls, vec![]);
 
         let mut rm = ResourceMetrics {
             resource: Resource::empty(),

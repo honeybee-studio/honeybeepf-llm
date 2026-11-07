@@ -22,6 +22,8 @@ use honeybeepf_llm_core::types::LlmDirection;
 use log::debug;
 use log::{info, warn};
 use processor::{Outcome, StreamProcessor};
+
+use crate::telemetry::Transport;
 use regex::Regex;
 
 use crate::probes::{
@@ -307,6 +309,7 @@ fn route_event(
     background: &mut BackgroundCalls,
     header: &LlmEventHeader,
     data: &[u8],
+    transport: Transport,
     // Called only for events that use it: a pod lookup miss reads /proc.
     #[cfg(feature = "k8s")] pod_info: impl FnOnce() -> Option<Arc<crate::k8s::PodInfo>>,
 ) -> Outcome {
@@ -324,7 +327,9 @@ fn route_event(
     if data.is_empty() {
         return Outcome::Pending;
     }
-    streams.entry(key).or_default().handle_fragment(
+    let stream = streams.entry(key).or_default();
+    stream.set_transport(transport);
+    stream.handle_fragment(
         LlmDirection::from(header.rw),
         data,
         header.offset,
@@ -357,7 +362,7 @@ pub(crate) fn spawn_plaintext_parser(bpf: &mut Ebpf, resolver: IdentityResolver)
             );
             let mut map = handler_state.lock().unwrap_or_else(|e| e.into_inner());
             let mut calls = handler_background.lock().unwrap_or_else(|e| e.into_inner());
-            route_event(&mut map, &mut calls, header, data, || {
+            route_event(&mut map, &mut calls, header, data, Transport::Plain, || {
                 resolver.resolve_pod(header.metadata.pid, header.metadata.cgroup_id)
             });
         },
@@ -434,6 +439,7 @@ impl Probe for LlmProbe {
                     &mut calls,
                     header,
                     data,
+                    Transport::Tls,
                     #[cfg(feature = "k8s")]
                     || _resolver.resolve_pod(header.metadata.pid, header.metadata.cgroup_id),
                 );
@@ -555,6 +561,7 @@ mod tests {
                     &mut background,
                     &e.header,
                     e.payload(),
+                    Transport::Tls,
                     #[cfg(feature = "k8s")]
                     || None,
                 )
@@ -635,6 +642,7 @@ mod tests {
                 &mut BackgroundCalls::default(),
                 &e.header,
                 e.payload(),
+                Transport::Tls,
                 #[cfg(feature = "k8s")]
                 || None,
             );
