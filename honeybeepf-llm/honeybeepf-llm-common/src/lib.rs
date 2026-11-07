@@ -53,6 +53,37 @@ pub const fn plain_flow_key(
     }
 }
 
+/// Full max-entries the eBPF object declares for the plaintext maps; the loader keeps them this big
+/// only when capture is on. Hash maps prealloc, so PLAIN_CONNS alone costs ~6.5 MB at full size.
+pub const PLAIN_ENDPOINTS_ENTRIES: u32 = 8192;
+pub const PLAIN_SOCKS_ENTRIES: u32 = 65536;
+pub const PLAIN_CONNS_ENTRIES: u32 = 65536;
+
+/// Load-time max-entries for the three plaintext hash/sock maps.
+pub struct PlainMapEntries {
+    pub endpoints: u32,
+    pub socks: u32,
+    pub conns: u32,
+}
+
+/// Full sizes when plaintext capture is configured; one slot each when off, so a TLS-only node does
+/// not prealloc the ~8 MB these maps cost at full size.
+pub const fn plain_map_entries(configured: bool) -> PlainMapEntries {
+    if configured {
+        PlainMapEntries {
+            endpoints: PLAIN_ENDPOINTS_ENTRIES,
+            socks: PLAIN_SOCKS_ENTRIES,
+            conns: PLAIN_CONNS_ENTRIES,
+        }
+    } else {
+        PlainMapEntries {
+            endpoints: 1,
+            socks: 1,
+            conns: 1,
+        }
+    }
+}
+
 // Indices into the LLM_STATS per-CPU counter map (kernel increments, userspace sums).
 pub const LLM_STAT_ENTER: u32 = 0; // entry uprobe hits (SSL_read/write/_ex, SSL_do_handshake, SSL_free)
 pub const LLM_STAT_SUBMIT: u32 = 1; // events submitted to SSL_EVENTS (every fragment)
@@ -327,5 +358,20 @@ mod tests {
         assert_eq!(key.local_port, 33000);
         assert_eq!(key.local_ip4, local_ip);
         assert_eq!(key.remote_ip4, remote_ip);
+    }
+
+    #[test]
+    fn plain_map_entries_are_one_slot_when_off_and_full_when_on() {
+        let off = plain_map_entries(false);
+        assert_eq!((off.endpoints, off.socks, off.conns), (1, 1, 1));
+        let on = plain_map_entries(true);
+        assert_eq!(
+            (on.endpoints, on.socks, on.conns),
+            (
+                PLAIN_ENDPOINTS_ENTRIES,
+                PLAIN_SOCKS_ENTRIES,
+                PLAIN_CONNS_ENTRIES
+            ),
+        );
     }
 }

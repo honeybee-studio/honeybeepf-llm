@@ -16,16 +16,11 @@ use aya_ebpf::{
     programs::{SkMsgContext, SockOpsContext},
 };
 use honeybeepf_llm_common::{
-    EventMetadata, LlmDirection, LlmEventHeader, MAX_SSL_BUF_SIZE, PlainFlowKey,
-    plain_endpoint_key, plain_flow_key, sock_ops_remote_port,
+    EventMetadata, LlmDirection, LlmEventHeader, MAX_SSL_BUF_SIZE, PLAIN_CONNS_ENTRIES,
+    PLAIN_ENDPOINTS_ENTRIES, PLAIN_SOCKS_ENTRIES, PlainFlowKey, plain_endpoint_key, plain_flow_key,
+    sock_ops_remote_port,
 };
 
-/// Watched destinations (IPv4:port), filled by userspace from the resolved endpoints.
-pub const PLAIN_ENDPOINTS_ENTRIES: u32 = 8192;
-/// Watched sockets, inserted on connect; the sk_msg program runs on these.
-pub const PLAIN_SOCKS_ENTRIES: u32 = 65536;
-/// Per-connection attribution, keyed by the 4-tuple; one entry per watched socket.
-pub const PLAIN_CONNS_ENTRIES: u32 = 65536;
 /// Minimum when plaintext is off; the loader bumps it to the full size when enabled.
 pub const PLAIN_RINGBUF_MIN: u32 = 4096;
 
