@@ -12,7 +12,7 @@
 use anyhow::{Context, Result};
 use arc_swap::ArcSwapOption;
 use honeybeepf_llm_core::pricing::PriceTable;
-use honeybeepf_llm_core::types::UsageInfo;
+use honeybeepf_llm_core::types::{Operation, UsageInfo};
 use log::info;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 use opentelemetry::{KeyValue, global};
@@ -266,8 +266,9 @@ impl HoneyBeeMetrics {
                     }
                 }
                 // Savings ceiling: most the uncached input could save if that prefix were cached.
-                // Only priced calls contribute, so a call absent from the cost panels never shows savings.
-                if let Ok((usd, exact)) = table.cache_savings_ceiling(usage)
+                // Only priced calls contribute; embeddings have no prompt cache, so they are left out.
+                if usage.operation != Operation::Embeddings
+                    && let Ok((usd, exact)) = table.cache_savings_ceiling(usage)
                     && usd > 0.0
                 {
                     labels.push(KeyValue::new(
@@ -1351,8 +1352,8 @@ mod tests {
             .build();
         let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(None));
 
-        // A priced chat call that also exercises cache (read+write), reasoning and cost rows, and an
-        // embedding call on an unpriced model so the unpriced-tokens row is emitted too.
+        // gpt-5 has no cache-write price, so this chat call is unpriced (the unpriced-tokens row) while
+        // still emitting cache and reasoning rows; the embedding call is priced and emits a cost row.
         let chat = UsageInfo {
             prompt_tokens: 1200,
             completion_tokens: 800,
@@ -1513,7 +1514,7 @@ mod tests {
             ]
         );
         assert!(cost.data_points.iter().all(|p| {
-            label(&p.attributes, "price_table_version").as_deref() == Some("2026-11-03")
+            label(&p.attributes, "price_table_version").as_deref() == Some("2026-11-07")
         }));
         let unpriced = find("llm_unpriced_tokens_total")?
             .data
@@ -1623,6 +1624,55 @@ mod tests {
             None,
             "the unpriced reason label never leaks here"
         );
+        Ok(())
+    }
+
+    // Embeddings are priced but offer no prompt cache, so they must not inflate the savings ceiling.
+    // record_llm adds no model label, so each call is checked on its own reader by point count.
+    #[test]
+    fn llm_cache_savings_ceiling_excludes_priced_embeddings() -> Result<()> {
+        let ceiling_points = |usage: &UsageInfo| -> Result<(usize, usize)> {
+            let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+            let provider = SdkMeterProvider::builder()
+                .with_reader(reader.clone())
+                .build();
+            let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(None));
+            metrics.record_llm(usage, 1.0, false, vec![]);
+            let mut rm = ResourceMetrics {
+                resource: Resource::empty(),
+                scope_metrics: vec![],
+            };
+            reader.collect(&mut rm)?;
+            let points = |name: &str| {
+                rm.scope_metrics
+                    .iter()
+                    .flat_map(|s| &s.metrics)
+                    .find(|m| m.name == name)
+                    .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<f64>>())
+                    .map_or(0, |s| s.data_points.len())
+            };
+            Ok((
+                points("llm_cost_usd_total"),
+                points("llm_cache_savings_ceiling_usd_total"),
+            ))
+        };
+        // Priced embedding call: input cost is recorded, but no savings-ceiling point.
+        let embeddings = UsageInfo {
+            prompt_tokens: 1000,
+            model: Some("text-embedding-3-small".to_string()),
+            operation: Operation::Embeddings,
+            ..UsageInfo::default()
+        };
+        let (cost, ceiling) = ceiling_points(&embeddings)?;
+        assert!(cost > 0, "the embedding call is still priced");
+        assert_eq!(ceiling, 0, "embeddings raise no savings ceiling");
+        // Control: the same shape as a chat call does raise one, so the guard is not suppressing all.
+        let chat = UsageInfo {
+            prompt_tokens: 1000,
+            model: Some("gpt-5.5-pro".to_string()),
+            ..UsageInfo::default()
+        };
+        assert_eq!(ceiling_points(&chat)?.1, 1, "chat still raises a ceiling");
         Ok(())
     }
 
