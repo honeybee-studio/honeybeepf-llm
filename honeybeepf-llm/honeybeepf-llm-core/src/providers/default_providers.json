@@ -18,13 +18,15 @@
         "thoughts_tokens": "completion_tokens_details.reasoning_tokens",
         "cache_read_tokens": "prompt_tokens_details.cached_tokens",
         "model_path": "model",
-        "service_tier_path": "service_tier"
+        "service_tier_path": "service_tier",
+        "input_modality_details": "prompt_tokens_details",
+        "output_modality_details": "completion_tokens_details"
       },
       "request_extractor": "messages"
     },
     {
       "name": "openai",
-      "note": "Image generation and edits (gpt-image-1). Usage shares input_tokens/output_tokens with the Responses API, so this entry stays before Responses and requires output_tokens_details.image_tokens, which image responses carry and Responses does not. Hosts: OpenAI API only; Azure/Foundry (/openai/deployments/... paths) and Bedrock (/openai/v1) media share hosts with chat and are a follow-up. A streamed image (image_generation.completed, no [DONE]) is not an SSE end marker so its usage is not read yet. Totals only; the per-modality image/text split is a follow-up.",
+      "note": "Image generation and edits (gpt-image-1). Usage shares input_tokens/output_tokens with the Responses API, so this entry stays before Responses and requires output_tokens_details.image_tokens, which image responses carry and Responses does not. Hosts: OpenAI API only; Azure/Foundry (/openai/deployments/... paths) and Bedrock (/openai/v1) media share hosts with chat and are a follow-up. A streamed image (image_generation.completed, no [DONE]) is not an SSE end marker so its usage is not read yet. input_tokens_details/output_tokens_details carry the per-modality image and text token split.",
       "hosts": ["api.openai.com"],
       "paths": ["/v1/images/generations$", "/v1/images/edits$"],
       "response": {
@@ -32,7 +34,9 @@
         "prompt_tokens": "input_tokens",
         "completion_tokens": "output_tokens",
         "required_field": "output_tokens_details.image_tokens",
-        "model_path": "model"
+        "model_path": "model",
+        "input_modality_details": "input_tokens_details",
+        "output_modality_details": "output_tokens_details"
       },
       "request_extractor": "none"
     },
@@ -78,7 +82,8 @@
         "prompt_tokens": "input_tokens",
         "completion_tokens": "output_tokens",
         "required_field": "type",
-        "model_path": "model"
+        "model_path": "model",
+        "input_modality_details": "input_token_details"
       },
       "request_extractor": "none"
     },
@@ -127,7 +132,9 @@
         "thoughts_tokens": "thoughtsTokenCount",
         "completion_excludes_thoughts": true,
         "cache_read_tokens": "cachedContentTokenCount",
-        "model_path": "modelVersion"
+        "model_path": "modelVersion",
+        "input_modality_array": "promptTokensDetails",
+        "output_modality_array": "candidatesTokensDetails"
       },
       "request_extractor": "contents"
     },
