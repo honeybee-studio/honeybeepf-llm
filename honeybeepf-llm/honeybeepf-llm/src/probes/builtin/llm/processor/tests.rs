@@ -1519,3 +1519,109 @@ fn a_connection_joined_mid_stream_is_detected_and_records_from_data() {
     let out = send(&mut p, LlmDirection::Read, &server, None);
     assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
 }
+
+/// An HPACK literal field (no indexing, new name, not Huffman): names/values < 127 B.
+fn h2_lit(name: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x00, name.len() as u8];
+    out.extend_from_slice(name);
+    out.push(value.len() as u8);
+    out.extend_from_slice(value);
+    out
+}
+
+/// A client request HEADERS frame (END_HEADERS, END_STREAM: no body) for `method authority path`.
+fn h2_req(method: &[u8], authority: &[u8], path: &[u8], stream: u32) -> Vec<u8> {
+    let block = [
+        h2_lit(b":method", method),
+        h2_lit(b":authority", authority),
+        h2_lit(b":path", path),
+    ]
+    .concat();
+    h2_frame(1, 0x4 | 0x1, stream, &block)
+}
+
+/// A server JSON response: HEADERS (status 200, END_HEADERS) then DATA (`body`, END_STREAM).
+fn h2_json_response(stream: u32, body: &[u8]) -> Vec<u8> {
+    [
+        h2_frame(1, 0x4, stream, &h2_lit(b":status", b"200")),
+        h2_frame(0, 0x1, stream, body),
+    ]
+    .concat()
+}
+
+#[test]
+fn h2_background_call_is_recorded_once_from_a_later_poll() {
+    use LlmDirection::{Read, Write};
+    use honeybeepf_llm_core::h2::frame::PREFACE;
+    let mut bg = BackgroundCalls::default();
+
+    // Create on one connection: POST /v1/responses answered "queued" → the call is deferred, not recorded.
+    let mut a = StreamProcessor::new();
+    let mut out = send_with(&mut a, &mut bg, Write, PREFACE, None);
+    out.extend(send_with(
+        &mut a,
+        &mut bg,
+        Write,
+        &h2_req(b"POST", b"api.openai.com", b"/v1/responses", 1),
+        None,
+    ));
+    let queued = bg_object("queued", "null");
+    out.extend(send_with(
+        &mut a,
+        &mut bg,
+        Read,
+        &h2_json_response(1, queued.as_bytes()),
+        None,
+    ));
+    assert!(bg.contains("resp_bg1"), "{out:?}");
+    assert_eq!(out.last(), Some(&Outcome::Deferred), "{out:?}");
+
+    // Poll on a second connection: GET /v1/responses/{id} answered "completed" → recorded once, against the create.
+    let mut b = StreamProcessor::new();
+    let done = bg_object("completed", BG_USAGE);
+    out.extend(send_with(&mut b, &mut bg, Write, PREFACE, None));
+    out.extend(send_with(
+        &mut b,
+        &mut bg,
+        Write,
+        &h2_req(b"GET", b"api.openai.com", b"/v1/responses/resp_bg1", 1),
+        None,
+    ));
+    out.extend(send_with(
+        &mut b,
+        &mut bg,
+        Read,
+        &h2_json_response(1, done.as_bytes()),
+        None,
+    ));
+    assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+    assert!(!bg.contains("resp_bg1"), "{out:?}");
+}
+
+#[test]
+fn h2_a_stored_response_get_we_never_queued_is_not_recorded() {
+    // A GET /v1/responses/{id} the node never deferred (no matching create) settles nothing: its body is a
+    // stored object, not our background result.
+    use LlmDirection::{Read, Write};
+    use honeybeepf_llm_core::h2::frame::PREFACE;
+    let mut bg = BackgroundCalls::default();
+    let mut p = StreamProcessor::new();
+    let mut out = send_with(&mut p, &mut bg, Write, PREFACE, None);
+    out.extend(send_with(
+        &mut p,
+        &mut bg,
+        Write,
+        &h2_req(b"GET", b"api.openai.com", b"/v1/responses/resp_other", 1),
+        None,
+    ));
+    let done = bg_object("completed", BG_USAGE).replace("resp_bg1", "resp_other");
+    out.extend(send_with(
+        &mut p,
+        &mut bg,
+        Read,
+        &h2_json_response(1, done.as_bytes()),
+        None,
+    ));
+    assert_eq!(count(&out, Outcome::Recorded), 0, "{out:?}");
+    assert!(unparsed(&out).is_empty(), "{out:?}");
+}

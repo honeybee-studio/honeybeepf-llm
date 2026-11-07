@@ -6,7 +6,7 @@ use std::time::Instant;
 use honeybeepf_llm_core::byte_utils::contains_pattern;
 use honeybeepf_llm_core::types::UsageInfo;
 
-use super::super::body::parse_response_json;
+use super::super::body::{BackgroundState, parse_response_json};
 use super::super::encoding;
 use super::super::sse::{SseCursor, parse_sse_body};
 use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
@@ -56,6 +56,8 @@ pub(super) struct H2Stream {
     got_data: bool,
     /// Tracked without a matched request (mid-join or lost request headers), so its host is unknown.
     speculative: bool,
+    /// The background Responses id this stream polls (`GET <responses path>/{id}`), if it is a poll.
+    poll: Option<Box<str>>,
 }
 
 impl H2Stream {
@@ -67,6 +69,7 @@ impl H2Stream {
             body: Body::plain_json(),
             got_data: false,
             speculative: false,
+            poll: None,
         }
     }
 
@@ -78,6 +81,14 @@ impl H2Stream {
         }
     }
 
+    /// A GET poll of a background Responses call; its result settles the call kept under `id`.
+    pub(super) fn open_poll(start: Instant, id: Box<str>) -> Self {
+        Self {
+            poll: Some(id),
+            ..Self::open(start)
+        }
+    }
+
     pub(super) fn start(&self) -> Instant {
         self.start
     }
@@ -85,6 +96,11 @@ impl H2Stream {
     /// Whether this stream was tracked speculatively (no matched request), so its host is unknown.
     pub(super) fn speculative(&self) -> bool {
         self.speculative
+    }
+
+    /// The background Responses id this stream polls, if it is a poll of one.
+    pub(super) fn poll(&self) -> Option<&str> {
+        self.poll.as_deref()
     }
 
     pub(super) fn last(&self) -> Instant {
@@ -167,11 +183,12 @@ impl H2Stream {
         0
     }
 
-    /// The usage once the response has ended. A body that is not a JSON object (bad coding, a JSON array,
-    /// a body given up for a cap) records nothing.
-    pub(super) fn finish(&self) -> Option<UsageInfo> {
+    /// The usage once the response has ended, with where a background Responses call stands (a create's
+    /// `queued`, or `Ended` once a result arrives). A body that is not a JSON object (bad coding, a JSON
+    /// array, a body given up for a cap) records nothing.
+    pub(super) fn finish(&self) -> (Option<UsageInfo>, Option<BackgroundState>) {
         match &self.body {
-            Body::Streaming(cursor) => cursor.usage(),
+            Body::Streaming(cursor) => sse_result(cursor.usage()),
             Body::Buffered {
                 coding,
                 sse,
@@ -179,7 +196,7 @@ impl H2Stream {
                 too_large,
             } => {
                 if *too_large {
-                    return None;
+                    return (None, None);
                 }
                 let body = if coding.is_empty() {
                     Cow::Borrowed(buf.as_slice())
@@ -188,20 +205,32 @@ impl H2Stream {
                         name: "content-encoding",
                         value: coding,
                     }];
-                    encoding::decode(Cow::Borrowed(buf.as_slice()), &headers)?
+                    match encoding::decode(Cow::Borrowed(buf.as_slice()), &headers) {
+                        Some(body) => body,
+                        None => return (None, None),
+                    }
                 };
                 if *sse {
-                    return parse_sse_body(&body);
+                    return sse_result(parse_sse_body(&body));
                 }
                 let text = String::from_utf8_lossy(&body);
                 let json = text.trim_start();
-                // Background Responses polling is HTTP/1.1 only (see PR notes); drop the state here.
-                json.starts_with('{')
-                    .then(|| parse_response_json(json, &mut None))
-                    .flatten()
+                if !json.starts_with('{') {
+                    return (None, None);
+                }
+                let mut background = None;
+                let usage = parse_response_json(json, &mut background);
+                (usage, background)
             }
         }
     }
+}
+
+/// A streamed Responses poll carries its result only in the terminal event, so a stream that produced
+/// usage has ended (mirrors h1 `stream_end`).
+fn sse_result(usage: Option<UsageInfo>) -> (Option<UsageInfo>, Option<BackgroundState>) {
+    let background = usage.as_ref().map(|_| BackgroundState::Ended);
+    (usage, background)
 }
 
 #[cfg(test)]
@@ -220,7 +249,7 @@ mod tests {
         let mut s = H2Stream::open(Instant::now());
         s.response_headers(content_type, coding);
         s.data(body, usize::MAX);
-        s.finish().map(|u| (u.prompt_tokens, u.completion_tokens))
+        s.finish().0.map(|u| (u.prompt_tokens, u.completion_tokens))
     }
 
     #[test]
@@ -263,7 +292,7 @@ mod tests {
         s.data(JSON, usize::MAX);
         s.response_headers(None, b"");
         assert_eq!(
-            s.finish().map(|u| (u.prompt_tokens, u.completion_tokens)),
+            s.finish().0.map(|u| (u.prompt_tokens, u.completion_tokens)),
             Some((11, 4))
         );
     }
@@ -278,6 +307,17 @@ mod tests {
         }
         // The cursor was dropped once its unfinished line passed the cap, so it holds nothing.
         assert_eq!(s.held(), 0);
-        assert_eq!(s.finish(), None);
+        assert_eq!(s.finish().0, None);
+    }
+
+    #[test]
+    fn a_queued_background_create_reports_running_with_no_usage() {
+        let body = br#"{"id":"resp_bg1","status":"queued","background":true}"#;
+        let mut s = H2Stream::open(Instant::now());
+        s.response_headers(Some(b"application/json"), b"");
+        s.data(body, usize::MAX);
+        let (usage, bg) = s.finish();
+        assert!(usage.is_none());
+        assert!(matches!(bg, Some(BackgroundState::Running(id)) if &*id == "resp_bg1"));
     }
 }
