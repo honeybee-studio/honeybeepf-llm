@@ -321,11 +321,15 @@ impl HoneyBeeMetrics {
         is_error: bool,
         attrs: Vec<KeyValue>,
     ) {
+        // Requests, latency and tokens carry `operation`; the cache, reasoning and cost rows do not.
+        let mut call_attrs = attrs.clone();
+        call_attrs.push(KeyValue::new("operation", usage.operation.as_str()));
+
         // 1. total requests
-        self.llm_requests_total.add(1, &attrs);
+        self.llm_requests_total.add(1, &call_attrs);
 
         // 2. latency
-        self.llm_latency_seconds.record(latency_secs, &attrs);
+        self.llm_latency_seconds.record(latency_secs, &call_attrs);
 
         // 3. tokens
         if !is_error {
@@ -349,12 +353,16 @@ impl HoneyBeeMetrics {
             self.record_cost(usage, &mut attrs);
         }
 
+        let operation = KeyValue::new("operation", usage.operation.as_str());
+
         let mut prompt_attrs = attrs.clone();
+        prompt_attrs.push(operation.clone());
         prompt_attrs.push(KeyValue::new("token_type", "prompt"));
         self.llm_tokens_total
             .add(usage.prompt_tokens, &prompt_attrs);
 
         let mut comp_attrs = attrs; // move ownership
+        comp_attrs.push(operation);
         comp_attrs.push(KeyValue::new("token_type", "completion"));
         self.llm_tokens_total
             .add(usage.completion_tokens, &comp_attrs);
@@ -1331,6 +1339,112 @@ mod tests {
                 (labels("response_too_large"), 1)
             ]
         );
+        Ok(())
+    }
+
+    // #79: operation is on requests, tokens and latency only; cache, reasoning and cost stay off it.
+    #[test]
+    fn llm_operation_label_is_on_requests_tokens_latency_only() -> Result<()> {
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(None));
+
+        // A priced chat call that also exercises cache (read+write), reasoning and cost rows, and an
+        // embedding call on an unpriced model so the unpriced-tokens row is emitted too.
+        let chat = UsageInfo {
+            prompt_tokens: 1200,
+            completion_tokens: 800,
+            cache_read_tokens: Some(1000),
+            cache_write_tokens: Some(200),
+            thoughts_tokens: Some(50),
+            model: Some("gpt-5".to_string()),
+            ..UsageInfo::default()
+        };
+        let embeddings = UsageInfo {
+            prompt_tokens: 410_000,
+            completion_tokens: 0,
+            model: Some("text-embedding-3-small".to_string()),
+            operation: honeybeepf_llm_core::types::Operation::Embeddings,
+            ..UsageInfo::default()
+        };
+        metrics.record_llm(&chat, 1.0, false, vec![]);
+        metrics.record_llm(&embeddings, 1.0, false, vec![]);
+
+        let mut rm = ResourceMetrics {
+            resource: Resource::empty(),
+            scope_metrics: vec![],
+        };
+        reader.collect(&mut rm)?;
+        let label = |attrs: &[KeyValue], key: &str| {
+            attrs
+                .iter()
+                .find(|kv| kv.key.as_str() == key)
+                .map(|kv| kv.value.to_string())
+        };
+        let u64_ops = |name: &str| -> std::collections::BTreeSet<Option<String>> {
+            rm.scope_metrics
+                .iter()
+                .flat_map(|s| &s.metrics)
+                .find(|m| m.name == name)
+                .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
+                .map(|sum| {
+                    sum.data_points
+                        .iter()
+                        .map(|p| label(&p.attributes, "operation"))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        // Requests and tokens carry operation, both values present.
+        let want: std::collections::BTreeSet<Option<String>> =
+            [Some("chat".to_string()), Some("embeddings".to_string())].into();
+        assert_eq!(u64_ops("llm_requests_total"), want);
+        assert_eq!(u64_ops("llm_tokens_total"), want);
+
+        // Latency is a histogram and also carries operation.
+        let latency_ops: std::collections::BTreeSet<Option<String>> = rm
+            .scope_metrics
+            .iter()
+            .flat_map(|s| &s.metrics)
+            .find(|m| m.name == "llm_latency_seconds")
+            .and_then(|m| m.data.as_any().downcast_ref::<data::Histogram<f64>>())
+            .map(|h| {
+                h.data_points
+                    .iter()
+                    .map(|p| label(&p.attributes, "operation"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(latency_ops, want);
+
+        // Cache, reasoning and unpriced rows (u64 sums) must not carry operation (kept off to limit
+        // their cardinality). A metric with rows but no operation attribute has the value set {None}.
+        let only_none: std::collections::BTreeSet<Option<String>> = [None].into();
+        for name in [
+            "llm_cache_read_tokens_total",
+            "llm_cache_write_tokens_total",
+            "llm_reasoning_tokens_total",
+            "llm_unpriced_tokens_total",
+        ] {
+            assert_eq!(u64_ops(name), only_none, "{name} must not carry operation");
+        }
+        // Cost (f64 sum) must not carry operation either.
+        let cost_has_op = rm
+            .scope_metrics
+            .iter()
+            .flat_map(|s| &s.metrics)
+            .find(|m| m.name == "llm_cost_usd_total")
+            .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<f64>>())
+            .map(|sum| {
+                sum.data_points
+                    .iter()
+                    .any(|p| label(&p.attributes, "operation").is_some())
+            })
+            .unwrap_or(false);
+        assert!(!cost_has_op, "cost must not carry operation");
         Ok(())
     }
 

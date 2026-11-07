@@ -2,6 +2,28 @@
   "providers": [
     {
       "name": "openai",
+      "note": "Embeddings (#79), same hosts as Chat Completions. Input tokens only (no output field), so completion_optional. Listed first and guarded by root_object 'list' (the OpenAI embeddings response envelope): without the guard this permissive entry would claim a generation body that zeroes or omits its completion count, and placed after chat it would miss a proxy embeddings body that sends completion_tokens 0. operation=embeddings tags the metric rows. `/v1/embeddings$` also matches Azure Foundry /openai/v1/embeddings; /deployments/*/embeddings is the Azure OpenAI api-version route (with or without an /openai prefix).",
+      "hosts": [
+        "api.openai.com",
+        "openai.azure.com",
+        "services.ai.azure.com",
+        "bedrock-mantle.*.api.aws",
+        "bedrock-runtime.*.amazonaws.com"
+      ],
+      "paths": ["/v1/embeddings$", "/deployments/*/embeddings$"],
+      "operation": "embeddings",
+      "response": {
+        "usage_path": "usage",
+        "prompt_tokens": "prompt_tokens",
+        "completion_tokens": "completion_tokens",
+        "completion_optional": true,
+        "model_path": "model",
+        "root_object": "list"
+      },
+      "request_extractor": "none"
+    },
+    {
+      "name": "openai",
       "note": "Chat Completions. Hosts: OpenAI API (regional us./eu. too), Azure OpenAI, Azure AI Foundry /openai/v1, Bedrock Mantle /v1 and /openai/v1, Bedrock Runtime /openai/v1. `$` keeps the stored-completion endpoints (/chat/completions/{id}) out; /deployments/*/completions is the Azure api-version route.",
       "hosts": [
         "api.openai.com",
