@@ -314,7 +314,7 @@ pub async fn start(
     specs: Vec<EndpointSpec>,
     resolver: IdentityResolver,
 ) -> Result<()> {
-    use aya::programs::{CgroupAttachMode, SkMsg, SkSkb, SockOps};
+    use aya::programs::{CgroupAttachMode, CgroupSockAddr, SkMsg, SkSkb, SockOps};
 
     if !KernelVersion::current().is_ok_and(|v| v >= KernelVersion::new(5, 10, 0)) {
         anyhow::bail!("kernel older than 5.10");
@@ -322,7 +322,14 @@ pub async fn start(
     let cgroup = cgroup_v2_root().context("no cgroup v2 hierarchy (pure cgroup v1 node)")?;
     let cgroup_fd = std::fs::File::open(&cgroup)?;
 
-    // Verify both programs before attaching either: a verifier rejection then leaves nothing attached.
+    // Verify every program before attaching any: a verifier rejection then leaves nothing attached.
+    {
+        let p: &mut CgroupSockAddr = bpf
+            .program_mut("plaintext_connect4")
+            .context("plaintext_connect4 program missing")?
+            .try_into()?;
+        p.load().map_err(|e| load_error("plaintext_connect4", e))?;
+    }
     {
         let p: &mut SockOps = bpf
             .program_mut("plaintext_sockops")
@@ -345,14 +352,28 @@ pub async fn start(
         p.load().map_err(|e| load_error("plaintext_skskb", e))?;
     }
 
+    // connect4 first, so a connection's pid/cgroup is recorded before sockops reads it at establish.
+    let connect4: &mut CgroupSockAddr = bpf
+        .program_mut("plaintext_connect4")
+        .context("plaintext_connect4 program missing")?
+        .try_into()?;
+    let connect4_link = connect4.attach(&cgroup_fd, CgroupAttachMode::Single)?;
+
     let sockops: &mut SockOps = bpf
         .program_mut("plaintext_sockops")
         .context("plaintext_sockops program missing")?
         .try_into()?;
-    let sockops_link = sockops.attach(cgroup_fd, CgroupAttachMode::Single)?;
+    let sockops_link = match sockops.attach(&cgroup_fd, CgroupAttachMode::Single) {
+        Ok(link) => link,
+        Err(e) => {
+            detach_connect4(bpf, connect4_link);
+            return Err(e.into());
+        }
+    };
 
     if let Err(e) = attach_programs_and_read(bpf, resolver) {
         detach_sockops(bpf, sockops_link);
+        detach_connect4(bpf, connect4_link);
         return Err(e);
     }
 
@@ -401,6 +422,20 @@ fn detach_sockops(bpf: &mut aya::Ebpf, link: aya::programs::sock_ops::SockOpsLin
         .program_mut("plaintext_sockops")
         .expect("plaintext_sockops present after it was attached");
     if let Ok(prog) = TryInto::<&mut SockOps>::try_into(prog) {
+        let _ = prog.detach(link);
+    }
+}
+
+/// Detach the connect4 program so a failed later step leaves nothing attached to the cgroup.
+fn detach_connect4(
+    bpf: &mut aya::Ebpf,
+    link: aya::programs::cgroup_sock_addr::CgroupSockAddrLinkId,
+) {
+    use aya::programs::CgroupSockAddr;
+    let prog = bpf
+        .program_mut("plaintext_connect4")
+        .expect("plaintext_connect4 present after it was attached");
+    if let Ok(prog) = TryInto::<&mut CgroupSockAddr>::try_into(prog) {
         let _ = prog.detach(link);
     }
 }
