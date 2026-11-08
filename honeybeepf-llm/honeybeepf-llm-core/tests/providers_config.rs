@@ -28,7 +28,7 @@ struct ProviderUrls {
 #[test]
 fn test_default_providers() {
     let registry = ProviderRegistry::with_defaults();
-    assert_eq!(registry.providers.len(), 10);
+    assert_eq!(registry.providers.len(), 11);
 }
 
 // `with_defaults` panics only on a parse error, and serde skips unknown keys, so a key typo would go unnoticed.
@@ -86,7 +86,7 @@ fn test_default_provider_hosts() {
         "aiplatform.*.rep.googleapis.com",
     ];
     let gemini = ["generativelanguage.googleapis.com", vertex[0], vertex[1]];
-    let expected: [&[&str]; 10] = [
+    let expected: [&[&str]; 11] = [
         &openai,
         &openai,
         &openai,
