@@ -105,8 +105,25 @@ built-in providers; a provider with a built-in name (`openai`, `anthropic`, `gem
 replaces every built-in entry of that name, so an `openai` entry must also cover the Responses API and an
 `anthropic` entry Claude on Vertex AI. Usage is read by matching the response's fields, not its host, with the
 built-in entries tried first: a gateway that returns an OpenAI-, Anthropic- or Gemini-shaped body is read with the
-built-in fields. Only HTTPS calls made through OpenSSL are seen; a plain-HTTP endpoint (a typical in-cluster
-Ollama or vLLM) is not.
+built-in fields.
+
+By default only HTTPS calls made through OpenSSL are seen. An in-cluster **plain-HTTP** endpoint (a typical Ollama
+or vLLM) is captured at the socket layer when a provider opts in with `plaintext`:
+
+```yaml
+builtinProbes:
+  llm:
+    providers:
+      - name: vllm                 # a non-built-in name, so it is added, not replacing a built-in
+        hosts: ["vllm.default.svc.cluster.local"]   # must match the Host header the app sends
+        paths: ["/v1/chat/completions"]             # optional; omit to match any path on the host
+        plaintext: { port: 8000 }
+```
+
+The agent resolves those Service endpoints and records matching calls with `transport="plain"` (TLS calls carry
+`transport="tls"`), with no proxy and no app change. It needs a node with cgroup v2 and kernel 5.10+; the chart
+grants read access to `services` and `endpointslices` only when a provider sets `plaintext`. OpenAI-compatible
+servers need no `response` block, and the request's `Host` header must match one of the provider's `hosts`. IPv4 only so far.
 
 **Runtimes** (also checked in pods on k3s: `python:3.12-slim`, `python:3.13-alpine`, `node:24-slim`)
 
@@ -164,6 +181,10 @@ are checked on Linux 7.0 (the tables above).
 | `honeybeepf_llm_llm_reasoning_tokens_total` | counter | same as requests (subset of completion tokens) |
 | `honeybeepf_llm_llm_latency_seconds` | histogram | same as requests |
 | `honeybeepf_llm_llm_responses_unparsed_total` | counter | `reason`, `target_namespace`, `target_pod_name`, `target_workload_kind`, `target_workload_name` |
+
+`llm_requests_total`, `llm_tokens_total` and `llm_latency_seconds` also carry `transport` (`tls` or `plain`),
+which tells an OpenSSL-captured call apart from one captured on the socket-level plaintext path; the cache and
+reasoning metrics do not carry it.
 
 `llm_responses_unparsed_total` counts LLM calls the agent saw but could not record, so a drop in recorded calls
 can be told apart from a drop in traffic. `reason` is one of:
