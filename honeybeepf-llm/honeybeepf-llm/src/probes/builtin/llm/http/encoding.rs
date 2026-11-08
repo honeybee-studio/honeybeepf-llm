@@ -1,16 +1,23 @@
 //! HTTP `Content-Encoding` decoding of response bodies.
 
 use std::borrow::Cow;
-use std::io::Read;
+use std::io::{self, Read, Write};
 
-use brotli_decompressor::{BrotliDecoderParameter, Decompressor};
+use brotli_decompressor::{BrotliDecoderParameter, Decompressor, DecompressorWriter};
 use flate2::read::{DeflateDecoder, MultiGzDecoder, ZlibDecoder};
-use ruzstd::decoding::StreamingDecoder;
+use flate2::write::{MultiGzDecoder as GzWriter, ZlibDecoder as ZlibWriter};
+use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
 
 use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
 
 /// RFC 9659 limits the window of the zstd content coding to 8 MB.
 const ZSTD_MAX_WINDOW: u64 = 8 * 1024 * 1024;
+
+/// Compressed bytes held for a zstd block not fully arrived (one block is ≤ 128 KB plus its header).
+const ZSTD_HOLDBACK_MAX: usize = 256 * 1024;
+
+/// Decoded bytes handed to the SSE cursor per step, so a decompression bomb is caught near the cap.
+const STREAM_CHUNK: usize = 16 * 1024;
 
 /// Every stage may expand up to the response cap, so a long chain is refused rather than decoded.
 const MAX_CODINGS: usize = 4;
@@ -30,6 +37,14 @@ fn codings<'a>(
 /// Whether the body carries a content coding that has to be undone before parsing.
 pub(super) fn is_encoded(headers: &[httparse::Header<'_>]) -> bool {
     codings(headers).next().is_some()
+}
+
+/// The one content coding to undo, or None for none or more than one: only a single coding is
+/// streamed incrementally past the buffer limit.
+pub(super) fn single_coding(headers: &[httparse::Header<'_>]) -> Option<Box<[u8]>> {
+    let mut it = codings(headers);
+    let first = it.next()?;
+    it.next().is_none().then(|| Box::from(first))
 }
 
 /// Undo the content codings last-applied first; None on an unknown coding, corrupt data or output over the response cap.
@@ -81,6 +96,156 @@ fn read_capped(decoder: impl Read, out: &mut Vec<u8>) -> Option<()> {
     let room = MAX_RESPONSE_BUFFER_SIZE.saturating_sub(out.len()) as u64;
     decoder.take(room + 1).read_to_end(out).ok()?;
     (out.len() <= MAX_RESPONSE_BUFFER_SIZE).then_some(())
+}
+
+/// A single content coding undone incrementally for an SSE body past the buffer limit, keeping the
+/// decoder state across reads. The window is capped (zstd 8 MB, brotli 16 MB); a decode past the
+/// response cap or a stuck block fails the stream.
+pub(super) struct SseDecoder {
+    inner: Inner,
+    failed: bool,
+}
+
+enum Inner {
+    Gz(Box<GzWriter<CappedSink>>),
+    Zlib(Box<ZlibWriter<CappedSink>>),
+    Br(Box<DecompressorWriter<CappedSink>>),
+    Zstd {
+        decoder: Box<FrameDecoder>,
+        holdback: Vec<u8>,
+    },
+}
+
+impl SseDecoder {
+    /// A streaming decoder for one coding (`deflate` is read as zlib, RFC 9110), or None if unknown.
+    pub(super) fn new_for(coding: &[u8]) -> Option<Self> {
+        let inner =
+            if coding.eq_ignore_ascii_case(b"gzip") || coding.eq_ignore_ascii_case(b"x-gzip") {
+                Inner::Gz(Box::new(GzWriter::new(CappedSink::default())))
+            } else if coding.eq_ignore_ascii_case(b"deflate") {
+                Inner::Zlib(Box::new(ZlibWriter::new(CappedSink::default())))
+            } else if coding.eq_ignore_ascii_case(b"br") {
+                let mut w = DecompressorWriter::new(CappedSink::default(), 4096);
+                // A large-window header alone can demand a 1 GiB window (RUSTSEC-2026-0348).
+                w.set_parameter(BrotliDecoderParameter::BROTLI_DECODER_PARAM_LARGE_WINDOW, 0);
+                Inner::Br(Box::new(w))
+            } else if coding.eq_ignore_ascii_case(b"zstd") {
+                let mut decoder = Box::new(FrameDecoder::new());
+                decoder.set_max_window_size(ZSTD_MAX_WINDOW);
+                Inner::Zstd {
+                    decoder,
+                    holdback: Vec::new(),
+                }
+            } else {
+                return None;
+            };
+        Some(Self {
+            inner,
+            failed: false,
+        })
+    }
+
+    /// Decode `input`, handing decoded bytes to `out` in order; `out` returns false past the cap.
+    pub(super) fn push(&mut self, input: &[u8], out: &mut impl FnMut(&[u8]) -> bool) {
+        if self.failed {
+            return;
+        }
+        let ok = match &mut self.inner {
+            Inner::Gz(d) => pump_writer(&mut **d, input, out),
+            Inner::Zlib(d) => pump_writer(&mut **d, input, out),
+            Inner::Br(d) => pump_writer(&mut **d, input, out),
+            Inner::Zstd { decoder, holdback } => pump_zstd(decoder, holdback, input, out),
+        };
+        self.failed = !ok;
+    }
+
+    pub(super) fn healthy(&self) -> bool {
+        !self.failed
+    }
+}
+
+/// Collects a write-adapter decoder's output but refuses past the response cap, so a decompression
+/// bomb fails the write instead of growing memory.
+#[derive(Default)]
+struct CappedSink(Vec<u8>);
+
+impl Write for CappedSink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.0.len() + buf.len() > MAX_RESPONSE_BUFFER_SIZE {
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        self.0.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Get a write-adapter decoder's capped output buffer, to drain after each write.
+trait InnerSink: Write {
+    fn sink(&mut self) -> &mut CappedSink;
+}
+impl InnerSink for GzWriter<CappedSink> {
+    fn sink(&mut self) -> &mut CappedSink {
+        self.get_mut()
+    }
+}
+impl InnerSink for ZlibWriter<CappedSink> {
+    fn sink(&mut self) -> &mut CappedSink {
+        self.get_mut()
+    }
+}
+impl InnerSink for DecompressorWriter<CappedSink> {
+    fn sink(&mut self) -> &mut CappedSink {
+        self.get_mut()
+    }
+}
+
+/// Feed compressed input to a write-adapter decoder and forward its decoded output in capped chunks.
+fn pump_writer(
+    dec: &mut impl InnerSink,
+    input: &[u8],
+    out: &mut impl FnMut(&[u8]) -> bool,
+) -> bool {
+    // flush drains this write's decoded output into the sink; it sits in the decoder's buffer otherwise.
+    if dec.write_all(input).is_err() || dec.flush().is_err() {
+        return false;
+    }
+    let produced = std::mem::take(&mut dec.sink().0);
+    produced.chunks(STREAM_CHUNK).all(out)
+}
+
+/// Decode zstd blocks from the holdback, forwarding output; keeps a partial block for the next read.
+fn pump_zstd(
+    decoder: &mut FrameDecoder,
+    holdback: &mut Vec<u8>,
+    input: &[u8],
+    out: &mut impl FnMut(&[u8]) -> bool,
+) -> bool {
+    holdback.extend_from_slice(input);
+    let mut target = [0u8; STREAM_CHUNK];
+    let mut consumed = 0;
+    loop {
+        let (read, written) = match decoder.decode_from_to(&holdback[consumed..], &mut target) {
+            Ok(pair) => pair,
+            // A split header or block: keep the bytes unless the holdback already exceeds a block.
+            Err(_) => {
+                holdback.drain(..consumed);
+                return holdback.len() <= ZSTD_HOLDBACK_MAX;
+            }
+        };
+        consumed += read;
+        if written > 0 && !out(&target[..written]) {
+            holdback.drain(..consumed);
+            return false;
+        }
+        if read == 0 && written == 0 {
+            break;
+        }
+    }
+    holdback.drain(..consumed);
+    holdback.len() <= ZSTD_HOLDBACK_MAX
 }
 
 #[cfg(test)]
