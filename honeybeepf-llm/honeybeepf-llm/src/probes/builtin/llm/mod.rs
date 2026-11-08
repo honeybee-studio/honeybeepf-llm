@@ -18,8 +18,12 @@ use background::BackgroundCalls;
 use conn_filter::ConnFilter;
 use honeybeepf_llm_common::{LLM_STAT_COUNT, LLM_STAT_NAMES, LlmEventHeader};
 use honeybeepf_llm_core::types::LlmDirection;
+#[cfg(feature = "k8s")]
+use log::debug;
 use log::{info, warn};
 use processor::{Outcome, StreamProcessor};
+
+use crate::telemetry::Transport;
 use regex::Regex;
 
 use crate::probes::{
@@ -305,6 +309,7 @@ fn route_event(
     background: &mut BackgroundCalls,
     header: &LlmEventHeader,
     data: &[u8],
+    transport: Transport,
     // Called only for events that use it: a pod lookup miss reads /proc.
     #[cfg(feature = "k8s")] pod_info: impl FnOnce() -> Option<Arc<crate::k8s::PodInfo>>,
 ) -> Outcome {
@@ -322,7 +327,9 @@ fn route_event(
     if data.is_empty() {
         return Outcome::Pending;
     }
-    streams.entry(key).or_default().handle_fragment(
+    let stream = streams.entry(key).or_default();
+    stream.set_transport(transport);
+    stream.handle_fragment(
         LlmDirection::from(header.rw),
         data,
         header.offset,
@@ -333,6 +340,35 @@ fn route_event(
         #[cfg(feature = "k8s")]
         pod_info(),
     )
+}
+
+/// Parse plaintext (non-TLS) capture records with the same stream machinery as the SSL path. The
+/// records already belong to watched providers, so no connection filter runs; a `closed` record
+/// (sent on TCP close) ends the stream, and idle streams are swept like the SSL ones.
+#[cfg(feature = "k8s")]
+pub(crate) fn spawn_plaintext_parser(bpf: &mut Ebpf, resolver: IdentityResolver) -> Result<()> {
+    let state: StreamMap = Arc::new(Mutex::new(HashMap::new()));
+    let background: BackgroundMap = Arc::default();
+    let handler_state = state.clone();
+    let handler_background = background.clone();
+    spawn_ringbuf_handler_var(
+        bpf,
+        "PLAIN_EVENTS",
+        move |header: &LlmEventHeader, data: &[u8]| {
+            debug!(
+                target: "honeybeepf_llm::plaintext",
+                "plain record: pid={} stream={:#x} rw={} len={} closed={}",
+                header.metadata.pid, header.ssl_ptr, header.rw, data.len(), header.closed
+            );
+            let mut map = handler_state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut calls = handler_background.lock().unwrap_or_else(|e| e.into_inner());
+            route_event(&mut map, &mut calls, header, data, Transport::Plain, || {
+                resolver.resolve_pod(header.metadata.pid, header.metadata.cgroup_id)
+            });
+        },
+    )?;
+    start_cleanup_task(state, background);
+    Ok(())
 }
 
 impl Probe for LlmProbe {
@@ -403,6 +439,7 @@ impl Probe for LlmProbe {
                     &mut calls,
                     header,
                     data,
+                    Transport::Tls,
                     #[cfg(feature = "k8s")]
                     || _resolver.resolve_pod(header.metadata.pid, header.metadata.cgroup_id),
                 );
@@ -524,6 +561,7 @@ mod tests {
                     &mut background,
                     &e.header,
                     e.payload(),
+                    Transport::Tls,
                     #[cfg(feature = "k8s")]
                     || None,
                 )
@@ -604,6 +642,7 @@ mod tests {
                 &mut BackgroundCalls::default(),
                 &e.header,
                 e.payload(),
+                Transport::Tls,
                 #[cfg(feature = "k8s")]
                 || None,
             );

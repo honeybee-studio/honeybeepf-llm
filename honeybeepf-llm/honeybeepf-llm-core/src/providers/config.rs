@@ -101,6 +101,11 @@ pub struct IdentityConfig {
     /// response; every entry but the last (the served attempt the top-level usage already counts)
     /// is a billed attempt under its own model.
     pub iterations_path: Option<String>,
+
+    /// Optional: the response root's `object` must equal this. A permissive entry (embeddings omit
+    /// output tokens, so `completion_optional`) would otherwise claim a generation body that is
+    /// missing or zeroes its completion count; requiring `object: "list"` keeps it to embeddings.
+    pub root_object: Option<String>,
 }
 
 // Not `#[serde(flatten)]`: it skips the config crate's conversions (`yes` or `1` as a boolean).
@@ -133,6 +138,7 @@ struct FlatResponseConfig {
     service_tier_path: Option<String>,
     iterations_path: Option<String>,
     billed_categories: Option<Vec<String>>,
+    root_object: Option<String>,
 }
 
 impl From<FlatResponseConfig> for ResponseConfig {
@@ -163,6 +169,7 @@ impl From<FlatResponseConfig> for ResponseConfig {
                 model_path: flat.model_path,
                 required_field: flat.required_field,
                 iterations_path: flat.iterations_path,
+                root_object: flat.root_object,
             },
         }
     }
@@ -201,6 +208,7 @@ impl Default for IdentityConfig {
             model_path: default_model_path(),
             required_field: None,
             iterations_path: None,
+            root_object: None,
         }
     }
 }
@@ -239,6 +247,10 @@ pub struct ProviderConfig {
     /// Request text extraction type
     #[serde(default)]
     pub request_extractor: RequestExtractorType,
+
+    /// Whether these endpoints are generation or embedding calls (the `operation` metric label).
+    #[serde(default)]
+    pub operation: crate::types::Operation,
 
     /// Present only for in-cluster plaintext capture; TLS-only providers leave it unset.
     #[serde(default)]

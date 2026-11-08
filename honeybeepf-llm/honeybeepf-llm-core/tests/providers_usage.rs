@@ -3,7 +3,7 @@ use honeybeepf_llm_core::providers::{
     ConfigurableProvider, IdentityConfig, ProviderConfig, ProviderRegistry, RequestExtractorType,
     ResponseConfig, TokenConfig,
 };
-use honeybeepf_llm_core::types::UsageInfo;
+use honeybeepf_llm_core::types::{Operation, UsageInfo};
 use serde_json::json;
 
 fn openai_config() -> ProviderConfig {
@@ -13,6 +13,7 @@ fn openai_config() -> ProviderConfig {
         paths: vec!["/chat/completions".to_string()],
         response: ResponseConfig::default(),
         request_extractor: RequestExtractorType::Messages,
+        operation: Operation::Chat,
         plaintext: None,
     }
 }
@@ -37,6 +38,7 @@ fn gemini_config() -> ProviderConfig {
             ..ResponseConfig::default()
         },
         request_extractor: RequestExtractorType::Contents,
+        operation: Operation::Chat,
         plaintext: None,
     }
 }
@@ -183,6 +185,7 @@ fn provider_without_billed_categories() -> ConfigurableProvider {
             ..ResponseConfig::default()
         },
         request_extractor: RequestExtractorType::Messages,
+        operation: Operation::Chat,
         plaintext: None,
     })
 }
@@ -702,7 +705,13 @@ fn test_missing_completion_is_still_not_usage_for_other_providers() {
         json!({"usage": {"input_tokens": 25}}),
         json!({"usage": {"input_tokens": 25, "input_tokens_details": {"cached_tokens": 0}}}),
     ];
-    for config in registry.providers.iter().filter(|p| p.name != "gemini") {
+    // Only providers that require completion; the embeddings and Gemini entries opt into
+    // completion_optional and legitimately record a prompt-only usage.
+    for config in registry
+        .providers
+        .iter()
+        .filter(|p| !p.response.tokens.completion_optional)
+    {
         let provider = ConfigurableProvider::new(config.clone());
         for usage in &usages {
             assert!(
@@ -774,6 +783,7 @@ fn test_custom_provider_reads_every_flat_field() -> Result<(), serde_json::Error
         cache_write_tokens: Some(4),
         cache_write_long_ttl_tokens: Some(4),
         model: Some("m-1".to_string()),
+        operation: Operation::Chat,
         service_tier: Some("flex".to_string()),
         speed: Some("fast".to_string()),
         inference_geo: Some("us".to_string()),
@@ -969,8 +979,8 @@ fn test_bedrock_converse_prompt_adds_cache_read_and_write() {
 #[test]
 fn test_new_defaults_parse_existing_bodies_like_before() {
     let registry = ProviderRegistry::with_defaults();
-    // Entries 0-5 are the OpenAI (chat, image, Responses, transcription), Anthropic and Gemini first-party providers.
-    let (before, _) = registry.providers.split_at(6);
+    // Entries 0-6 are the OpenAI (embeddings, chat, image, Responses, transcription), Anthropic and Gemini first-party providers.
+    let (before, _) = registry.providers.split_at(7);
 
     for response in [
         json!({"model": "gpt-4o", "usage": {"prompt_tokens": 2000, "completion_tokens": 40,
@@ -1037,6 +1047,32 @@ fn test_gemini_interactions_non_streaming_parses_usage() {
     assert_eq!(usage.thoughts_tokens, Some(49));
     assert_eq!(usage.cache_read_tokens, Some(0));
     assert_eq!(usage.model, Some("gemini-3.6-flash".to_string()));
+}
+
+// total_tool_use_tokens (tool results billed as input, outside total_input_tokens) is added to the
+// prompt as generateContent's toolUsePromptTokenCount is; a Vertex host/path reaches the same entry.
+#[test]
+fn test_gemini_interactions_tool_use_tokens_add_to_input() {
+    let provider = default_provider(
+        "aiplatform.googleapis.com",
+        "/v1/projects/p/locations/global/interactions",
+    );
+    let response = json!({
+        "model": "gemini-3.6-flash",
+        "status": "completed",
+        "usage": {
+            "total_input_tokens": 11,
+            "total_output_tokens": 90,
+            "total_thought_tokens": 245,
+            "total_cached_tokens": 0,
+            "total_tool_use_tokens": 100,
+            "total_tokens": 446
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    // Input grows by the tool-use tokens (11 + 100); output is total_output + thoughts (90 + 245).
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (111, 335));
 }
 
 // total_cached_tokens is part of total_input_tokens, so the prompt is not grown by the cache read.
@@ -1239,4 +1275,79 @@ fn test_transcription_tokens_with_bad_counts_is_not_recorded() {
             "{body}"
         );
     }
+}
+
+// #79: an embeddings response (input tokens only) is recorded with operation=embeddings. The chat
+// entry has no completion field as optional, so it cannot claim the same body, which is why the
+// embeddings entry can sit after it without stealing chat responses.
+#[test]
+fn test_openai_embeddings_recorded_as_embedding_operation() {
+    let embeddings = json!({
+        "object": "list",
+        "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+        "model": "text-embedding-3-small",
+        "usage": {"prompt_tokens": 410000, "total_tokens": 410000}
+    });
+
+    let provider = default_provider("api.openai.com", "/v1/embeddings");
+    let usage = provider.parse_usage(&embeddings).unwrap();
+    assert_eq!(usage.operation, Operation::Embeddings);
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (410000, 0));
+    assert_eq!(usage.model.as_deref(), Some("text-embedding-3-small"));
+
+    // The chat entry requires completion_tokens, so it leaves the embeddings body for this entry.
+    let chat = default_provider("api.openai.com", "/v1/chat/completions");
+    assert!(chat.parse_usage(&embeddings).is_none());
+
+    // A chat response keeps operation=chat (the default for every other entry).
+    let chat_body = json!({
+        "model": "gpt-5.4-mini",
+        "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+    });
+    assert_eq!(
+        chat.parse_usage(&chat_body).unwrap().operation,
+        Operation::Chat
+    );
+}
+
+// #79 regression: operation must not flip when a proxy embeddings body carries completion_tokens 0
+// (LiteLLM/vLLM/Mistral), and a generation body missing its completion count must not be claimed as an
+// embedding. First-match over the default order, as the agent parses a response body (http/body.rs).
+#[test]
+fn test_embeddings_entry_only_claims_embeddings_envelopes() {
+    let providers: Vec<ConfigurableProvider> = ProviderRegistry::with_defaults()
+        .providers
+        .into_iter()
+        .map(ConfigurableProvider::new)
+        .collect();
+    let first = |body: &serde_json::Value| providers.iter().find_map(|p| p.parse_usage(body));
+
+    // Proxy embeddings: object "list" and completion_tokens 0. The embeddings entry claims it first.
+    let proxy_embeddings = json!({
+        "object": "list",
+        "data": [{"object": "embedding", "index": 0, "embedding": [0.1]}],
+        "model": "text-embedding-3-small",
+        "usage": {"prompt_tokens": 8, "completion_tokens": 0, "total_tokens": 8}
+    });
+    let u = first(&proxy_embeddings).expect("proxy embeddings recorded");
+    assert_eq!(u.operation, Operation::Embeddings);
+    assert_eq!((u.prompt_tokens, u.completion_tokens), (8, 0));
+
+    // A chat body missing its completion count is not an embeddings envelope, so no entry claims it
+    // (as before #79), rather than being mislabelled as an embedding.
+    let malformed_chat = json!({
+        "object": "chat.completion",
+        "model": "gpt-5.4-mini",
+        "choices": [],
+        "usage": {"prompt_tokens": 8, "total_tokens": 8}
+    });
+    assert!(first(&malformed_chat).is_none());
+
+    // A normal chat body stays chat.
+    let chat = json!({
+        "object": "chat.completion",
+        "model": "gpt-5.4-mini",
+        "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+    });
+    assert_eq!(first(&chat).unwrap().operation, Operation::Chat);
 }

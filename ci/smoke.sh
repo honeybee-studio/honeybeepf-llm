@@ -53,6 +53,19 @@ export BUILTIN_PROBES__LLM=true
 export BUILTIN_PROBES__INTERVAL=2
 export RUST_LOG=info
 
+# Configure one plaintext provider so the sockops/sk_msg/sk_skb programs load and the cgroup-v2 gate
+# runs. A throwaway kubeconfig lets the client build (no cluster in CI); 127.0.0.1 resolves via DNS.
+cat > /tmp/kubeconfig.yaml <<'EOF'
+apiVersion: v1
+kind: Config
+clusters: [{name: x, cluster: {server: "https://127.0.0.1:1"}}]
+users: [{name: x, user: {}}]
+contexts: [{name: x, context: {cluster: x, user: x}}]
+current-context: x
+EOF
+export KUBECONFIG=/tmp/kubeconfig.yaml
+export LLM_PROVIDERS_CONFIG='{"providers":[{"name":"vllm","hosts":["127.0.0.1"],"plaintext":{"port":18080}}]}'
+
 ./bin/honeybeepf-llm --verbose > /tmp/boot.log 2>&1 &
 AGENT_PID=$!
 # ~5s for BPF program load + verifier, ~3s for libssl scan / uprobe attach
@@ -93,3 +106,10 @@ fi
 grep -qE 'Attaching LLM \(SSL\) probes to detected library' /tmp/boot.log
 grep -qE 'Active probe registered: llm' /tmp/boot.log
 grep -qE '\[LLM\] Detected HTTP' /tmp/boot.log
+
+# Plaintext capture must either enable (cgroup v2 + kernel 5.10+) or disable with a gate reason,
+# never silently; a verifier rejection of its programs is already caught by the failure grep above.
+grep -qE 'Plaintext capture (enabled|disabled)' /tmp/boot.log
+if grep -qE 'Plaintext capture disabled' /tmp/boot.log; then
+  grep -qE 'Plaintext capture disabled: (kernel older than 5\.10|no cgroup v2)' /tmp/boot.log
+fi

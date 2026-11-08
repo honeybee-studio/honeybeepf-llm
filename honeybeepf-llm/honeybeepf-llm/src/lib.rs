@@ -56,10 +56,22 @@ impl HoneyBeeEngine {
         // Not required to exist: test objects without the LLM programs still load.
         let mut loader = EbpfLoader::new();
         loader.set_global("TAIL_CALL_OK", &tail_call_ok, false);
-        // Keep PLAIN_EVENTS at its tiny default unless plaintext capture is configured; when it is,
-        // raise the verifier log level so a socket-program rejection prints its full cause.
+        // The plaintext hash/sock maps prealloc ~8 MB at full size (PLAIN_CONNS ~6.5 MB); keep them
+        // at one slot unless capture is configured, which only the k8s build resolves endpoints for.
         #[cfg(feature = "k8s")]
-        if !plaintext::configured_specs().is_empty() {
+        let plaintext_on = !plaintext::configured_specs().is_empty();
+        #[cfg(not(feature = "k8s"))]
+        let plaintext_on = false;
+        let plain_maps = honeybeepf_llm_common::plain_map_entries(plaintext_on);
+        loader.set_max_entries("PLAIN_ENDPOINTS", plain_maps.endpoints);
+        loader.set_max_entries("PLAIN_SOCKS", plain_maps.socks);
+        loader.set_max_entries("PLAIN_CONNS", plain_maps.conns);
+        // Same per-connection cardinality as PLAIN_CONNS: the connect4 → sockops cookie handoff.
+        loader.set_max_entries("PLAIN_CONNECT_META", plain_maps.conns);
+        // When on, give PLAIN_EVENTS its full ring and raise the verifier log level so a
+        // socket-program rejection prints its full cause.
+        #[cfg(feature = "k8s")]
+        if plaintext_on {
             loader.set_max_entries("PLAIN_EVENTS", plaintext::PLAIN_EVENTS_FULL_BYTES);
             loader
                 .verifier_log_level(aya::VerifierLogLevel::VERBOSE | aya::VerifierLogLevel::STATS);
@@ -147,7 +159,8 @@ impl HoneyBeeEngine {
         {
             let specs = plaintext::configured_specs();
             if !specs.is_empty() {
-                match plaintext::start(&mut self.bpf, specs).await {
+                let resolver = self.resolver.clone();
+                match plaintext::start(&mut self.bpf, specs, resolver).await {
                     Ok(()) => info!("Plaintext capture enabled"),
                     Err(e) => warn!("Plaintext capture disabled: {}", e),
                 }
