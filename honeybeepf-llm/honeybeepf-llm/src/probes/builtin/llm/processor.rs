@@ -401,7 +401,7 @@ impl StreamProcessor {
                 usage,
                 background: state,
             } => {
-                outcome = settle_h2_poll(id, usage.map(|u| *u), state, background);
+                outcome = settle_h2_poll(id, usage.map(|u| *u), state, background, self.transport);
             }
             http::H2Event::Unparsed { reason } => {
                 outcome = Self::count_unparsed(
@@ -946,6 +946,7 @@ fn settle_h2_poll(
     usage: Option<UsageInfo>,
     state: Option<BackgroundState>,
     background: &mut BackgroundCalls,
+    transport: Transport,
 ) -> Outcome {
     // A body past the buffer limit keeps no state; usage with tokens is still the call's result.
     let state = state.or_else(|| {
@@ -980,6 +981,7 @@ fn settle_h2_poll(
         &usage,
         call.start_time,
         call.pid,
+        transport,
         #[cfg(feature = "k8s")]
         call.pod_info,
     );
