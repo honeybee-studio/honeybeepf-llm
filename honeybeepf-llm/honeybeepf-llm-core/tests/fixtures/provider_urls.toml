@@ -79,6 +79,10 @@ gemini = [
   { url = "generativelanguage.googleapis.com/v1beta/interactions", reason = "Interactions API" },
   { url = "generativelanguage.googleapis.com/v1beta/interactions?alt=sse", reason = "Interactions API, query ignored by the anchor" },
   { url = "generativelanguage.googleapis.com/v1/interactions", reason = "Interactions API, stable v1" },
+  # Vertex AI Interactions: /locations/{l}/interactions (no :create verb; streaming is `"stream":true` in the body)
+  { url = "aiplatform.googleapis.com/v1/projects/p/locations/global/interactions", reason = "Vertex Interactions, global" },
+  { url = "us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/interactions?alt=sse", reason = "Vertex Interactions, regional, query ignored" },
+  { url = "aiplatform.eu.rep.googleapis.com/v1/projects/p/locations/eu/interactions", reason = "Vertex Interactions, multi-region" },
 ]
 
 none = [
@@ -98,6 +102,7 @@ none = [
   { url = "us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/endpoints/123:rawPredict", reason = "Vertex custom endpoint" },
   { url = "us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/gemini-3.5-flash:countTokens", reason = "Gemini token counting" },
   { url = "generativelanguage.googleapis.com/v1beta/interactions/int_123", reason = "Interactions retrieval/polling (GET), path continues past the anchor" },
+  { url = "aiplatform.googleapis.com/v1/projects/p/locations/global/interactions/int_123", reason = "Vertex Interactions retrieval/polling (GET), path continues past the anchor" },
   { url = "api.openai.com/v1/embeddings/x", reason = "path continues after /embeddings" },
   { url = "myres.openai.azure.com/openai/deployments/d1/audio/transcriptions?api-version=2024-10-21", reason = "Azure audio" },
   { url = "myres.openai.azure.com/openai/v1/responses/resp_1", reason = "Azure v1 Responses retrieval" },

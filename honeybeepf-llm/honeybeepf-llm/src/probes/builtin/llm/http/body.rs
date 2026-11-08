@@ -312,4 +312,18 @@ mod tests {
         assert_eq!((info.prompt_tokens, info.completion_tokens), (7, 72));
         assert_eq!(info.thoughts_tokens, Some(49));
     }
+
+    #[test]
+    fn gemini_interactions_non_streaming_failed_without_usage_records_zero() {
+        // A failed interaction may carry no usage object; it is a finished call all the same,
+        // recorded as zero tokens — the same as a failed Responses body.
+        let resp = concat!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n",
+            "{\"model\":\"gemini-3.6-flash\",\"status\":\"failed\"}",
+        );
+        assert_eq!(
+            tokens(Http11Parser.parse_response(resp.as_bytes())),
+            Some((0, 0))
+        );
+    }
 }

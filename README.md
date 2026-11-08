@@ -91,6 +91,7 @@ replayed against it as well. A blank cell was not checked.
 | OpenAI Responses API | ✅ | ✅ | |
 | Anthropic Messages | ✅ | ✅ | ✅ read/write |
 | Google Gemini (`generateContent`, `streamGenerateContent`) | ✅ | ✅ | ✅ read |
+| Google Gemini Interactions API (Gemini API and Vertex AI) | ✅ | ✅ | ✅ read |
 | Azure OpenAI | ✅ Chat Completions | ✅ Responses API | |
 | Google Vertex AI (Gemini) | ✅ | ✅ | |
 | Claude on Vertex AI, Google Cloud and Microsoft Foundry | ✅ | ✅ | ✅ read/write |

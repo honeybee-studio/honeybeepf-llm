@@ -37,10 +37,14 @@ fn read_lines(cursor: &mut SseCursor, bytes: &[u8]) {
         if line == "data: [DONE]" {
             cursor.ended = true;
             cursor.done = true;
+        } else if line == "event: error" {
+            // A Gemini Interactions error event aborts the call with no usage; later events on the
+            // stream are no longer trusted, so nothing is recorded (the call is counted unparsed).
+            cursor.aborted = true;
         } else if !cursor.ended && SSE_END_MARKERS.iter().any(|m| line.contains(m)) {
             cursor.ended = true;
         }
-        if cursor.done || !line.starts_with("data: ") {
+        if cursor.done || cursor.aborted || !line.starts_with("data: ") {
             continue;
         }
         let data = &line["data: ".len()..];
@@ -58,13 +62,15 @@ fn read_lines(cursor: &mut SseCursor, bytes: &[u8]) {
             cursor.fallbacks.push(block.clone());
         }
 
-        // A failed Responses stream may end without usage; its status still has to finish the call.
+        // A failed Responses or Interactions stream may end without usage; its status still has to
+        // finish the call.
         let is_usage_event = serde_json::from_str::<SseChunkDelta>(data).is_ok_and(|chunk| {
             chunk.has_usage()
                 || chunk
                     .response
                     .as_ref()
                     .is_some_and(|r| r.get("status").and_then(Value::as_str) == Some("failed"))
+                || chunk.interaction.as_ref().is_some_and(interaction_failed)
         });
         if !is_usage_event {
             continue;
@@ -76,6 +82,12 @@ fn read_lines(cursor: &mut SseCursor, bytes: &[u8]) {
     }
 }
 
+/// A failed interaction ends the call with no usage, as a failed Responses stream does; its status
+/// still has to finish the call. Cancelled or incomplete ones record from the usage they carry.
+fn interaction_failed(interaction: &Value) -> bool {
+    interaction.get("status").and_then(Value::as_str) == Some("failed")
+}
+
 /// Merge a usage-bearing event into `acc`, unwrapping Anthropic `message_start`, a Responses event
 /// or a Gemini Interactions event so the merged body carries usage and model at its top level.
 pub(super) fn merge_usage_event(acc: &mut Option<Value>, mut val: Value) {
@@ -85,7 +97,7 @@ pub(super) fn merge_usage_event(acc: &mut Option<Value>, mut val: Value) {
         val = val["response"].take();
     } else if val
         .get("interaction")
-        .is_some_and(|i| i.get("usage").is_some())
+        .is_some_and(|i| i.get("usage").is_some() || interaction_failed(i))
     {
         val = val["interaction"].take();
     }
@@ -104,6 +116,8 @@ pub(super) struct SseCursor {
     ended: bool,
     /// `[DONE]` was read; nothing after it is merged.
     done: bool,
+    /// An error event aborted the stream; the call is not recorded whatever follows.
+    aborted: bool,
     /// Usage-bearing events merged in order: Anthropic sends input tokens in
     /// message_start and only output tokens in message_delta.
     acc: Option<Value>,
@@ -140,7 +154,7 @@ impl SseCursor {
 
     /// The merged usage once an end marker or `[DONE]` has been read.
     pub(super) fn usage(&self) -> Option<UsageInfo> {
-        if !self.ended {
+        if self.aborted || !self.ended {
             return None;
         }
         if self.fallbacks.is_empty() {
@@ -377,6 +391,80 @@ mod tests {
             .parse_response(&http11_sse(body))
             .expect("usage");
         assert_eq!((info.prompt_tokens, info.completion_tokens), (7, 72));
+    }
+
+    #[test]
+    fn gemini_interactions_sse_error_event_leaves_the_call_unrecorded() {
+        // The ErrorEvent (`event: error`, verbatim from the docs) aborts the call with no usage.
+        let body = concat!(
+            "event: error\n",
+            "data: {\"error\":{\"message\":\"Deadline expired before operation could complete.\",",
+            "\"code\":\"gateway_timeout\"},\"event_type\":\"error\"}\n\n",
+        );
+        assert_eq!(tokens(Http11Parser.parse_response(&http11_sse(body))), None);
+    }
+
+    #[test]
+    fn gemini_interactions_sse_error_event_poisons_a_later_completed() {
+        // Partial usage arrived, then an error aborted the stream; a later completed event must not
+        // resurrect the call, since once the stream errored its usage is no longer trusted.
+        let body = concat!(
+            "event: interaction.created\n",
+            "data: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"int_1\",\"model\":\"gemini-3.6-flash\",",
+            "\"status\":\"in_progress\",\"usage\":{\"total_input_tokens\":7,\"total_output_tokens\":0,\"total_tokens\":7}}}\n\n",
+            "event: error\n",
+            "data: {\"error\":{\"message\":\"boom\",\"code\":\"internal\"},\"event_type\":\"error\"}\n\n",
+            "event: interaction.completed\n",
+            "data: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"int_1\",\"model\":\"gemini-3.6-flash\",",
+            "\"status\":\"completed\",\"usage\":{\"total_input_tokens\":7,\"total_output_tokens\":23,\"total_thought_tokens\":49,\"total_tokens\":79}}}\n\n",
+        );
+        assert_eq!(tokens(Http11Parser.parse_response(&http11_sse(body))), None);
+    }
+
+    #[test]
+    fn gemini_interactions_sse_failed_completion_without_usage_records_zero() {
+        // A failed interaction ends on interaction.completed with no usage object; the call is still
+        // finished, recorded as zero tokens — the same as a failed Responses stream.
+        let body = concat!(
+            "event: interaction.completed\n",
+            "data: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"int_1\",",
+            "\"model\":\"gemini-3.6-flash\",\"status\":\"failed\"}}\n\n",
+        );
+        assert_eq!(
+            tokens(Http11Parser.parse_response(&http11_sse(body))),
+            Some((0, 0))
+        );
+    }
+
+    #[test]
+    fn gemini_interactions_sse_cancelled_or_incomplete_follows_its_usage() {
+        // A cancelled or incomplete interaction is recorded from the usage it carries (a mid-stream
+        // cancel keeps the tokens so far) and left unrecorded only when it has none at all, as
+        // Responses treats its own incomplete and cancel rather than fabricating a zero-token call.
+        for status in ["cancelled", "incomplete"] {
+            let with_usage = format!(
+                "event: interaction.completed\n\
+                 data: {{\"event_type\":\"interaction.completed\",\"interaction\":{{\"id\":\"int_1\",\
+                 \"model\":\"gemini-3.6-flash\",\"status\":\"{status}\",\
+                 \"usage\":{{\"total_input_tokens\":7,\"total_output_tokens\":5,\"total_tokens\":12}}}}}}\n\n"
+            );
+            assert_eq!(
+                tokens(Http11Parser.parse_response(&http11_sse(&with_usage))),
+                Some((7, 5)),
+                "{status} with usage"
+            );
+
+            let no_usage = format!(
+                "event: interaction.completed\n\
+                 data: {{\"event_type\":\"interaction.completed\",\"interaction\":{{\"id\":\"int_1\",\
+                 \"model\":\"gemini-3.6-flash\",\"status\":\"{status}\"}}}}\n\n"
+            );
+            assert_eq!(
+                tokens(Http11Parser.parse_response(&http11_sse(&no_usage))),
+                None,
+                "{status} without usage"
+            );
+        }
     }
 
     const DONE_IN_TEXT: &str = "The stream ends with data: [DONE]";
