@@ -205,10 +205,16 @@ Not counted here: a read lost whole because the ring buffer was full (see `llm_e
 and a connection left idle for 300 s without being closed (for example a killed process).
 
 Unparsed calls per minute by reason, for an alert on `> 0` (excluding `agent_session`, which is counted on
-purpose, not a drop):
+purpose, not a drop, and `usage_absent`, which some providers cause on every call):
 
 ```promql
-sum by (target_namespace, reason) (rate(honeybeepf_llm_llm_responses_unparsed_total{reason!="agent_session"}[5m])) * 60
+sum by (target_namespace, reason) (rate(honeybeepf_llm_llm_responses_unparsed_total{reason!~"agent_session|usage_absent"}[5m])) * 60
+```
+
+Calls whose response had no usage, per minute, for a panel rather than an alert:
+
+```promql
+sum by (target_namespace) (rate(honeybeepf_llm_llm_responses_unparsed_total{reason="usage_absent"}[5m])) * 60
 ```
 
 The collector and Prometheus add more labels, such as `k8s_pod_name`, `k8s_node_name` and `namespace`; those name
