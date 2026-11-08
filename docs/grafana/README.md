@@ -50,17 +50,19 @@ Collector, which forwards them to Prometheus.
 
 | Metric | Type | Labels |
 |--------|------|--------|
-| `honeybeepf_llm_llm_requests_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` |
-| `honeybeepf_llm_llm_tokens_total` | Counter | `model`, `status`, `token_type` (prompt / completion), `modality` (text / image / audio / video; text is the remainder), `target_namespace`, `target_pod_name` |
+| `honeybeepf_llm_llm_requests_total` | Counter | `model`, `status`, `transport` (tls / plain), `target_namespace`, `target_pod_name` |
+| `honeybeepf_llm_llm_tokens_total` | Counter | `model`, `status`, `token_type` (prompt / completion), `modality` (text / image / audio / video; text is the remainder), `transport` (tls / plain), `target_namespace`, `target_pod_name` |
 | `honeybeepf_llm_llm_cache_read_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
 | `honeybeepf_llm_llm_cache_write_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
 | `honeybeepf_llm_llm_reasoning_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of completion tokens) |
 | `honeybeepf_llm_llm_cost_usd_total` | Counter (USD) | `model`, `status`, `cost_type` (input / cache_read / cache_write / output), `price_table_version`, `target_namespace`, `target_pod_name` |
 | `honeybeepf_llm_llm_cache_savings_ceiling_usd_total` | Counter (USD) | `model`, `status`, `cache_price` (known / assumed_free), `price_table_version`, `target_namespace`, `target_pod_name` — upper bound on what caching the uncached input could save (estimate) |
 | `honeybeepf_llm_llm_unpriced_tokens_total` | Counter | `model`, `status`, `reason` (unknown_model / missing_price / unsupported_modifier / inconsistent_usage), `price_table_version`, `target_namespace`, `target_pod_name` |
-| `honeybeepf_llm_llm_latency_seconds_bucket` | Histogram | `model`, `status`, `target_namespace`, `target_pod_name` |
+| `honeybeepf_llm_llm_latency_seconds_bucket` | Histogram | `model`, `status`, `transport` (tls / plain), `target_namespace`, `target_pod_name` |
 
 Every per-call LLM metric (`llm_requests_total`, `llm_tokens_total`, the cache/reasoning subsets, `llm_cost_usd_total`, `llm_cache_savings_ceiling_usd_total`, `llm_unpriced_tokens_total`, `llm_latency_seconds`) also carries `attempt` (`served` / `declined`). It is `served` for the call the provider returned; `declined` marks an earlier server-side fallback attempt that the provider billed but routed away from (Anthropic fallback, #152/#154). A declined attempt adds its billed tokens and cost but no request count, so `sum(...)` over a metric is unchanged, while `attempt="declined"` isolates the cost of refused attempts per pod. Every series now carries the label; `declined` series appear only for models that show up in a fallback, so for non-fallback traffic the label is a constant `served` and adds no series.
+
+`llm_requests_total`, `llm_tokens_total` and `llm_latency_seconds` also carry `transport`: `tls` for a call captured from the OpenSSL uprobes, `plain` for one captured at the socket layer on an in-cluster plaintext (non-TLS) endpoint. It is constant per call, so `sum(...)` is unchanged and `transport="plain"` isolates on-premise plaintext traffic (the On-Premise LLM section). The cost, cache and unpriced metrics do not carry it.
 
 Every LLM metric that has `target_pod_name` also has `target_workload_kind` and `target_workload_name`: the pod's owner, with a ReplicaSet resolved to its Deployment or Argo Rollout and a Job to its CronJob (`Pod` and the pod name for a pod without an owner, `unattributed` when the owner cannot be named). The workload is fixed by the pod, so these labels add no series (except a Job pod relabelled with its CronJob after a failed lookup). The cost dashboard groups the On-Premise panels by namespace and workload; the **Workload** and **Pod** variables drill down.
 

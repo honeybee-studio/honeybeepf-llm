@@ -5,8 +5,7 @@
 use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -16,17 +15,15 @@ use honeybeepf_llm_core::providers::ProviderRegistry;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{Api, Client, api::ListParams};
-use log::{debug, info, warn};
+use log::{debug, warn};
 
-use crate::probes::shutdown_flag;
+use crate::probes::{IdentityResolver, shutdown_flag};
 
 /// Full ring size once plaintext is enabled; the eBPF map declares a tiny default so a TLS-only
 /// node spends almost nothing on it.
 pub const PLAIN_EVENTS_FULL_BYTES: u32 = 4 * 1024 * 1024;
 /// Seconds between reconcile passes (re-list Services, re-resolve external DNS).
 const RECONCILE_SECONDS: u64 = 30;
-/// Seconds between plaintext capture summaries (logged only when the count changed).
-const CAPTURE_REPORT_SECONDS: u64 = 5;
 const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 
 /// Upper bound for the fixed-size BPF map; beyond it extra endpoints are dropped with a warning.
@@ -309,11 +306,15 @@ pub fn configured_specs() -> Vec<EndpointSpec> {
     specs_from_registry(&registry)
 }
 
-/// Gate on cgroup v2 + kernel 5.10, attach the sockops and sk_msg programs, start the capture
-/// reader, fill the endpoint map, and run the reconcile driver; a failure after the sockops attach
-/// undoes it. Returns Err (logged as disabled) when the node cannot support it.
-pub async fn start(bpf: &mut aya::Ebpf, specs: Vec<EndpointSpec>) -> Result<()> {
-    use aya::programs::{CgroupAttachMode, SkMsg, SockOps};
+/// Gate on cgroup v2 + kernel 5.10, attach the socket programs, start the parser, fill the endpoint
+/// map, and run the reconcile driver; a failure after the sockops attach undoes it. Returns Err
+/// (logged as disabled) when the node cannot support it.
+pub async fn start(
+    bpf: &mut aya::Ebpf,
+    specs: Vec<EndpointSpec>,
+    resolver: IdentityResolver,
+) -> Result<()> {
+    use aya::programs::{CgroupAttachMode, CgroupSockAddr, SkMsg, SkSkb, SockOps};
 
     if !KernelVersion::current().is_ok_and(|v| v >= KernelVersion::new(5, 10, 0)) {
         anyhow::bail!("kernel older than 5.10");
@@ -321,7 +322,14 @@ pub async fn start(bpf: &mut aya::Ebpf, specs: Vec<EndpointSpec>) -> Result<()> 
     let cgroup = cgroup_v2_root().context("no cgroup v2 hierarchy (pure cgroup v1 node)")?;
     let cgroup_fd = std::fs::File::open(&cgroup)?;
 
-    // Verify both programs before attaching either: a verifier rejection then leaves nothing attached.
+    // Verify every program before attaching any: a verifier rejection then leaves nothing attached.
+    {
+        let p: &mut CgroupSockAddr = bpf
+            .program_mut("plaintext_connect4")
+            .context("plaintext_connect4 program missing")?
+            .try_into()?;
+        p.load().map_err(|e| load_error("plaintext_connect4", e))?;
+    }
     {
         let p: &mut SockOps = bpf
             .program_mut("plaintext_sockops")
@@ -336,15 +344,36 @@ pub async fn start(bpf: &mut aya::Ebpf, specs: Vec<EndpointSpec>) -> Result<()> 
             .try_into()?;
         p.load().map_err(|e| load_error("plaintext_skmsg", e))?;
     }
+    {
+        let p: &mut SkSkb = bpf
+            .program_mut("plaintext_skskb")
+            .context("plaintext_skskb program missing")?
+            .try_into()?;
+        p.load().map_err(|e| load_error("plaintext_skskb", e))?;
+    }
+
+    // connect4 first, so a connection's pid/cgroup is recorded before sockops reads it at establish.
+    let connect4: &mut CgroupSockAddr = bpf
+        .program_mut("plaintext_connect4")
+        .context("plaintext_connect4 program missing")?
+        .try_into()?;
+    let connect4_link = connect4.attach(&cgroup_fd, CgroupAttachMode::Single)?;
 
     let sockops: &mut SockOps = bpf
         .program_mut("plaintext_sockops")
         .context("plaintext_sockops program missing")?
         .try_into()?;
-    let sockops_link = sockops.attach(cgroup_fd, CgroupAttachMode::Single)?;
+    let sockops_link = match sockops.attach(&cgroup_fd, CgroupAttachMode::Single) {
+        Ok(link) => link,
+        Err(e) => {
+            detach_connect4(bpf, connect4_link);
+            return Err(e.into());
+        }
+    };
 
-    if let Err(e) = attach_skmsg_and_read(bpf) {
+    if let Err(e) = attach_programs_and_read(bpf, resolver) {
         detach_sockops(bpf, sockops_link);
+        detach_connect4(bpf, connect4_link);
         return Err(e);
     }
 
@@ -360,20 +389,30 @@ pub async fn start(bpf: &mut aya::Ebpf, specs: Vec<EndpointSpec>) -> Result<()> 
     Ok(())
 }
 
-/// Attach the sk_msg program to the sockhash of watched sockets and start draining PLAIN_EVENTS.
-fn attach_skmsg_and_read(bpf: &mut aya::Ebpf) -> Result<()> {
-    use aya::programs::SkMsg;
+/// Attach the sk_msg (send) and sk_skb (receive) programs to the sockhash of watched sockets and
+/// start parsing PLAIN_EVENTS into LLM calls.
+fn attach_programs_and_read(bpf: &mut aya::Ebpf, resolver: IdentityResolver) -> Result<()> {
+    use aya::programs::{SkMsg, SkSkb};
     let socks = aya::maps::SockHash::<_, u64>::try_from(
         bpf.map("PLAIN_SOCKS").context("PLAIN_SOCKS map missing")?,
     )?
     .fd()
     .try_clone()?;
-    let skmsg: &mut SkMsg = bpf
-        .program_mut("plaintext_skmsg")
-        .context("plaintext_skmsg program missing")?
-        .try_into()?;
-    skmsg.attach(&socks)?;
-    start_capture_reader(bpf)
+    {
+        let skmsg: &mut SkMsg = bpf
+            .program_mut("plaintext_skmsg")
+            .context("plaintext_skmsg program missing")?
+            .try_into()?;
+        skmsg.attach(&socks)?;
+    }
+    {
+        let skskb: &mut SkSkb = bpf
+            .program_mut("plaintext_skskb")
+            .context("plaintext_skskb program missing")?
+            .try_into()?;
+        skskb.attach(&socks)?;
+    }
+    crate::probes::builtin::llm::spawn_plaintext_parser(bpf, resolver)
 }
 
 /// Detach the sockops program so a failed later step leaves nothing attached to the cgroup.
@@ -383,6 +422,20 @@ fn detach_sockops(bpf: &mut aya::Ebpf, link: aya::programs::sock_ops::SockOpsLin
         .program_mut("plaintext_sockops")
         .expect("plaintext_sockops present after it was attached");
     if let Ok(prog) = TryInto::<&mut SockOps>::try_into(prog) {
+        let _ = prog.detach(link);
+    }
+}
+
+/// Detach the connect4 program so a failed later step leaves nothing attached to the cgroup.
+fn detach_connect4(
+    bpf: &mut aya::Ebpf,
+    link: aya::programs::cgroup_sock_addr::CgroupSockAddrLinkId,
+) {
+    use aya::programs::CgroupSockAddr;
+    let prog = bpf
+        .program_mut("plaintext_connect4")
+        .expect("plaintext_connect4 present after it was attached");
+    if let Ok(prog) = TryInto::<&mut CgroupSockAddr>::try_into(prog) {
         let _ = prog.detach(link);
     }
 }
@@ -404,42 +457,6 @@ fn load_error(name: &str, e: aya::programs::ProgramError) -> anyhow::Error {
         return anyhow::anyhow!("{name}: verifier rejected the program");
     }
     anyhow::anyhow!("{name}: {e}")
-}
-
-/// Drain captured sends from `PLAIN_EVENTS`, counting them; each record carries the sender's
-/// pid/cgroup for the parser join a later PR adds. A periodic task logs the running total.
-fn start_capture_reader(bpf: &mut aya::Ebpf) -> Result<()> {
-    let sends = Arc::new(AtomicU64::new(0));
-    let bytes = Arc::new(AtomicU64::new(0));
-    let (s, b) = (sends.clone(), bytes.clone());
-    crate::probes::spawn_ringbuf_handler_var(bpf, "PLAIN_EVENTS", move |_header, payload| {
-        s.fetch_add(1, Ordering::Relaxed);
-        b.fetch_add(payload.len() as u64, Ordering::Relaxed);
-    })?;
-    tokio::spawn(report_captures(sends, bytes));
-    Ok(())
-}
-
-/// Log the plaintext send/byte total every `CAPTURE_REPORT_SECONDS` while it changes, until shutdown.
-async fn report_captures(sends: Arc<AtomicU64>, bytes: Arc<AtomicU64>) {
-    let shutdown = shutdown_flag();
-    let mut last = 0u64;
-    loop {
-        for _ in 0..CAPTURE_REPORT_SECONDS {
-            if shutdown.load(Ordering::Relaxed) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-        let n = sends.load(Ordering::Relaxed);
-        if n != last {
-            info!(
-                "Plaintext sends captured: {n} ({} bytes)",
-                bytes.load(Ordering::Relaxed)
-            );
-            last = n;
-        }
-    }
 }
 
 #[cfg(test)]

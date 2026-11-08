@@ -1,5 +1,7 @@
 #![no_std]
 #![no_main]
+// For the asm! clamp in the plaintext receive path (bpfel has no stable inline asm).
+#![feature(asm_experimental_arch)]
 
 mod probes;
 

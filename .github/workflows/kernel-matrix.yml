@@ -40,7 +40,8 @@ jobs:
 
       - name: Build release
         working-directory: honeybeepf-llm
-        run: cargo build --release -p honeybeepf-llm
+        # k8s feature so smoke.sh also exercises the plaintext (cgroup v2 gated) path.
+        run: cargo build --release -p honeybeepf-llm --features honeybeepf-llm/k8s
 
       - name: Upload binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -84,7 +85,8 @@ jobs:
         working-directory: honeybeepf-llm
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --release -p honeybeepf-llm --target aarch64-unknown-linux-gnu
+        # k8s is pure Rust (kube on rustls, no openssl-sys), so it cross-compiles without C deps.
+        run: cargo build --release -p honeybeepf-llm --target aarch64-unknown-linux-gnu --features honeybeepf-llm/k8s
 
       - name: Upload binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -2,6 +2,29 @@ pub use honeybeepf_llm_common::LlmDirection;
 use serde::Deserialize;
 use serde_json::Value;
 
+/// The kind of call a metric row describes, as OTel `gen_ai.operation.name`; a closed set keeps the
+/// `operation` label low-cardinality.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Operation {
+    /// Text or chat generation, the Responses API included.
+    #[default]
+    Chat,
+    /// Embedding calls, billed on input tokens only.
+    Embeddings,
+}
+
+impl Operation {
+    /// The `operation` label value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Embeddings => "embeddings",
+        }
+    }
+}
+
 /// Non-text modality token counts for one direction; text is the remainder of the direction's total.
 #[derive(Debug, Default, PartialEq, Clone, Copy)]
 pub struct ModalityTokens {
@@ -47,6 +70,8 @@ pub struct UsageInfo {
     /// Cache writes with the longer, pricier lifetime (Anthropic 1h, OpenAI 12h), a subset of `cache_write_tokens`.
     pub cache_write_long_ttl_tokens: Option<u64>,
     pub model: Option<String>,
+    /// Whether this is a generation or an embedding call (the `operation` label).
+    pub operation: Operation,
     /// Tier that served the call as the response reports it (OpenAI `default`, `flex`, `priority`).
     pub service_tier: Option<String>,
     /// Speed mode that served the call (Anthropic `standard`, `fast`).

@@ -12,7 +12,7 @@
 use anyhow::{Context, Result};
 use arc_swap::ArcSwapOption;
 use honeybeepf_llm_core::pricing::PriceTable;
-use honeybeepf_llm_core::types::{ModalityTokens, UsageInfo};
+use honeybeepf_llm_core::types::{ModalityTokens, Operation, UsageInfo};
 use log::info;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 use opentelemetry::{KeyValue, global};
@@ -111,6 +111,23 @@ impl Attempt {
     }
 }
 
+/// How a call was captured: `tls` from the OpenSSL uprobes, `plain` from the socket-level plaintext
+/// path. A label on request, token and latency metrics.
+#[derive(Clone, Copy)]
+pub enum Transport {
+    Tls,
+    Plain,
+}
+
+impl Transport {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Transport::Tls => "tls",
+            Transport::Plain => "plain",
+        }
+    }
+}
+
 impl HoneyBeeMetrics {
     fn new(meter: &Meter, prices: Option<Prices>) -> Self {
         let (llm_cost_usd_total, llm_cache_savings_ceiling_usd_total, llm_unpriced_tokens_total) =
@@ -154,12 +171,12 @@ impl HoneyBeeMetrics {
             // === LLM ===
             llm_requests_total: meter
                 .u64_counter("llm_requests_total")
-                .with_description("Total number of LLM requests")
+                .with_description("Total number of LLM requests, by transport (tls|plain)")
                 .with_unit("requests")
                 .build(),
             llm_tokens_total: meter
                 .u64_counter("llm_tokens_total")
-                .with_description("Total number of LLM tokens processed")
+                .with_description("Total number of LLM tokens processed, by transport (tls|plain)")
                 .with_unit("tokens")
                 .build(),
             // Separate counters, not token_type values: these are subsets of the prompt count,
@@ -188,7 +205,7 @@ impl HoneyBeeMetrics {
                 .build(),
             llm_latency_seconds: meter
                 .f64_histogram("llm_latency_seconds")
-                .with_description("Latency of LLM requests")
+                .with_description("Latency of LLM requests, by transport (tls|plain)")
                 .with_unit("s")
                 .with_boundaries(LLM_LATENCY_BOUNDARIES_SECS.to_vec())
                 .build(),
@@ -266,8 +283,9 @@ impl HoneyBeeMetrics {
                     }
                 }
                 // Savings ceiling: most the uncached input could save if that prefix were cached.
-                // Only priced calls contribute, so a call absent from the cost panels never shows savings.
-                if let Ok((usd, exact)) = table.cache_savings_ceiling(usage)
+                // Only priced calls contribute; embeddings have no prompt cache, so they are left out.
+                if usage.operation != Operation::Embeddings
+                    && let Ok((usd, exact)) = table.cache_savings_ceiling(usage)
                     && usd > 0.0
                 {
                     labels.push(KeyValue::new(
@@ -296,6 +314,7 @@ impl HoneyBeeMetrics {
         model: &str,
         latency_secs: f64,
         is_error: bool,
+        transport: Transport,
         attrs_for: impl Fn(&str, &str, Attempt) -> Vec<KeyValue>,
     ) {
         let status = if is_error { "error" } else { "success" };
@@ -303,6 +322,7 @@ impl HoneyBeeMetrics {
             usage,
             latency_secs,
             is_error,
+            transport,
             attrs_for(model, status, Attempt::Served),
         );
         for attempt in &usage.iterations {
@@ -310,7 +330,11 @@ impl HoneyBeeMetrics {
                 continue;
             }
             let model = attempt.model.as_deref().unwrap_or("unknown");
-            self.record_tokens(attempt, attrs_for(model, "success", Attempt::Declined));
+            self.record_tokens(
+                attempt,
+                transport,
+                attrs_for(model, "success", Attempt::Declined),
+            );
         }
     }
 
@@ -319,22 +343,23 @@ impl HoneyBeeMetrics {
         usage: &UsageInfo,
         latency_secs: f64,
         is_error: bool,
+        transport: Transport,
         attrs: Vec<KeyValue>,
     ) {
-        // 1. total requests
-        self.llm_requests_total.add(1, &attrs);
-
-        // 2. latency
-        self.llm_latency_seconds.record(latency_secs, &attrs);
-
-        // 3. tokens
+        // Requests and latency carry `operation` and `transport`; cost and cache rows do not.
+        let mut call_attrs = attrs.clone();
+        call_attrs.push(KeyValue::new("operation", usage.operation.as_str()));
+        call_attrs.push(KeyValue::new("transport", transport.as_str()));
+        self.llm_requests_total.add(1, &call_attrs);
+        self.llm_latency_seconds.record(latency_secs, &call_attrs);
         if !is_error {
-            self.record_tokens(usage, attrs);
+            self.record_tokens(usage, transport, attrs);
         }
     }
 
-    /// The tokens, cache, reasoning and cost of one billed attempt.
-    fn record_tokens(&self, usage: &UsageInfo, mut attrs: Vec<KeyValue>) {
+    /// The tokens, cache, reasoning and cost of one billed attempt; only the token counts carry the
+    /// transport label.
+    fn record_tokens(&self, usage: &UsageInfo, transport: Transport, mut attrs: Vec<KeyValue>) {
         if let Some(n) = usage.cache_read_tokens {
             self.llm_cache_read_tokens_total.add(n, &attrs);
         }
@@ -348,7 +373,8 @@ impl HoneyBeeMetrics {
         if !usage.cost_suppressed {
             self.record_cost(usage, &mut attrs);
         }
-
+        attrs.push(KeyValue::new("transport", transport.as_str()));
+        attrs.push(KeyValue::new("operation", usage.operation.as_str()));
         self.record_token_modalities(
             usage.prompt_tokens,
             usage.input_modalities,
@@ -720,6 +746,7 @@ pub fn record_llm_request(
     model: &str,
     latency_secs: f64,
     is_error: bool,
+    transport: Transport,
     #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
 ) {
     if let Some(m) = metrics() {
@@ -728,6 +755,7 @@ pub fn record_llm_request(
             model,
             latency_secs,
             is_error,
+            transport,
             |model, status, attempt| {
                 llm_attrs(
                     model,
@@ -1064,8 +1092,8 @@ mod tests {
             thoughts_tokens: Some(4),
             ..UsageInfo::default()
         };
-        metrics.record_llm(&usage, 1.0, false, vec![]);
-        metrics.record_llm(&usage, 1.0, true, vec![]);
+        metrics.record_llm(&usage, 1.0, false, Transport::Tls, vec![]);
+        metrics.record_llm(&usage, 1.0, true, Transport::Tls, vec![]);
 
         let mut rm = ResourceMetrics {
             resource: Resource::empty(),
@@ -1110,7 +1138,7 @@ mod tests {
             },
             ..UsageInfo::default()
         };
-        metrics.record_llm(&usage, 1.0, false, vec![]);
+        metrics.record_llm(&usage, 1.0, false, Transport::Tls, vec![]);
 
         let mut rm = ResourceMetrics {
             resource: Resource::empty(),
@@ -1185,6 +1213,7 @@ mod tests {
             "claude-opus-4-8",
             1.0,
             false,
+            Transport::Tls,
             |model, status, attempt| {
                 vec![
                     KeyValue::new("model", model.to_string()),
@@ -1261,6 +1290,7 @@ mod tests {
             "claude-opus-4-8",
             1.0,
             false,
+            Transport::Tls,
             |model, status, attempt| {
                 llm_attrs(
                     model,
@@ -1346,13 +1376,20 @@ mod tests {
             }],
             ..UsageInfo::default()
         };
-        metrics.record_llm_call(&usage, "served-m", 1.0, false, |model, status, attempt| {
-            vec![
-                KeyValue::new("model", model.to_string()),
-                KeyValue::new("status", status.to_string()),
-                KeyValue::new("attempt", attempt.as_str()),
-            ]
-        });
+        metrics.record_llm_call(
+            &usage,
+            "served-m",
+            1.0,
+            false,
+            Transport::Tls,
+            |model, status, attempt| {
+                vec![
+                    KeyValue::new("model", model.to_string()),
+                    KeyValue::new("status", status.to_string()),
+                    KeyValue::new("attempt", attempt.as_str()),
+                ]
+            },
+        );
 
         let mut rm = ResourceMetrics {
             resource: Resource::empty(),
@@ -1440,6 +1477,112 @@ mod tests {
         Ok(())
     }
 
+    // #79: operation is on requests, tokens and latency only; cache, reasoning and cost stay off it.
+    #[test]
+    fn llm_operation_label_is_on_requests_tokens_latency_only() -> Result<()> {
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(None));
+
+        // gpt-5 has no cache-write price, so this chat call is unpriced (the unpriced-tokens row) while
+        // still emitting cache and reasoning rows; the embedding call is priced and emits a cost row.
+        let chat = UsageInfo {
+            prompt_tokens: 1200,
+            completion_tokens: 800,
+            cache_read_tokens: Some(1000),
+            cache_write_tokens: Some(200),
+            thoughts_tokens: Some(50),
+            model: Some("gpt-5".to_string()),
+            ..UsageInfo::default()
+        };
+        let embeddings = UsageInfo {
+            prompt_tokens: 410_000,
+            completion_tokens: 0,
+            model: Some("text-embedding-3-small".to_string()),
+            operation: honeybeepf_llm_core::types::Operation::Embeddings,
+            ..UsageInfo::default()
+        };
+        metrics.record_llm(&chat, 1.0, false, Transport::Tls, vec![]);
+        metrics.record_llm(&embeddings, 1.0, false, Transport::Tls, vec![]);
+
+        let mut rm = ResourceMetrics {
+            resource: Resource::empty(),
+            scope_metrics: vec![],
+        };
+        reader.collect(&mut rm)?;
+        let label = |attrs: &[KeyValue], key: &str| {
+            attrs
+                .iter()
+                .find(|kv| kv.key.as_str() == key)
+                .map(|kv| kv.value.to_string())
+        };
+        let u64_ops = |name: &str| -> std::collections::BTreeSet<Option<String>> {
+            rm.scope_metrics
+                .iter()
+                .flat_map(|s| &s.metrics)
+                .find(|m| m.name == name)
+                .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
+                .map(|sum| {
+                    sum.data_points
+                        .iter()
+                        .map(|p| label(&p.attributes, "operation"))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        // Requests and tokens carry operation, both values present.
+        let want: std::collections::BTreeSet<Option<String>> =
+            [Some("chat".to_string()), Some("embeddings".to_string())].into();
+        assert_eq!(u64_ops("llm_requests_total"), want);
+        assert_eq!(u64_ops("llm_tokens_total"), want);
+
+        // Latency is a histogram and also carries operation.
+        let latency_ops: std::collections::BTreeSet<Option<String>> = rm
+            .scope_metrics
+            .iter()
+            .flat_map(|s| &s.metrics)
+            .find(|m| m.name == "llm_latency_seconds")
+            .and_then(|m| m.data.as_any().downcast_ref::<data::Histogram<f64>>())
+            .map(|h| {
+                h.data_points
+                    .iter()
+                    .map(|p| label(&p.attributes, "operation"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(latency_ops, want);
+
+        // Cache, reasoning and unpriced rows (u64 sums) must not carry operation (kept off to limit
+        // their cardinality). A metric with rows but no operation attribute has the value set {None}.
+        let only_none: std::collections::BTreeSet<Option<String>> = [None].into();
+        for name in [
+            "llm_cache_read_tokens_total",
+            "llm_cache_write_tokens_total",
+            "llm_reasoning_tokens_total",
+            "llm_unpriced_tokens_total",
+        ] {
+            assert_eq!(u64_ops(name), only_none, "{name} must not carry operation");
+        }
+        // Cost (f64 sum) must not carry operation either.
+        let cost_has_op = rm
+            .scope_metrics
+            .iter()
+            .flat_map(|s| &s.metrics)
+            .find(|m| m.name == "llm_cost_usd_total")
+            .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<f64>>())
+            .map(|sum| {
+                sum.data_points
+                    .iter()
+                    .any(|p| label(&p.attributes, "operation").is_some())
+            })
+            .unwrap_or(false);
+        assert!(!cost_has_op, "cost must not carry operation");
+        Ok(())
+    }
+
     #[test]
     fn llm_cost_is_priced_per_call_and_unknown_models_stay_unpriced() -> Result<()> {
         let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
@@ -1461,9 +1604,9 @@ mod tests {
             model: Some("my-vllm-llama".to_string()),
             ..UsageInfo::default()
         };
-        metrics.record_llm(&priced, 1.0, false, vec![]);
-        metrics.record_llm(&priced, 1.0, true, vec![]);
-        metrics.record_llm(&unknown, 1.0, false, vec![]);
+        metrics.record_llm(&priced, 1.0, false, Transport::Tls, vec![]);
+        metrics.record_llm(&priced, 1.0, true, Transport::Tls, vec![]);
+        metrics.record_llm(&unknown, 1.0, false, Transport::Tls, vec![]);
 
         let mut rm = ResourceMetrics {
             resource: Resource::empty(),
@@ -1505,7 +1648,7 @@ mod tests {
             ]
         );
         assert!(cost.data_points.iter().all(|p| {
-            label(&p.attributes, "price_table_version").as_deref() == Some("2026-11-03")
+            label(&p.attributes, "price_table_version").as_deref() == Some("2026-11-07")
         }));
         let unpriced = find("llm_unpriced_tokens_total")?
             .data
@@ -1534,7 +1677,7 @@ mod tests {
             model: Some("claude-opus-4-8".to_string()),
             ..UsageInfo::default()
         };
-        metrics.record_llm(&usage, 1.0, false, vec![]);
+        metrics.record_llm(&usage, 1.0, false, Transport::Tls, vec![]);
 
         let mut rm = ResourceMetrics {
             resource: Resource::empty(),
@@ -1572,7 +1715,7 @@ mod tests {
             model: Some("gpt-5.5-pro".to_string()),
             ..UsageInfo::default()
         };
-        metrics.record_llm(&priced, 1.0, false, vec![]);
+        metrics.record_llm(&priced, 1.0, false, Transport::Tls, vec![]);
         // Same model reporting a cache read has no cache-read price, so cost() cannot price it;
         // the ceiling must not be emitted for a call that never reaches the cost panels.
         let unpriced = UsageInfo {
@@ -1581,7 +1724,7 @@ mod tests {
             model: Some("gpt-5.5-pro".to_string()),
             ..UsageInfo::default()
         };
-        metrics.record_llm(&unpriced, 1.0, false, vec![]);
+        metrics.record_llm(&unpriced, 1.0, false, Transport::Tls, vec![]);
 
         let mut rm = ResourceMetrics {
             resource: Resource::empty(),
@@ -1615,6 +1758,55 @@ mod tests {
             None,
             "the unpriced reason label never leaks here"
         );
+        Ok(())
+    }
+
+    // Embeddings are priced but offer no prompt cache, so they must not inflate the savings ceiling.
+    // record_llm adds no model label, so each call is checked on its own reader by point count.
+    #[test]
+    fn llm_cache_savings_ceiling_excludes_priced_embeddings() -> Result<()> {
+        let ceiling_points = |usage: &UsageInfo| -> Result<(usize, usize)> {
+            let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+            let provider = SdkMeterProvider::builder()
+                .with_reader(reader.clone())
+                .build();
+            let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(None));
+            metrics.record_llm(usage, 1.0, false, Transport::Tls, vec![]);
+            let mut rm = ResourceMetrics {
+                resource: Resource::empty(),
+                scope_metrics: vec![],
+            };
+            reader.collect(&mut rm)?;
+            let points = |name: &str| {
+                rm.scope_metrics
+                    .iter()
+                    .flat_map(|s| &s.metrics)
+                    .find(|m| m.name == name)
+                    .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<f64>>())
+                    .map_or(0, |s| s.data_points.len())
+            };
+            Ok((
+                points("llm_cost_usd_total"),
+                points("llm_cache_savings_ceiling_usd_total"),
+            ))
+        };
+        // Priced embedding call: input cost is recorded, but no savings-ceiling point.
+        let embeddings = UsageInfo {
+            prompt_tokens: 1000,
+            model: Some("text-embedding-3-small".to_string()),
+            operation: Operation::Embeddings,
+            ..UsageInfo::default()
+        };
+        let (cost, ceiling) = ceiling_points(&embeddings)?;
+        assert!(cost > 0, "the embedding call is still priced");
+        assert_eq!(ceiling, 0, "embeddings raise no savings ceiling");
+        // Control: the same shape as a chat call does raise one, so the guard is not suppressing all.
+        let chat = UsageInfo {
+            prompt_tokens: 1000,
+            model: Some("gpt-5.5-pro".to_string()),
+            ..UsageInfo::default()
+        };
+        assert_eq!(ceiling_points(&chat)?.1, 1, "chat still raises a ceiling");
         Ok(())
     }
 
@@ -1760,10 +1952,10 @@ mod tests {
         dir.publish(vllm_prices("1"))?;
         let mut file = PriceFile::new(dir.path());
         let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(file.changed()));
-        metrics.record_llm(&vllm_call(), 1.0, false, vec![]);
+        metrics.record_llm(&vllm_call(), 1.0, false, Transport::Tls, vec![]);
         dir.publish(vllm_prices("3"))?;
         reload_prices(&metrics.prices, &mut file);
-        metrics.record_llm(&vllm_call(), 1.0, false, vec![]);
+        metrics.record_llm(&vllm_call(), 1.0, false, Transport::Tls, vec![]);
 
         let mut rm = ResourceMetrics {
             resource: Resource::empty(),

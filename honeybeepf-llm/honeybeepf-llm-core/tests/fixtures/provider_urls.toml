@@ -38,6 +38,11 @@ openai = [
   { url = "eu.api.openai.com/v1/images/generations", reason = "image generation, regional domain" },
   { url = "api.openai.com/v1/audio/transcriptions", reason = "transcription" },
   { url = "api.openai.com/v1/audio/translations", reason = "translation" },
+  # Embeddings (#79): a separate entry, operation=embeddings
+  { url = "api.openai.com/v1/embeddings", reason = "OpenAI embeddings" },
+  { url = "myres.openai.azure.com/openai/deployments/d1/embeddings?api-version=2024-10-21", reason = "Azure api-version embeddings" },
+  { url = "myres.services.ai.azure.com/openai/v1/embeddings", reason = "Foundry v1 embeddings" },
+  { url = "bedrock-mantle.us-east-1.api.aws/openai/v1/embeddings", reason = "Bedrock Mantle embeddings" },
 ]
 
 anthropic = [
@@ -57,6 +62,15 @@ anthropic = [
   { url = "api.anthropic.com/v1/messages?beta=true", reason = "query ignored by the anchor" },
   { url = "api.anthropic.com/v1/messages/", reason = "trailing slash" },
   { url = "api.anthropic.com/anthropic/v1/messages", reason = "proxy prefix" },
+]
+
+anthropic_agents = [
+  # Managed Agents session endpoints the pod POSTs (detected, counted as agent_session, usage not read)
+  { url = "api.anthropic.com/v1/sessions", reason = "session create" },
+  { url = "api.anthropic.com/v1/sessions?beta=true", reason = "session create, query ignored by the anchor" },
+  { url = "api.anthropic.com/v1/sessions/", reason = "trailing slash" },
+  { url = "api.anthropic.com/v1/sessions/sess_01/events", reason = "event send" },
+  { url = "api.anthropic.com/v1/sessions/sess_01/events?beta=true", reason = "event send with query" },
 ]
 
 bedrock = [
@@ -80,6 +94,10 @@ gemini = [
   { url = "generativelanguage.googleapis.com/v1beta/interactions", reason = "Interactions API" },
   { url = "generativelanguage.googleapis.com/v1beta/interactions?alt=sse", reason = "Interactions API, query ignored by the anchor" },
   { url = "generativelanguage.googleapis.com/v1/interactions", reason = "Interactions API, stable v1" },
+  # Vertex AI Interactions: /locations/{l}/interactions (no :create verb; streaming is `"stream":true` in the body)
+  { url = "aiplatform.googleapis.com/v1/projects/p/locations/global/interactions", reason = "Vertex Interactions, global" },
+  { url = "us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/interactions?alt=sse", reason = "Vertex Interactions, regional, query ignored" },
+  { url = "aiplatform.eu.rep.googleapis.com/v1/projects/p/locations/eu/interactions", reason = "Vertex Interactions, multi-region" },
 ]
 
 none = [
@@ -99,7 +117,8 @@ none = [
   { url = "us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/endpoints/123:rawPredict", reason = "Vertex custom endpoint" },
   { url = "us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/gemini-3.5-flash:countTokens", reason = "Gemini token counting" },
   { url = "generativelanguage.googleapis.com/v1beta/interactions/int_123", reason = "Interactions retrieval/polling (GET), path continues past the anchor" },
-  { url = "myres.openai.azure.com/openai/deployments/d1/embeddings?api-version=2024-10-21", reason = "Azure embeddings" },
+  { url = "aiplatform.googleapis.com/v1/projects/p/locations/global/interactions/int_123", reason = "Vertex Interactions retrieval/polling (GET), path continues past the anchor" },
+  { url = "api.openai.com/v1/embeddings/x", reason = "path continues after /embeddings" },
   { url = "myres.openai.azure.com/openai/deployments/d1/audio/transcriptions?api-version=2024-10-21", reason = "Azure audio" },
   { url = "api.openai.com/v1/audio/speech", reason = "TTS: usage shape unconfirmed, not recorded yet" },
   { url = "myres.services.ai.azure.com/openai/v1/images/generations", reason = "Azure media: image entry is first-party hosts only" },
@@ -133,6 +152,10 @@ none = [
   { url = "api.anthropic.com/v1/messages/batches/msgbatch_01", reason = "batch status" },
   { url = "api.anthropic.com/v1/messages/batches/msgbatch_01/results", reason = "batch results" },
   { url = "api.anthropic.com/v1/messages/batches/msgbatch_01/cancel", reason = "batch cancel" },
+  # Managed Agents: only the two POST paths match; reads and the GET stream stay out
+  { url = "api.anthropic.com/v1/sessions/sess_01", reason = "session retrieval (GET), past the /v1/sessions anchor" },
+  { url = "api.anthropic.com/v1/sessions/sess_01/events/stream", reason = "event stream (GET), past the /events anchor" },
+  { url = "api.anthropic.com/v1/sessions/sess_01/events/evt_01", reason = "event retrieval, past the /events anchor" },
   { url = "api.openai.com/v1/chat/completions/chatcmpl-abc123", reason = "stored completion" },
   { url = "api.openai.com/v1/chat/completions/chatcmpl-abc123/messages", reason = "stored completion messages" },
 ]

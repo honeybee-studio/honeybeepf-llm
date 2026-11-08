@@ -8,6 +8,7 @@ use honeybeepf_llm_core::h2::frame::{Frame, FrameReader, PREFACE};
 use honeybeepf_llm_core::h2::hpack::{Decoder, Text};
 use honeybeepf_llm_core::types::{LlmDirection, UsageInfo};
 
+use super::super::body::{BackgroundState, is_response_id};
 use super::super::registry::PROVIDER_REGISTRY;
 use super::stream::H2Stream;
 use crate::probes::builtin::llm::processor::{H2Gap, UnparsedReason};
@@ -40,6 +41,18 @@ pub(crate) enum H2Event {
         start: Instant,
         /// The connection was joined mid-stream, so this call's host is unknown and it is lower-confidence.
         midjoin: bool,
+    },
+    /// A Responses create made with `"background": true` returned queued; its usage arrives in a later poll,
+    /// so the call is kept under `id` until then.
+    Deferred {
+        id: Box<str>,
+        start: Instant,
+    },
+    /// A poll (`GET <responses path>/{id}`) of a background call ended; its result settles the kept call.
+    Poll {
+        id: Box<str>,
+        usage: Option<Box<UsageInfo>>,
+        background: Option<BackgroundState>,
     },
     /// A tracked stream ended without usage (reset, connection going away, idle, or over a cap).
     Unparsed {
@@ -205,11 +218,17 @@ fn on_frame(
         // Decode the request block (to keep the client table in sync) and track it only when it matched a
         // provider, so non-LLM streams never take a map slot.
         Frame::Headers { stream, block } if request => {
-            if let Some(path) = match_request(decoder, block)
+            if let Some(matched) = match_request(decoder, block)
                 && !streams.contains_key(&stream)
                 && streams.len() < MAX_STREAMS
             {
-                streams.insert(stream, H2Stream::open(Instant::now()));
+                let (path, s) = match matched {
+                    Matched::Create { path, record_only } => {
+                        (path, H2Stream::open(Instant::now(), record_only))
+                    }
+                    Matched::Poll { path, id } => (path, H2Stream::open_poll(Instant::now(), id)),
+                };
+                streams.insert(stream, s);
                 on(H2Event::Detected { path });
             }
         }
@@ -250,27 +269,10 @@ fn on_frame(
             }
         }
         Frame::StreamEnd { stream } if !request => {
-            if let Some(s) = streams.get_mut(&stream) {
-                if let Some(usage) = s.finish() {
-                    on(H2Event::Recorded {
-                        usage: Box::new(usage),
-                        start: s.start(),
-                        midjoin: s.speculative(),
-                    });
-                } else if s.over_limit() {
-                    on(H2Event::Unparsed {
-                        reason: UnparsedReason::ResponseTooLarge,
-                    });
-                } else if s.speculative() {
-                    // A response we tracked without its request (lost headers or a mid-join) that carried no
-                    // usage: count it, since it may have been an LLM call we could not identify.
-                    on(H2Event::Unparsed {
-                        reason: UnparsedReason::HeadersLost,
-                    });
-                }
+            if let Some(s) = streams.remove(&stream) {
                 *buffered = buffered.saturating_sub(s.held());
+                end_stream(s, on);
             }
-            streams.remove(&stream);
         }
         // A server RST_STREAM rejects the request, so the stream ended with no usage. A client RST on its
         // own stream is often routine cleanup after the response (undici does this), so it is left alone;
@@ -291,6 +293,62 @@ fn on_frame(
         // Request DATA and END_STREAM carry nothing to record; `Frame` is non-exhaustive.
         _ => {}
     }
+}
+
+/// Turn a finished stream into the event the processor records. A speculative stream (host unknown) keeps
+/// its old handling; a matched stream routes a background create's `queued` result to `Deferred` and a poll
+/// to `Poll`, so its usage settles against the node-wide background-calls map.
+fn end_stream(s: H2Stream, on: &mut impl FnMut(H2Event)) {
+    if s.record_only() {
+        // A Managed Agents session call: counted at its end, its running session total never read.
+        on(H2Event::Unparsed {
+            reason: UnparsedReason::AgentSession,
+        });
+        return;
+    }
+    let (over, speculative, start) = (s.over_limit(), s.speculative(), s.start());
+    let poll = s.poll().map(Box::<str>::from);
+    let (usage, background) = s.finish();
+    if speculative {
+        if let Some(usage) = usage {
+            on(H2Event::Recorded {
+                usage: Box::new(usage),
+                start,
+                midjoin: true,
+            });
+        } else if over {
+            on(H2Event::Unparsed {
+                reason: UnparsedReason::ResponseTooLarge,
+            });
+        } else {
+            // A response tracked without its request (lost headers or a mid-join) that carried no usage:
+            // count it, since it may have been an LLM call we could not identify.
+            on(H2Event::Unparsed {
+                reason: UnparsedReason::HeadersLost,
+            });
+        }
+        return;
+    }
+    if let Some(id) = poll {
+        on(H2Event::Poll {
+            id,
+            usage: usage.map(Box::new),
+            background,
+        });
+    } else if let Some(usage) = usage {
+        on(H2Event::Recorded {
+            usage: Box::new(usage),
+            start,
+            midjoin: false,
+        });
+    } else if over {
+        on(H2Event::Unparsed {
+            reason: UnparsedReason::ResponseTooLarge,
+        });
+    } else if let Some(BackgroundState::Running(id)) = background {
+        on(H2Event::Deferred { id, start });
+    }
+    // A matched stream with no usage and no background state records nothing.
 }
 
 /// Drop every stream whose response began but then stalled since before `now - STREAM_IDLE`, counting each
@@ -329,10 +387,20 @@ fn drop_stream(
     }
 }
 
-/// Decode a request header block (keeping the HPACK table in sync) and return the matched path when it is a
-/// POST a provider serves. A block that failed to decode stays unmatched: its fields are unreliable (hpack.rs).
-fn match_request(decoder: &mut Decoder, block: &[u8]) -> Option<String> {
-    let mut is_post = false;
+/// What a request HEADERS block is, for the stream map.
+enum Matched {
+    /// A POST a provider serves: a generation call, or a Responses create. `record_only` marks a Managed
+    /// Agents session call, counted at its end without reading its running session total.
+    Create { path: String, record_only: bool },
+    /// A `GET <responses path>/{id}` poll of a background Responses call.
+    Poll { path: String, id: Box<str> },
+}
+
+/// Decode a request header block (keeping the HPACK table in sync) and classify it: a provider POST, or a
+/// GET poll of a background Responses id. A block that failed to decode stays unmatched: its fields are
+/// unreliable (hpack.rs).
+fn match_request(decoder: &mut Decoder, block: &[u8]) -> Option<Matched> {
+    let mut method: Option<Vec<u8>> = None;
     let mut authority: Option<Vec<u8>> = None;
     let mut path: Option<Vec<u8>> = None;
     let decoded = decoder.decode(block, |field| {
@@ -340,21 +408,44 @@ fn match_request(decoder: &mut Decoder, block: &[u8]) -> Option<String> {
             return;
         };
         if name == b":method" {
-            is_post = value == b"POST";
+            method = Some(value.to_vec());
         } else if name == b":authority" {
             authority = Some(value.to_vec());
         } else if name == b":path" {
             path = Some(value.to_vec());
         }
     });
-    if decoded.is_err() || !is_post {
+    if decoded.is_err() {
         return None;
     }
     let authority = std::str::from_utf8(authority.as_deref()?).ok()?;
     let path = std::str::from_utf8(path.as_deref()?).ok()?;
-    PROVIDER_REGISTRY
-        .find_provider(authority, path)
-        .map(|_| path.split_once('?').map_or(path, |(p, _)| p).to_string())
+    let base = path.split_once('?').map_or(path, |(p, _)| p);
+    match method.as_deref() {
+        Some(b"POST") => {
+            PROVIDER_REGISTRY
+                .find_provider(authority, path)
+                .map(|p| Matched::Create {
+                    path: base.to_string(),
+                    record_only: p.record_only,
+                })
+        }
+        Some(b"GET") => responses_poll_id(authority, base).map(|id| Matched::Poll {
+            path: base.to_string(),
+            id,
+        }),
+        _ => None,
+    }
+}
+
+/// The background Responses id in `GET <provider responses path>/{id}` (query already stripped), or None.
+/// Restricted to a `/responses` parent so a stored-completion or message retrieval is not taken for a poll.
+fn responses_poll_id(authority: &str, base: &str) -> Option<Box<str>> {
+    let (parent, id) = base.rsplit_once('/')?;
+    (parent.ends_with("/responses")
+        && is_response_id(id)
+        && PROVIDER_REGISTRY.find_provider(authority, parent).is_some())
+    .then(|| id.into())
 }
 
 /// Decode a response header block (keeping the table in sync) and return its content type and the content
@@ -411,9 +502,10 @@ mod tests {
         assert!(!starts_preface(b"POST / HTTP/1.1\r\n"));
     }
 
-    /// Only a POST a provider serves is tracked, so a non-provider host or a GET takes no map slot.
+    /// A POST a provider serves is a create; a GET of a background Responses id is a poll; everything else
+    /// (non-provider host, a stored-object GET) takes no map slot.
     #[test]
-    fn match_request_detects_only_provider_posts() {
+    fn match_request_detects_provider_posts_and_responses_polls() {
         let block = |method: &[u8], authority: &str, path: &str| {
             [
                 lit(b":method", method),
@@ -424,11 +516,32 @@ mod tests {
         };
         let m = |b: &[u8]| match_request(&mut Decoder::new(), b);
         let openai = block(b"POST", "api.openai.com", "/v1/chat/completions?x=1");
-        assert_eq!(m(&openai).as_deref(), Some("/v1/chat/completions"));
-        assert_eq!(m(&block(b"POST", "noise.internal", "/p")), None);
-        assert_eq!(
-            m(&block(b"GET", "api.openai.com", "/v1/chat/completions")),
-            None
+        assert!(matches!(
+            m(&openai),
+            Some(Matched::Create { path, record_only: false }) if path == "/v1/chat/completions"
+        ));
+        // A Managed Agents session POST is matched as record-only.
+        let session = block(b"POST", "api.anthropic.com", "/v1/sessions");
+        assert!(matches!(
+            m(&session),
+            Some(Matched::Create { path, record_only: true }) if path == "/v1/sessions"
+        ));
+        assert!(m(&block(b"POST", "noise.internal", "/p")).is_none());
+        // A background poll: GET /v1/responses/{id} to a provider host, query stripped.
+        assert!(matches!(
+            m(&block(b"GET", "api.openai.com", "/v1/responses/resp_1?stream=true")),
+            Some(Matched::Poll { id, .. }) if &*id == "resp_1"
+        ));
+        // Not a poll: no id, a non-provider host, or a GET on another provider path (stored object).
+        assert!(m(&block(b"GET", "api.openai.com", "/v1/responses/")).is_none());
+        assert!(m(&block(b"GET", "noise.internal", "/v1/responses/resp_1")).is_none());
+        assert!(
+            m(&block(
+                b"GET",
+                "api.openai.com",
+                "/v1/chat/completions/chatcmpl-1"
+            ))
+            .is_none()
         );
     }
 
@@ -502,7 +615,10 @@ mod tests {
             let mut on = |event| match event {
                 H2Event::Detected { .. } => detected += 1,
                 H2Event::Recorded { .. } => recorded += 1,
-                H2Event::Unparsed { .. } | H2Event::Resynced => {}
+                H2Event::Deferred { .. }
+                | H2Event::Poll { .. }
+                | H2Event::Unparsed { .. }
+                | H2Event::Resynced => {}
             };
             for chunk in c2s.chunks(step) {
                 conn.feed(LlmDirection::Write, chunk, H2Gap::None, &mut on);
@@ -546,7 +662,10 @@ mod tests {
                     reason: UnparsedReason::ResponseTooLarge,
                 } => big += 1,
                 H2Event::Unparsed { .. } => closed += 1,
-                H2Event::Detected { .. } | H2Event::Resynced => {}
+                H2Event::Detected { .. }
+                | H2Event::Deferred { .. }
+                | H2Event::Poll { .. }
+                | H2Event::Resynced => {}
             };
             conn.feed(LlmDirection::Write, PREFACE, H2Gap::None, &mut on);
             conn.feed(LlmDirection::Write, &req(1), H2Gap::None, &mut on);
@@ -597,6 +716,59 @@ mod tests {
         reads.extend(std::iter::repeat_n((LlmDirection::Read, chunk), n));
         reads.push((LlmDirection::Read, frame(0, 0x1, 1, b"")));
         assert_eq!(drive(&reads), (0, 0, 1));
+    }
+
+    #[test]
+    fn a_managed_agents_session_stream_is_counted_agent_session_not_recorded() {
+        let session_req = |stream, path: &[u8]| {
+            let block = [
+                lit(b":method", b"POST"),
+                lit(b":authority", b"api.anthropic.com"),
+                lit(b":path", path),
+            ]
+            .concat();
+            frame(1, 0x4 | 0x1, stream, &block)
+        };
+        let head = |stream| frame(1, 0x4, stream, &lit(b":status", b"200"));
+        // Stream 1's body carries a cumulative session total; it must not be recorded as a message.
+        let session_body = frame(
+            0,
+            0x1,
+            1,
+            b"{\"usage\":{\"input_tokens\":5000,\"output_tokens\":3200,\"list_cost\":{\"amount\":\"187\"}}}",
+        );
+        // Stream 3's events send is acked with no usage; it is still counted, completion being the signal.
+        let ack_body = frame(0, 0x1, 3, b"{\"data\":[{\"id\":\"evt_1\"}]}");
+
+        let mut conn = H2Conn::new();
+        let (mut recorded, mut agent) = (0, 0);
+        {
+            let mut on = |event| match event {
+                H2Event::Recorded { .. } => recorded += 1,
+                H2Event::Unparsed {
+                    reason: UnparsedReason::AgentSession,
+                } => agent += 1,
+                _ => {}
+            };
+            conn.feed(LlmDirection::Write, PREFACE, H2Gap::None, &mut on);
+            conn.feed(
+                LlmDirection::Write,
+                &session_req(1, b"/v1/sessions"),
+                H2Gap::None,
+                &mut on,
+            );
+            conn.feed(
+                LlmDirection::Write,
+                &session_req(3, b"/v1/sessions/sess_1/events"),
+                H2Gap::None,
+                &mut on,
+            );
+            conn.feed(LlmDirection::Read, &head(1), H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Read, &session_body, H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Read, &head(3), H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Read, &ack_body, H2Gap::None, &mut on);
+        }
+        assert_eq!((recorded, agent), (0, 2));
     }
 
     /// Opens stream 1 and feeds it `response` reads, returning the live `H2Conn` for an idle-sweep check.
@@ -803,5 +975,79 @@ mod tests {
             conn.feed(LlmDirection::Read, &data_run(7, junk), H2Gap::None, &mut on);
         }
         assert_eq!((rec, headers_lost), (1, 1));
+    }
+
+    /// A provider request with END_STREAM for `method path` on `stream` (no request body).
+    fn req_full(method: &[u8], path: &[u8], stream: u32) -> Vec<u8> {
+        let block = [
+            lit(b":method", method),
+            lit(b":authority", b"api.openai.com"),
+            lit(b":path", path),
+        ]
+        .concat();
+        frame(1, 0x4 | 0x1, stream, &block)
+    }
+
+    #[test]
+    fn a_queued_background_create_emits_deferred() {
+        // A POST /v1/responses whose response is a queued background object: its id is deferred, not recorded.
+        let head = frame(1, 0x4, 1, &lit(b":status", b"200"));
+        let queued =
+            br#"{"id":"resp_bg1","object":"response","status":"queued","background":true}"#;
+        let mut conn = H2Conn::new();
+        let (mut deferred, mut recorded) = (None, 0);
+        {
+            let mut on = |e| match e {
+                H2Event::Deferred { id, .. } => deferred = Some(id),
+                H2Event::Recorded { .. } => recorded += 1,
+                _ => {}
+            };
+            conn.feed(LlmDirection::Write, PREFACE, H2Gap::None, &mut on);
+            conn.feed(
+                LlmDirection::Write,
+                &req_full(b"POST", b"/v1/responses", 1),
+                H2Gap::None,
+                &mut on,
+            );
+            conn.feed(LlmDirection::Read, &head, H2Gap::None, &mut on);
+            conn.feed(
+                LlmDirection::Read,
+                &frame(0, 0x1, 1, queued),
+                H2Gap::None,
+                &mut on,
+            );
+        }
+        assert_eq!((deferred.as_deref(), recorded), (Some("resp_bg1"), 0));
+    }
+
+    #[test]
+    fn a_responses_poll_emits_its_result_against_the_id() {
+        // A GET /v1/responses/{id} is a poll: its completed body is surfaced as the result, not recorded here.
+        let head = frame(1, 0x4, 1, &lit(b":status", b"200"));
+        let done = br#"{"id":"resp_bg1","object":"response","status":"completed","background":true,"usage":{"input_tokens":40,"output_tokens":120,"total_tokens":160,"input_tokens_details":{"cached_tokens":0}}}"#;
+        let mut conn = H2Conn::new();
+        let mut poll = None;
+        {
+            let mut on = |e| {
+                if let H2Event::Poll { id, usage, .. } = e {
+                    poll = Some((id, usage.map(|u| (u.prompt_tokens, u.completion_tokens))));
+                }
+            };
+            conn.feed(LlmDirection::Write, PREFACE, H2Gap::None, &mut on);
+            conn.feed(
+                LlmDirection::Write,
+                &req_full(b"GET", b"/v1/responses/resp_bg1", 1),
+                H2Gap::None,
+                &mut on,
+            );
+            conn.feed(LlmDirection::Read, &head, H2Gap::None, &mut on);
+            conn.feed(
+                LlmDirection::Read,
+                &frame(0, 0x1, 1, done),
+                H2Gap::None,
+                &mut on,
+            );
+        }
+        assert_eq!(poll, Some(("resp_bg1".into(), Some((40, 120)))));
     }
 }

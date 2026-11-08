@@ -47,6 +47,11 @@ impl ConfigurableProvider {
     /// Parse usage from response JSON using configured paths
     pub fn parse_usage(&self, json: &Value) -> Option<UsageInfo> {
         let response = &self.config.response;
+        if let Some(want) = &response.identity.root_object
+            && text(json, "object").as_deref() != Some(want)
+        {
+            return None;
+        }
         let usage = get_nested_value(json, &response.tokens.usage_path)?;
         if !is_own_usage(&response.identity, usage) {
             return None;
@@ -130,6 +135,7 @@ impl ConfigurableProvider {
             cache_write_tokens: cache.write,
             cache_write_long_ttl_tokens: cache.write_long_ttl,
             model: text(root, &response.identity.model_path),
+            operation: self.config.operation,
             service_tier: optional_text(root, &pricing.service_tier_path),
             speed: optional_text(usage, &pricing.speed),
             inference_geo: optional_text(usage, &pricing.inference_geo),

@@ -1,4 +1,8 @@
 {{- if .Values.serviceAccount.create -}}
+{{- $plaintext := false -}}
+{{- range .Values.builtinProbes.llm.providers -}}
+  {{- if .plaintext }}{{- $plaintext = true }}{{- end -}}
+{{- end -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -13,4 +17,14 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get"]
+{{- if $plaintext }}
+  # Plaintext capture resolves a configured provider's in-cluster hosts to Service ClusterIPs and
+  # ready pod IPs; granted only when a provider sets `plaintext`.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+{{- end }}
 {{- end }}
