@@ -28,7 +28,7 @@ struct ProviderUrls {
 #[test]
 fn test_default_providers() {
     let registry = ProviderRegistry::with_defaults();
-    assert_eq!(registry.providers.len(), 10);
+    assert_eq!(registry.providers.len(), 12);
 }
 
 // `with_defaults` panics only on a parse error, and serde skips unknown keys, so a key typo would go unnoticed.
@@ -86,10 +86,14 @@ fn test_default_provider_hosts() {
         "aiplatform.*.rep.googleapis.com",
     ];
     let gemini = ["generativelanguage.googleapis.com", vertex[0], vertex[1]];
-    let expected: [&[&str]; 10] = [
+    // Image and transcription entries are first-party OpenAI only; Azure/Bedrock media is a follow-up.
+    let media = ["api.openai.com"];
+    let expected: [&[&str]; 12] = [
         &openai,
         &openai,
+        &media,
         &openai,
+        &media,
         &[
             "api.anthropic.com",
             "aws-external-anthropic.*.api.aws",
@@ -305,6 +309,8 @@ fn test_user_providers_are_added_to_the_defaults() {
             "openai",
             "openai",
             "openai",
+            "openai",
+            "openai",
             "anthropic",
             "gemini",
             "gemini",
@@ -348,6 +354,8 @@ fn test_user_provider_replaces_defaults_with_its_name_in_their_place() {
             "openai",
             "openai",
             "openai",
+            "openai",
+            "openai",
             "anthropic",
             "anthropic",
             "gemini",
@@ -358,7 +366,7 @@ fn test_user_provider_replaces_defaults_with_its_name_in_their_place() {
             "ollama"
         ]
     );
-    assert_eq!(registry.providers[4].paths, [":rawPredict$"]);
+    assert_eq!(registry.providers[6].paths, [":rawPredict$"]);
     assert_eq!(
         provider_for(&registry, "api.anthropic.com/v1/messages"),
         None

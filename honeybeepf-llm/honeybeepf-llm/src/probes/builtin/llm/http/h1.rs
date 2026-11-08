@@ -495,6 +495,31 @@ mod tests {
     }
 
     #[test]
+    fn images_and_transcriptions_are_detected_by_post() {
+        for path in [
+            "/v1/images/generations",
+            "/v1/images/edits",
+            "/v1/audio/transcriptions",
+            "/v1/audio/translations",
+        ] {
+            let req = format!("POST {path} HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{{}}");
+            assert_eq!(
+                Http11Parser
+                    .detect_request(req.as_bytes())
+                    .map(|d| d.path)
+                    .as_deref(),
+                Some(path),
+                "{path}"
+            );
+        }
+        // Speech (TTS) is not a recorded path yet, and a GET is not a generation call.
+        let tts = b"POST /v1/audio/speech HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{}";
+        assert!(Http11Parser.detect_request(tts).is_none());
+        let get = b"GET /v1/images/generations HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
+        assert!(Http11Parser.detect_request(get).is_none());
+    }
+
+    #[test]
     fn only_post_to_a_generation_path_is_detected() {
         let post = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{}";
         assert!(Http11Parser.detect_request(post).is_some());
