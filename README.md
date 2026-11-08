@@ -146,7 +146,8 @@ servers need no `response` block, and the request's `Host` header must match one
 
 HTTP/2 is recorded from the start of a connection. A connection the agent joins mid-stream is still recorded, but
 with the provider host unknown; a request head lost to a capture gap counts under
-`llm_responses_unparsed_total{reason="headers_lost"}`. Node.js 26 uses HTTP/2 by default (its built-in `fetch`,
+`llm_responses_unparsed_total{reason="headers_lost"}`. A Responses call made with `"background": true` is linked
+to the later poll that carries its usage over HTTP/2 as well as HTTP/1.1. Node.js 26 uses HTTP/2 by default (its built-in `fetch`,
 undici 8), so the official OpenAI and Anthropic Node SDKs now record with no change, checked with Node.js 26.13.0,
 `openai` 7.39.0 and `@anthropic-ai/sdk` 0.135.0, JSON and streaming.
 
