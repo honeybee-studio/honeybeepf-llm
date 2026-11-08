@@ -194,6 +194,20 @@ fn test_path_matches_wildcard_before_anchor() {
         "/model/amazon.titan-text-express-v1/invoke",
         "anthropic.*/invoke$"
     ));
+    // Vertex Interactions: /locations/{l}/interactions, but not its GET polling path, and the
+    // Gemini API path (no /locations/ segment) must not fall into the Vertex pattern.
+    assert!(path_matches(
+        "/v1/projects/p/locations/global/interactions",
+        "/locations/*/interactions$"
+    ));
+    assert!(!path_matches(
+        "/v1/projects/p/locations/global/interactions/int_123",
+        "/locations/*/interactions$"
+    ));
+    assert!(!path_matches(
+        "/v1beta/interactions",
+        "/locations/*/interactions$"
+    ));
 }
 
 // Foundry serves OpenAI and Anthropic routes on one host, so only the path picks the provider.
