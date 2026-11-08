@@ -5,6 +5,92 @@ pub const MAX_SSL_BUF_SIZE: usize = 4096;
 pub const MAX_SSL_FRAGMENTS: usize = 4;
 pub const MAX_SSL_CAPTURE: usize = MAX_SSL_BUF_SIZE * MAX_SSL_FRAGMENTS;
 
+/// Key into the plaintext endpoint map: destination IPv4 and port in network byte order, so the
+/// kernel (`remote_ip4` is already network order, port via [`sock_ops_remote_port`]) and userspace
+/// (`to_be()` on both) build the same bits.
+pub const fn plain_endpoint_key(ip_be: u32, port_be: u16) -> u64 {
+    ((ip_be as u64) << 16) | (port_be as u64)
+}
+
+/// Network-order destination port from a context's `remote_port`: both `bpf_sock_ops` and
+/// `sk_msg_md` pack the be16 port into the high 16 bits (little-endian `skc_dport << 16`), so the
+/// low bits are zero. Recovers the htons(port) bits a userspace key is built from.
+pub const fn sock_ops_remote_port(remote_port: u32) -> u16 {
+    (u32::from_be(remote_port) as u16).to_be()
+}
+
+/// Source port from a context's `local_port`: both `bpf_sock_ops` and `sk_msg_md` store it in host
+/// byte order, so the low 16 bits are the port number.
+pub const fn flow_local_port(local_port: u32) -> u16 {
+    local_port as u16
+}
+
+/// 4-tuple identifying a TCP connection, built identically from `bpf_sock_ops` (at connect) and
+/// `sk_msg_md` (at send) so both key `PLAIN_CONNS` the same without the socket cookie (a helper
+/// `sk_msg` may not call). No padding: four fields pack to 12 bytes, so the key bytes are stable.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PlainFlowKey {
+    pub local_ip4: u32,
+    pub remote_ip4: u32,
+    pub local_port: u16,
+    pub remote_port: u16,
+}
+
+/// Build the flow key from a context's raw 4-tuple fields; `*_ip4` are network order on both
+/// contexts, and the ports are normalized by [`sock_ops_remote_port`] and [`flow_local_port`].
+pub const fn plain_flow_key(
+    local_ip4: u32,
+    remote_ip4: u32,
+    local_port: u32,
+    remote_port: u32,
+) -> PlainFlowKey {
+    PlainFlowKey {
+        local_ip4,
+        remote_ip4,
+        local_port: flow_local_port(local_port),
+        remote_port: sock_ops_remote_port(remote_port),
+    }
+}
+
+/// Plaintext parser stream id, built the same way on send and receive. The parser key is `(pid, id)`,
+/// and within one pid `remote_ip4`, `local_port` and `remote_port` already identify the connection,
+/// so `local_ip4` is left out; packing instead of hashing keeps the value exact to test.
+pub const fn plain_stream_id(key: &PlainFlowKey) -> u64 {
+    ((key.remote_ip4 as u64) << 32) | ((key.local_port as u64) << 16) | key.remote_port as u64
+}
+
+/// Full max-entries the eBPF object declares for the plaintext maps; the loader keeps them this big
+/// only when capture is on. Hash maps prealloc, so PLAIN_CONNS alone costs ~6.5 MB at full size.
+pub const PLAIN_ENDPOINTS_ENTRIES: u32 = 8192;
+pub const PLAIN_SOCKS_ENTRIES: u32 = 65536;
+pub const PLAIN_CONNS_ENTRIES: u32 = 65536;
+
+/// Load-time max-entries for the three plaintext hash/sock maps.
+pub struct PlainMapEntries {
+    pub endpoints: u32,
+    pub socks: u32,
+    pub conns: u32,
+}
+
+/// Full sizes when plaintext capture is configured; one slot each when off, so a TLS-only node does
+/// not prealloc the ~8 MB these maps cost at full size.
+pub const fn plain_map_entries(configured: bool) -> PlainMapEntries {
+    if configured {
+        PlainMapEntries {
+            endpoints: PLAIN_ENDPOINTS_ENTRIES,
+            socks: PLAIN_SOCKS_ENTRIES,
+            conns: PLAIN_CONNS_ENTRIES,
+        }
+    } else {
+        PlainMapEntries {
+            endpoints: 1,
+            socks: 1,
+            conns: 1,
+        }
+    }
+}
+
 // Indices into the LLM_STATS per-CPU counter map (kernel increments, userspace sums).
 pub const LLM_STAT_ENTER: u32 = 0; // entry uprobe hits (SSL_read/write/_ex, SSL_do_handshake, SSL_free)
 pub const LLM_STAT_SUBMIT: u32 = 1; // events submitted to SSL_EVENTS (every fragment)
@@ -251,3 +337,69 @@ impl Default for FileAccessEvent {
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for FileAccessEvent {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_port_reads_the_high_16_bits() {
+        // Port 18090 = 0x46AA; the kernel stores htons(18090)=0xAA46 in the high half.
+        assert_eq!(sock_ops_remote_port(0xAA46_0000), 0xAA46);
+        // And the key then matches a userspace-built one (ip network-order, port htons).
+        let ip_be = u32::from_be_bytes([127, 0, 0, 1]).to_be();
+        assert_eq!(
+            plain_endpoint_key(ip_be, sock_ops_remote_port(0xAA46_0000)),
+            plain_endpoint_key(ip_be, 18090u16.to_be()),
+        );
+    }
+
+    #[test]
+    fn flow_key_normalizes_ports_from_raw_context_fields() {
+        // Raw 4-tuple as both contexts present it: ip4 network order, remote_port be16 in the high
+        // 16 bits, local_port host order. 10.0.0.5:33000 -> 127.0.0.1:18090.
+        let local_ip = u32::from_be_bytes([10, 0, 0, 5]).to_be();
+        let remote_ip = u32::from_be_bytes([127, 0, 0, 1]).to_be();
+        let key = plain_flow_key(local_ip, remote_ip, 33000, 0xAA46_0000);
+        assert_eq!(key.remote_port, 18090u16.to_be()); // htons(18090) = 0xAA46
+        assert_eq!(key.local_port, 33000);
+        assert_eq!(key.local_ip4, local_ip);
+        assert_eq!(key.remote_ip4, remote_ip);
+    }
+
+    #[test]
+    fn stream_id_packs_remote_ip_and_ports_and_ignores_local_ip() {
+        let remote_ip = u32::from_be_bytes([127, 0, 0, 1]).to_be();
+        let key = plain_flow_key(
+            u32::from_be_bytes([10, 0, 0, 5]).to_be(),
+            remote_ip,
+            33000,
+            0xAA46_0000,
+        );
+        let want = ((remote_ip as u64) << 32) | (33000u64 << 16) | 18090u16.to_be() as u64;
+        assert_eq!(plain_stream_id(&key), want);
+        // Same connection from the other local_ip4 still yields the same id (local_ip4 is dropped).
+        let other = plain_flow_key(
+            u32::from_be_bytes([10, 0, 0, 9]).to_be(),
+            remote_ip,
+            33000,
+            0xAA46_0000,
+        );
+        assert_eq!(plain_stream_id(&other), want);
+    }
+
+    #[test]
+    fn plain_map_entries_are_one_slot_when_off_and_full_when_on() {
+        let off = plain_map_entries(false);
+        assert_eq!((off.endpoints, off.socks, off.conns), (1, 1, 1));
+        let on = plain_map_entries(true);
+        assert_eq!(
+            (on.endpoints, on.socks, on.conns),
+            (
+                PLAIN_ENDPOINTS_ENTRIES,
+                PLAIN_SOCKS_ENTRIES,
+                PLAIN_CONNS_ENTRIES
+            ),
+        );
+    }
+}

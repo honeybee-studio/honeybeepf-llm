@@ -54,9 +54,27 @@ impl HoneyBeeEngine {
             tail_call_ok == 1
         );
         // Not required to exist: test objects without the LLM programs still load.
-        let mut bpf = EbpfLoader::new()
-            .set_global("TAIL_CALL_OK", &tail_call_ok, false)
-            .load(bytecode)?;
+        let mut loader = EbpfLoader::new();
+        loader.set_global("TAIL_CALL_OK", &tail_call_ok, false);
+        // The plaintext hash/sock maps prealloc ~8 MB at full size (PLAIN_CONNS ~6.5 MB); keep them
+        // at one slot unless capture is configured, which only the k8s build resolves endpoints for.
+        #[cfg(feature = "k8s")]
+        let plaintext_on = !plaintext::configured_specs().is_empty();
+        #[cfg(not(feature = "k8s"))]
+        let plaintext_on = false;
+        let plain_maps = honeybeepf_llm_common::plain_map_entries(plaintext_on);
+        loader.set_max_entries("PLAIN_ENDPOINTS", plain_maps.endpoints);
+        loader.set_max_entries("PLAIN_SOCKS", plain_maps.socks);
+        loader.set_max_entries("PLAIN_CONNS", plain_maps.conns);
+        // When on, give PLAIN_EVENTS its full ring and raise the verifier log level so a
+        // socket-program rejection prints its full cause.
+        #[cfg(feature = "k8s")]
+        if plaintext_on {
+            loader.set_max_entries("PLAIN_EVENTS", plaintext::PLAIN_EVENTS_FULL_BYTES);
+            loader
+                .verifier_log_level(aya::VerifierLogLevel::VERBOSE | aya::VerifierLogLevel::STATS);
+        }
+        let mut bpf = loader.load(bytecode)?;
 
         // Initialize the eBPF Logger only in debug mode
         if settings.debug.unwrap_or(false) {
@@ -130,6 +148,20 @@ impl HoneyBeeEngine {
                 info!(
                     "K8S_NODE_NAME and hostname not found. Pod resolution disabled (running outside K8s?)."
                 );
+            }
+        }
+
+        // Plaintext (non-TLS) capture: attach socket-level BPF only when endpoints are configured
+        // and the node has a cgroup v2 hierarchy on 5.10+; otherwise it stays off and logs why.
+        #[cfg(feature = "k8s")]
+        {
+            let specs = plaintext::configured_specs();
+            if !specs.is_empty() {
+                let resolver = self.resolver.clone();
+                match plaintext::start(&mut self.bpf, specs, resolver).await {
+                    Ok(()) => info!("Plaintext capture enabled"),
+                    Err(e) => warn!("Plaintext capture disabled: {}", e),
+                }
             }
         }
 
