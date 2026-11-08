@@ -201,6 +201,23 @@ fn endpoint_key_encodes_ipv4_and_skips_ipv6() {
 }
 
 #[test]
+fn connect4_builds_the_same_endpoint_key_as_userspace() {
+    // connect4 reads bpf_sock_addr: user_ip4 is network order, and user_port's low 16 bits are the
+    // network-order (htons) port — unlike sock_ops, which packs the port into the high 16 bits.
+    let addr: std::net::SocketAddr = "10.0.0.1:8000".parse().expect("addr");
+    let user_ip4 = u32::from(Ipv4Addr::new(10, 0, 0, 1)).to_be();
+    let user_port: u32 = 8000u16.to_be() as u32;
+    let connect4_key = honeybeepf_llm_common::plain_endpoint_key(user_ip4, user_port as u16);
+    assert_eq!(Some(connect4_key), endpoint_key(&addr));
+    // Applying the sock_ops high-bit recovery to user_port would build the wrong key.
+    let wrong = honeybeepf_llm_common::plain_endpoint_key(
+        user_ip4,
+        honeybeepf_llm_common::sock_ops_remote_port(user_port),
+    );
+    assert_ne!(Some(wrong), endpoint_key(&addr));
+}
+
+#[test]
 fn cgroup_gate_picks_unified_then_hybrid_else_none() {
     let unified = "cgroup2 /sys/fs/cgroup cgroup2 rw 0 0";
     assert_eq!(

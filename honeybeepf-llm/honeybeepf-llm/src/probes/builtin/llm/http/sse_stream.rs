@@ -2,6 +2,7 @@
 
 use honeybeepf_llm_core::types::UsageInfo;
 
+use super::encoding::SseDecoder;
 use super::h1::{self, Framing};
 use super::json_ends::BodyWalk;
 use super::sse::SseCursor;
@@ -11,12 +12,24 @@ use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
 pub struct SseStream {
     walk: BodyWalk,
     events: SseCursor,
+    /// Set when the body carries a content coding, undone incrementally before the events are read.
+    decoder: Option<SseDecoder>,
 }
 
 impl SseStream {
     /// Takes over a buffered HTTP/1.1 SSE response sent without a content coding.
     pub fn start(buffer: &[u8]) -> Option<Self> {
         let (framing, body) = h1::plain_sse_body(buffer)?;
+        Self::take_over(framing, None, body)
+    }
+
+    /// Takes over a buffered HTTP/1.1 SSE response under a single content coding.
+    pub fn start_encoded(buffer: &[u8]) -> Option<Self> {
+        let (framing, body, coding) = h1::encoded_sse_body(buffer)?;
+        Self::take_over(framing, Some(SseDecoder::new_for(&coding)?), body)
+    }
+
+    fn take_over(framing: Framing, decoder: Option<SseDecoder>, body: &[u8]) -> Option<Self> {
         let length = match framing {
             Framing::Length(len) => Some(len),
             Framing::Chunked => None,
@@ -26,15 +39,28 @@ impl SseStream {
         let mut stream = Self {
             walk: BodyWalk::new(length),
             events: SseCursor::default(),
+            decoder,
         };
         stream.feed(body).then_some(stream)
     }
 
     /// Reads more body bytes; false once the framing broke or one line outgrew the buffer limit.
     pub fn feed(&mut self, data: &[u8]) -> bool {
-        let Self { walk, events } = self;
-        let followed = walk.feed(data, &mut |data| events.feed(data));
-        followed && events.partial_len() <= MAX_RESPONSE_BUFFER_SIZE
+        let Self {
+            walk,
+            events,
+            decoder,
+        } = self;
+        let followed = walk.feed(data, &mut |body| match decoder {
+            Some(dec) => dec.push(body, &mut |decoded| {
+                events.feed(decoded);
+                events.partial_len() <= MAX_RESPONSE_BUFFER_SIZE
+            }),
+            None => events.feed(body),
+        });
+        followed
+            && decoder.as_ref().is_none_or(SseDecoder::healthy)
+            && events.partial_len() <= MAX_RESPONSE_BUFFER_SIZE
     }
 
     /// The merged usage once the events read so far ended the stream.
@@ -129,5 +155,88 @@ mod tests {
         ] {
             assert!(SseStream::start(head.as_bytes()).is_none(), "{head:?}");
         }
+    }
+
+    use flate2::Compression;
+    use flate2::write::{GzEncoder, ZlibEncoder};
+    use std::io::Write;
+
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        let mut e = GzEncoder::new(Vec::new(), Compression::fast());
+        e.write_all(data).expect("gzip");
+        e.finish().expect("gzip")
+    }
+
+    fn zlib(data: &[u8]) -> Vec<u8> {
+        let mut e = ZlibEncoder::new(Vec::new(), Compression::fast());
+        e.write_all(data).expect("zlib");
+        e.finish().expect("zlib")
+    }
+
+    fn zstd(data: &[u8]) -> Vec<u8> {
+        ruzstd::encoding::compress_to_vec(data, ruzstd::encoding::CompressionLevel::Fastest)
+    }
+
+    /// Many filler events, one usage event, then `[DONE]`: a body past the response cap.
+    fn big_sse() -> Vec<u8> {
+        let filler = b"data: {\"choices\":[{\"delta\":{\"content\":\"pad\"}}]}\n\n";
+        let reps = MAX_RESPONSE_BUFFER_SIZE / filler.len() + 64;
+        let mut body = filler.repeat(reps);
+        body.extend_from_slice(
+            b"data: {\"model\":\"gpt-4o\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\n",
+        );
+        body.extend_from_slice(b"data: [DONE]\n\n");
+        body
+    }
+
+    fn encoded_head(coding: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Encoding: {coding}\r\n\
+             Transfer-Encoding: chunked\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// Stream a chunked, content-coded SSE body in small reads; None if a read broke the stream.
+    fn stream_tokens(coding: &str, compressed: &[u8]) -> Option<(u64, u64)> {
+        let mut stream = SseStream::start_encoded(&encoded_head(coding))?;
+        let body = chunked(compressed, 4096);
+        for read in body.chunks(1500) {
+            if !stream.feed(read) {
+                return None;
+            }
+        }
+        tokens(stream.usage())
+    }
+
+    #[test]
+    fn every_codec_streams_a_compressed_sse_past_16mb() {
+        let sse = big_sse();
+        assert!(
+            sse.len() > MAX_RESPONSE_BUFFER_SIZE,
+            "decoded must exceed the cap"
+        );
+        assert_eq!(stream_tokens("gzip", &gzip(&sse)), Some((11, 4)));
+        assert_eq!(stream_tokens("deflate", &zlib(&sse)), Some((11, 4)));
+        assert_eq!(stream_tokens("zstd", &zstd(&sse)), Some((11, 4)));
+        // No in-crate brotli encoder here; the fixture decodes to a varied >16 MB SSE (testdata/README.md).
+        let br = include_bytes!("testdata/sse-over-16mb.br");
+        assert_eq!(stream_tokens("br", br), Some((11, 4)));
+    }
+
+    #[test]
+    fn a_decompression_bomb_is_refused_at_the_cap() {
+        // 17 MB with no event boundary: the cursor's partial line passes the cap, so the stream stops.
+        let bomb = vec![b'a'; 17 * 1024 * 1024];
+        assert_eq!(stream_tokens("gzip", &gzip(&bomb)), None);
+        assert_eq!(stream_tokens("zstd", &zstd(&bomb)), None);
+    }
+
+    #[test]
+    fn encoded_start_rejects_multiple_or_unknown_codings() {
+        // Only a single, known coding is streamed past the limit; others stay response_too_large.
+        assert!(SseStream::start_encoded(&encoded_head("gzip, zstd")).is_none());
+        assert!(SseStream::start_encoded(&encoded_head("compress")).is_none());
+        assert!(SseStream::start_encoded(HEAD.as_bytes()).is_none());
     }
 }
