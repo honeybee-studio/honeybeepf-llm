@@ -79,6 +79,10 @@ gemini = [
   { url = "generativelanguage.googleapis.com/v1beta/interactions", reason = "Interactions API" },
   { url = "generativelanguage.googleapis.com/v1beta/interactions?alt=sse", reason = "Interactions API, query ignored by the anchor" },
   { url = "generativelanguage.googleapis.com/v1/interactions", reason = "Interactions API, stable v1" },
+  # Embeddings (#79)
+  { url = "generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent", reason = "Gemini API embeddings" },
+  { url = "generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents", reason = "Gemini API batch embeddings" },
+  { url = "aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/google/models/gemini-embedding-001:embedContent", reason = "Vertex embeddings" },
 ]
 
 none = [

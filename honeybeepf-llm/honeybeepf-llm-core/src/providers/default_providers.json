@@ -105,6 +105,26 @@
     },
     {
       "name": "gemini",
+      "note": "Embeddings (#79): Gemini API and Vertex :embedContent (same EmbedContentResponse), plus :batchEmbedContents. Input tokens only (no candidates field), so completion_optional. usageMetadata is often absent (gemini-embedding-001, and batch carries none); a framed response with no usage is counted as usage_absent, not recorded. Listed before the chat entry and guarded by required_root_field 'embedding' (the single-embedding envelope): the chat entry also reads usageMetadata.promptTokenCount with completion_optional, so without the guard it would claim an embeddings body. The response has no model field, so the model stays unknown (gemini embedding pricing is a follow-up). operation=embeddings tags the metric rows.",
+      "hosts": [
+        "generativelanguage.googleapis.com",
+        "aiplatform.googleapis.com",
+        "aiplatform.*.rep.googleapis.com"
+      ],
+      "paths": [":embedContent$", ":batchEmbedContents$"],
+      "operation": "embeddings",
+      "response": {
+        "usage_path": "usageMetadata",
+        "prompt_tokens": "promptTokenCount",
+        "completion_tokens": "candidatesTokenCount",
+        "completion_optional": true,
+        "model_path": "modelVersion",
+        "required_root_field": "embedding"
+      },
+      "request_extractor": "none"
+    },
+    {
+      "name": "gemini",
       "note": "Hosts: Gemini API, Vertex AI global and {region}-aiplatform, Vertex AI multi-region (us, eu). Path matching is case-sensitive: the streaming method is :streamGenerateContent. URL context and code execution results are billed as input outside promptTokenCount.",
       "hosts": [
         "generativelanguage.googleapis.com",
