@@ -201,6 +201,8 @@ fn emit_recv<const N: usize>(
     truncated: u8,
     stream: u64,
 ) -> bool {
+    // The mask below needs a power-of-two bucket to bound the copy length.
+    const { assert!(N.is_power_of_two()) };
     let Some(mut slot) = PLAIN_EVENTS.reserve::<PlainEvent<N>>(0) else {
         return false;
     };
@@ -215,31 +217,38 @@ fn emit_recv<const N: usize>(
         offset,
         stream,
     );
-    // This fragment's bytes, capped to the bucket. The dispatch already keeps it <= N, but the
-    // compiler spills it and the verifier loses that bound; a volatile reload keeps the min(.., N).
-    let want = size.saturating_sub(offset) as usize;
-    // SAFETY: &want is a valid initialized local.
-    let n = core::cmp::min(unsafe { core::ptr::read_volatile(&want) }, N);
+    // This fragment's bytes, capped to the bucket (the dispatch already keeps it <= N).
+    let n = core::cmp::min(size.saturating_sub(offset) as usize, N);
     // bpf_skb_load_bytes rejects a zero-length read, so bail on an empty fragment.
     if n == 0 {
         ev.header.buf_filled = 0;
         slot.discard(0);
         return false;
     }
-    // Call the helper directly, not aya's `load_bytes`: that re-mins the length with `skb->len`,
-    // whose lower bound of 0 the verifier keeps, so it rejects the read. The volatile reload plus
-    // clamp pins the length passed here to [1, N].
-    // SAFETY: &n is a valid initialized local.
-    let n = unsafe { core::ptr::read_volatile(&n) }.clamp(1, N);
-    let dst = &mut ev.buf[..n];
-    // SAFETY: `ctx.as_ptr()` is the live skb; `dst` is exactly `n` (1..=N) bytes of the reserved
-    // slot and `n` is the length passed, so the kernel write stays in bounds.
+    // Clamp to [1, N] in asm so the compiler cannot fold the mask back into a branch. The old
+    // verifier (5.10) reads the length as [1, N] from the AND with a constant, which it trusts, not
+    // from an `n != 0` branch it won't propagate to bpf_skb_load_bytes's length register.
+    let mut len = n;
+    // SAFETY: pure register arithmetic on `len`; `N` is a power of two, so `& (N - 1)` gives [0,
+    // N-1] and the `+ 1` gives [1, N]. No memory access or side effects.
+    unsafe {
+        core::arch::asm!(
+            "{v} -= 1",
+            "{v} &= {m}",
+            "{v} += 1",
+            v = inout(reg) len,
+            m = const N - 1,
+        );
+    }
+    // Raw buffer pointer, not an `ev.buf[..len]` slice: the slice bounds check folds back into the
+    // branch the asm avoids. Call the helper directly, not aya's `load_bytes` (re-mins with skb->len).
+    // SAFETY: live skb; `ev.buf` is N bytes and `len` is [1, N], so the kernel write stays in bounds.
     let loaded = unsafe {
         bpf_skb_load_bytes(
             ctx.as_ptr(),
             offset,
-            dst.as_mut_ptr() as *mut core::ffi::c_void,
-            n as u32,
+            ev.buf.as_mut_ptr() as *mut core::ffi::c_void,
+            len as u32,
         )
     };
     if loaded != 0 {
