@@ -32,6 +32,12 @@ openai = [
   { url = "api.openai.com/openai/deployments/d1/chat/completions?api-version=2026-10-01", reason = "Azure-style path on any OpenAI host" },
   # Basic detection
   { url = "api.openai.com/v1/chat/completions", reason = "OpenAI chat" },
+  # Media endpoints: first-party OpenAI only (totals recorded; per-modality split is a follow-up)
+  { url = "api.openai.com/v1/images/generations", reason = "image generation" },
+  { url = "api.openai.com/v1/images/edits", reason = "image edit" },
+  { url = "eu.api.openai.com/v1/images/generations", reason = "image generation, regional domain" },
+  { url = "api.openai.com/v1/audio/transcriptions", reason = "transcription" },
+  { url = "api.openai.com/v1/audio/translations", reason = "translation" },
   # Embeddings (#79): a separate entry, operation=embeddings
   { url = "api.openai.com/v1/embeddings", reason = "OpenAI embeddings" },
   { url = "myres.openai.azure.com/openai/deployments/d1/embeddings?api-version=2024-10-21", reason = "Azure api-version embeddings" },
@@ -118,6 +124,11 @@ none = [
   { url = "aiplatform.googleapis.com/v1/projects/p/locations/global/interactions/int_123", reason = "Vertex Interactions retrieval/polling (GET), path continues past the anchor" },
   { url = "api.openai.com/v1/embeddings/x", reason = "path continues after /embeddings" },
   { url = "myres.openai.azure.com/openai/deployments/d1/audio/transcriptions?api-version=2024-10-21", reason = "Azure audio" },
+  { url = "api.openai.com/v1/audio/speech", reason = "TTS: usage shape unconfirmed, not recorded yet" },
+  { url = "myres.services.ai.azure.com/openai/v1/images/generations", reason = "Azure media: image entry is first-party hosts only" },
+  { url = "myres.openai.azure.com/openai/deployments/d/images/generations?api-version=2024-10-21", reason = "Azure deployments image route not matched" },
+  { url = "bedrock-mantle.us-east-1.api.aws/openai/v1/images/generations", reason = "Bedrock OpenAI-compatible media not matched" },
+  { url = "api.openai.com/v1/images/generations/img_1", reason = "path continues past the anchor" },
   { url = "myres.openai.azure.com/openai/v1/responses/resp_1", reason = "Azure v1 Responses retrieval" },
   { url = "myres.openai.azure.com/openai/responses/resp_1?api-version=2025-04-01-preview", reason = "Azure api-version Responses retrieval" },
   { url = "myres.openai.azure.com/openai/deployments/gpt-4o/responses/resp_1/cancel?api-version=2025-04-01-preview", reason = "Azure Responses cancel" },

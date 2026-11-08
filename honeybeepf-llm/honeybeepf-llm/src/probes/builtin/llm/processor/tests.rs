@@ -346,9 +346,11 @@ fn test_chat_after_non_llm_request_is_recorded() {
 }
 
 /// A multipart upload whose last body writes land after detection gave up at 4 KB, as httpx sends it.
+/// The path must stay a non-LLM one (file upload, not transcription, which is a recorded path):
+/// the point is a call recorded after an untracked upload.
 fn upload(p: &mut StreamProcessor, expect_continue: bool) -> Vec<Outcome> {
     let head = format!(
-        "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: api.openai.com\r\n\
+        "POST /v1/files HTTP/1.1\r\nHost: api.openai.com\r\n\
          Content-Type: multipart/form-data; boundary=b0\r\nContent-Length: 66614\r\n{}\r\n",
         if expect_continue {
             "Expect: 100-continue\r\n"
@@ -456,6 +458,55 @@ fn test_partial_response_is_not_usage_absent() {
     out.extend(send(&mut p, LlmDirection::Read, head, None));
     assert_eq!(unparsed(&out), [], "{out:?}");
     assert_eq!(count(&out, Outcome::Recorded), 0, "{out:?}");
+}
+
+// A usage-less transcription body (whisper-1, or a duration-billed model whose tokens are not read
+// here) carries no tokens, so the call counts as usage_absent ("seen, tokens unavailable") rather than
+// being dropped silently.
+#[test]
+fn test_transcription_without_usage_is_unparsed() {
+    let mut p = StreamProcessor::new();
+    let transcribe = b"POST /v1/audio/transcriptions HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{}";
+    let mut out = exchange(
+        &mut p,
+        transcribe,
+        &h1("application/json", r#"{"text":"hello"}"#),
+    );
+    out.extend(exchange(
+        &mut p,
+        MESSAGES_REQUEST,
+        &h1("application/json", MESSAGES_RESPONSE),
+    ));
+    assert_eq!(unparsed(&out), [UnparsedReason::UsageAbsent], "{out:?}");
+    assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+}
+
+// A recorded transcription can arrive as a large multipart upload (httpx spills past the 4 KB
+// detection window) followed by a usage-bearing response: it is recorded and the next call is too.
+#[test]
+fn test_transcription_upload_then_chat_is_recorded() {
+    let mut p = StreamProcessor::new();
+    let head = "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: api.openai.com\r\n\
+         Content-Type: multipart/form-data; boundary=b0\r\nContent-Length: 66614\r\n\r\n";
+    let mut out = send(&mut p, LlmDirection::Write, head.as_bytes(), None);
+    let part = b"--b0\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\r\n";
+    for body in [&part[..], &[0xAB; 65536], &[0xCD; 1000], b"\r\n--b0--\r\n"] {
+        out.extend(send(&mut p, LlmDirection::Write, body, None));
+    }
+    let resp = r#"{"text":"hi","usage":{"type":"tokens","input_tokens":14,"output_tokens":4,"total_tokens":18}}"#;
+    out.extend(send(
+        &mut p,
+        LlmDirection::Read,
+        &h1("application/json", resp),
+        None,
+    ));
+    out.extend(exchange(
+        &mut p,
+        MESSAGES_REQUEST,
+        &h1("application/json", MESSAGES_RESPONSE),
+    ));
+    assert_eq!(count(&out, Outcome::Recorded), 2, "{out:?}");
+    assert!(unparsed(&out).is_empty(), "{out:?}");
 }
 
 #[test]
