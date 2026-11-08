@@ -227,6 +227,7 @@ impl StreamProcessor {
                 direction,
                 data,
                 gap,
+                background,
                 pid,
                 #[cfg(feature = "k8s")]
                 pod_info,
@@ -241,6 +242,7 @@ impl StreamProcessor {
                 complete,
                 end,
                 direction,
+                background,
                 pid,
                 #[cfg(feature = "k8s")]
                 pod_info.as_ref(),
@@ -312,12 +314,14 @@ impl StreamProcessor {
     /// Classify a connection joined after its preface: no preface was seen, but the client bytes form a run
     /// of frame heads (HTTP/1.1, which starts with an uppercase method, never does). On a match it starts an
     /// HTTP/2 connection with both directions unknown and feeds what was buffered, returning its outcome.
+    #[allow(clippy::too_many_arguments)]
     fn detect_h2_midjoin(
         &mut self,
         data: &[u8],
         complete: bool,
         end: u32,
         direction: LlmDirection,
+        background: &mut BackgroundCalls,
         pid: u32,
         #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
     ) -> Option<Outcome> {
@@ -340,6 +344,7 @@ impl StreamProcessor {
             direction,
             &client,
             gap,
+            background,
             pid,
             #[cfg(feature = "k8s")]
             pod_info.cloned(),
@@ -353,6 +358,7 @@ impl StreamProcessor {
         direction: LlmDirection,
         data: &[u8],
         gap: H2Gap,
+        background: &mut BackgroundCalls,
         pid: u32,
         #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
     ) -> Outcome {
@@ -389,6 +395,22 @@ impl StreamProcessor {
                     );
                 }
                 outcome = Outcome::Recorded;
+            }
+            http::H2Event::Deferred { id, start } => {
+                let call = PendingCall::new(
+                    start,
+                    pid,
+                    #[cfg(feature = "k8s")]
+                    pod_info.clone(),
+                );
+                outcome = defer(id, call, background);
+            }
+            http::H2Event::Poll {
+                id,
+                usage,
+                background: state,
+            } => {
+                outcome = settle_h2_poll(id, usage.map(|u| *u), state, background, self.transport);
             }
             http::H2Event::Unparsed { reason } => {
                 outcome = Self::count_unparsed(
@@ -946,6 +968,55 @@ fn settle_create(
     }
 }
 
+/// An HTTP/2 poll of background call `id`: its result is recorded once, against the create request. Each poll
+/// is its own stream, so a result still pending just keeps the call waiting (no continuation to carry on).
+fn settle_h2_poll(
+    id: Box<str>,
+    usage: Option<UsageInfo>,
+    state: Option<BackgroundState>,
+    background: &mut BackgroundCalls,
+    transport: Transport,
+) -> Outcome {
+    // A body past the buffer limit keeps no state; usage with tokens is still the call's result.
+    let state = state.or_else(|| {
+        usage
+            .as_ref()
+            .filter(|u| u.prompt_tokens > 0 || u.completion_tokens > 0)
+            .map(|_| BackgroundState::Ended)
+    });
+    let end = match state {
+        Some(BackgroundState::Running(_)) => {
+            background.touch(&id);
+            return Outcome::Pending;
+        }
+        Some(end) => end,
+        // A result still absent (error body, or a 0-token poll): keep the call until a later poll or the TTL.
+        None => {
+            background.touch(&id);
+            return Outcome::Pending;
+        }
+    };
+    let Some(call) = background.take(&id) else {
+        // A GET of a response this node never queued, or another poll already recorded it.
+        return Outcome::Pending;
+    };
+    let usage = match (usage, end) {
+        (Some(usage), _) => usage,
+        // A cancel can come before any token was counted: one failed call.
+        (None, BackgroundState::Cancelled) => UsageInfo::default(),
+        (None, _) => return give_up(call),
+    };
+    record_usage(
+        &usage,
+        call.start_time,
+        call.pid,
+        transport,
+        #[cfg(feature = "k8s")]
+        call.pod_info,
+    );
+    Outcome::Recorded
+}
+
 /// Keep a queued background call until a poll brings its result.
 fn defer(id: Box<str>, call: PendingCall, background: &mut BackgroundCalls) -> Outcome {
     #[cfg(feature = "k8s")]
@@ -985,6 +1056,7 @@ impl PastLimit {
         http::JsonEnds::start(buffer)
             .map(Self::Json)
             .or_else(|| http::SseStream::start(buffer).map(Self::Sse))
+            .or_else(|| http::SseStream::start_encoded(buffer).map(Self::Sse))
     }
 
     fn feed(&mut self, data: &[u8]) -> bool {
