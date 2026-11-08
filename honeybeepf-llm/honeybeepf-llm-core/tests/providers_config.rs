@@ -19,6 +19,7 @@ struct UrlCase {
 struct ProviderUrls {
     openai: Vec<UrlCase>,
     anthropic: Vec<UrlCase>,
+    anthropic_agents: Vec<UrlCase>,
     bedrock: Vec<UrlCase>,
     gemini: Vec<UrlCase>,
     none: Vec<UrlCase>,
@@ -36,7 +37,8 @@ fn test_default_providers_json_parses_with_known_keys_only() {
     let json = include_str!("../src/providers/default_providers.json");
     ProviderRegistry::from_json(json).unwrap();
 
-    let provider_keys = "name note hosts paths response request_extractor operation plaintext";
+    let provider_keys =
+        "name note hosts paths response request_extractor operation plaintext record_only";
     let response_keys = "usage_path prompt_tokens completion_tokens completion_optional extra_prompt_tokens thoughts_tokens \
         completion_excludes_thoughts cache_read_tokens cache_write_tokens cache_write_long_ttl_tokens \
         speed inference_geo prompt_excludes_cache required_field model_path service_tier_path iterations_path billed_categories root_object required_root_field";
@@ -101,6 +103,7 @@ fn test_default_provider_hosts() {
         &vertex,
         &["bedrock-runtime.*.amazonaws.com"],
         &["bedrock-runtime.*.amazonaws.com"],
+        &["api.anthropic.com"],
     ];
     let registry = ProviderRegistry::with_defaults();
     for (provider, hosts) in registry.providers.iter().zip(expected) {
@@ -122,6 +125,7 @@ fn test_find_provider_url_fixtures() {
     let groups = [
         ("openai", &fixture.openai),
         ("anthropic", &fixture.anthropic),
+        ("anthropic-agents", &fixture.anthropic_agents),
         ("bedrock", &fixture.bedrock),
         ("gemini", &fixture.gemini),
         ("none", &fixture.none),
@@ -309,6 +313,7 @@ fn test_user_providers_are_added_to_the_defaults() {
             "anthropic",
             "bedrock",
             "bedrock",
+            "anthropic-agents",
             "ollama",
             "vllm"
         ]
@@ -352,6 +357,7 @@ fn test_user_provider_replaces_defaults_with_its_name_in_their_place() {
             "gemini",
             "bedrock",
             "bedrock",
+            "anthropic-agents",
             "ollama"
         ]
     );

@@ -11,15 +11,23 @@ use serde_json::Value;
 use honeybeepf_llm_core::byte_utils;
 use honeybeepf_llm_core::types::UsageInfo;
 
-use super::ProtocolParser;
 use super::body::{extract_text_from_json, is_responses_event, parse_response_json_value};
 use super::registry::{KNOWN_HOSTS, is_llm_path};
+use super::{Detected, ProtocolParser};
 
 #[derive(Clone)]
 pub struct Http2Parser;
 
+/// The legacy raw-byte heuristic has no host+path, so it never matches a record-only provider.
+fn detected(path: &str) -> Detected {
+    Detected {
+        path: path.to_string(),
+        record_only: false,
+    }
+}
+
 impl ProtocolParser for Http2Parser {
-    fn detect_request(&self, buffer: &[u8]) -> Option<String> {
+    fn detect_request(&self, buffer: &[u8]) -> Option<Detected> {
         // Skip if this looks like HTTP/1.1 (starts with HTTP method)
         let preview = &buffer[..std::cmp::min(10, buffer.len())];
         if preview.starts_with(b"GET ")
@@ -49,12 +57,12 @@ impl ProtocolParser for Http2Parser {
             || byte_utils::contains_pattern(buffer, b"\"prompt\"")
             || byte_utils::contains_pattern(buffer, b"\"model\"")
         {
-            return Some("h2_body_detected".to_string());
+            return Some(detected("h2_body_detected"));
         }
 
         // Fallback: cleartext path (rare in H2)
         if is_llm_path(&String::from_utf8_lossy(buffer)) {
-            return Some("h2_path_detected".to_string());
+            return Some(detected("h2_path_detected"));
         }
 
         None

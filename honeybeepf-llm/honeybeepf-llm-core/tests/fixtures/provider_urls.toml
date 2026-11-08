@@ -58,6 +58,15 @@ anthropic = [
   { url = "api.anthropic.com/anthropic/v1/messages", reason = "proxy prefix" },
 ]
 
+anthropic_agents = [
+  # Managed Agents session endpoints the pod POSTs (detected, counted as agent_session, usage not read)
+  { url = "api.anthropic.com/v1/sessions", reason = "session create" },
+  { url = "api.anthropic.com/v1/sessions?beta=true", reason = "session create, query ignored by the anchor" },
+  { url = "api.anthropic.com/v1/sessions/", reason = "trailing slash" },
+  { url = "api.anthropic.com/v1/sessions/sess_01/events", reason = "event send" },
+  { url = "api.anthropic.com/v1/sessions/sess_01/events?beta=true", reason = "event send with query" },
+]
+
 bedrock = [
   # Cloud endpoints: Bedrock Runtime native
   { url = "bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-sonnet-20240229-v1:0/converse", reason = "Converse" },
@@ -136,6 +145,10 @@ none = [
   { url = "api.anthropic.com/v1/messages/batches/msgbatch_01", reason = "batch status" },
   { url = "api.anthropic.com/v1/messages/batches/msgbatch_01/results", reason = "batch results" },
   { url = "api.anthropic.com/v1/messages/batches/msgbatch_01/cancel", reason = "batch cancel" },
+  # Managed Agents: only the two POST paths match; reads and the GET stream stay out
+  { url = "api.anthropic.com/v1/sessions/sess_01", reason = "session retrieval (GET), past the /v1/sessions anchor" },
+  { url = "api.anthropic.com/v1/sessions/sess_01/events/stream", reason = "event stream (GET), past the /events anchor" },
+  { url = "api.anthropic.com/v1/sessions/sess_01/events/evt_01", reason = "event retrieval, past the /events anchor" },
   { url = "api.openai.com/v1/chat/completions/chatcmpl-abc123", reason = "stored completion" },
   { url = "api.openai.com/v1/chat/completions/chatcmpl-abc123/messages", reason = "stored completion messages" },
 ]

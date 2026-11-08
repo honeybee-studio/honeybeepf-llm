@@ -263,6 +263,11 @@ pub struct ProviderConfig {
     /// Present only for in-cluster plaintext capture; TLS-only providers leave it unset.
     #[serde(default)]
     pub plaintext: Option<PlaintextConfig>,
+
+    /// Detected but never parsed for usage: each call is counted under the `agent_session` unparsed
+    /// reason, because the response carries a running session total, not one call's tokens.
+    #[serde(default)]
+    pub record_only: bool,
 }
 
 /// Registry of all configured providers

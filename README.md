@@ -198,14 +198,16 @@ can be told apart from a drop in traffic. `reason` is one of:
 | `request_too_large` | the captured request bytes (the first 4 KB of each write) passed the 8 MB buffer limit |
 | `response_too_large` | the response passed the 16 MB buffer limit and is neither an uncompressed HTTP/1.1 JSON body with usage in its first or last 64 KB nor an uncompressed HTTP/1.1 SSE stream (compressed and HTTP/2 responses always count here) |
 | `background_unfinished` | an OpenAI Responses call made with `"background": true` had no usage in any poll the node saw: not polled for an hour, more than 4096 such calls waiting, or ended without usage |
+| `agent_session` | a Claude Managed Agents session call (`POST /v1/sessions`, `/v1/sessions/{id}/events`): seen, but its usage is a running session total, so it is counted here on purpose and not read as one call's tokens — not a dropped call |
 
 Not counted here: a read lost whole because the ring buffer was full (see `llm_events_total{stage="reserve_fail"}`),
 and a connection left idle for 300 s without being closed (for example a killed process).
 
-Unparsed calls per minute by reason, for an alert on `> 0`:
+Unparsed calls per minute by reason, for an alert on `> 0` (excluding `agent_session`, which is counted on
+purpose, not a drop):
 
 ```promql
-sum by (target_namespace, reason) (rate(honeybeepf_llm_llm_responses_unparsed_total[5m])) * 60
+sum by (target_namespace, reason) (rate(honeybeepf_llm_llm_responses_unparsed_total{reason!="agent_session"}[5m])) * 60
 ```
 
 The collector and Prometheus add more labels, such as `k8s_pod_name`, `k8s_node_name` and `namespace`; those name

@@ -27,11 +27,18 @@ pub use sse_stream::SseStream;
 
 use honeybeepf_llm_core::types::UsageInfo;
 
+/// A matched LLM request: the logged path and whether its provider is record-only (detected but never
+/// parsed for usage, counted under the `agent_session` reason).
+pub struct Detected {
+    pub path: String,
+    pub record_only: bool,
+}
+
 /// Protocol-specific parser interface
 pub trait ProtocolParser: Send + Sync {
-    /// Detect if this buffer is an LLM request. Returns detected path/info if yes.
+    /// Detect if this buffer is an LLM request. Returns the matched path/info if yes.
     /// Uses the global PROVIDER_REGISTRY for host/path matching.
-    fn detect_request(&self, buffer: &[u8]) -> Option<String>;
+    fn detect_request(&self, buffer: &[u8]) -> Option<Detected>;
 
     /// Extract request text for token estimation
     fn extract_request_text(&self, buffer: &[u8]) -> String;
