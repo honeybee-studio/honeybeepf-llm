@@ -239,6 +239,19 @@ pub(super) fn plain_sse_body(buffer: &[u8]) -> Option<(Framing, &[u8])> {
     (head.is_sse && !encoding::is_encoded(head.headers())).then_some((head.framing, head.body))
 }
 
+/// Framing, body and the single content coding of an SSE response sent under one content coding.
+type EncodedSse<'a> = (Framing, &'a [u8], Box<[u8]>);
+
+/// Framing, body and the one content coding of a final SSE response under a single content coding.
+pub(super) fn encoded_sse_body(buffer: &[u8]) -> Option<EncodedSse<'_>> {
+    let head = final_head(buffer)?;
+    let coding = head
+        .is_sse
+        .then(|| encoding::single_coding(head.headers()))
+        .flatten()?;
+    Some((head.framing, head.body, coding))
+}
+
 fn header_contains(headers: &[httparse::Header], name: &str, pattern: &[u8]) -> bool {
     headers.iter().any(|h| {
         h.name.eq_ignore_ascii_case(name) && byte_utils::contains_pattern(h.value, pattern)
