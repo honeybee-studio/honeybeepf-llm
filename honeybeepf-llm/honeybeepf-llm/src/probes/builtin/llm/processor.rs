@@ -6,6 +6,7 @@ use log::info;
 
 use crate::probes::builtin::llm::background::{BackgroundCalls, PendingCall};
 use crate::probes::builtin::llm::http::{self, BackgroundState, ProtocolParser};
+use crate::telemetry::Transport;
 
 // Buffer size constants
 const MAX_REQUEST_BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB max for request (images, large context)
@@ -141,6 +142,8 @@ pub struct StreamProcessor {
     /// The detected request is a record-only provider (Managed Agents session), so its response is
     /// counted under `agent_session` without reading the running session total.
     record_only: bool,
+    /// Capture transport of this connection; a metric label on the calls it records.
+    transport: Transport,
 }
 
 impl Default for StreamProcessor {
@@ -166,7 +169,13 @@ impl StreamProcessor {
             h2_gap_client: H2Gap::None,
             h2_gap_server: H2Gap::None,
             record_only: false,
+            transport: Transport::Tls,
         }
+    }
+
+    /// Set the capture transport; the plaintext reader calls this, the SSL path keeps the Tls default.
+    pub(super) fn set_transport(&mut self, transport: Transport) {
+        self.transport = transport;
     }
 
     pub fn last_activity(&self) -> Instant {
@@ -369,6 +378,7 @@ impl StreamProcessor {
                     &usage,
                     start,
                     pid,
+                    self.transport,
                     #[cfg(feature = "k8s")]
                     pod_info.clone(),
                 );
@@ -842,6 +852,7 @@ impl StreamProcessor {
                 start_time,
                 background,
                 pid,
+                self.transport,
                 #[cfg(feature = "k8s")]
                 pod_info,
             ),
@@ -892,6 +903,7 @@ impl StreamProcessor {
             &usage,
             call.start_time,
             call.pid,
+            self.transport,
             #[cfg(feature = "k8s")]
             call.pod_info,
         );
@@ -906,6 +918,7 @@ fn settle_create(
     start_time: Instant,
     background: &mut BackgroundCalls,
     pid: u32,
+    transport: Transport,
     #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
 ) -> Option<Outcome> {
     match (usage, state) {
@@ -914,6 +927,7 @@ fn settle_create(
                 &usage,
                 start_time,
                 pid,
+                transport,
                 #[cfg(feature = "k8s")]
                 pod_info,
             );
@@ -1011,6 +1025,7 @@ fn record_usage(
     usage: &UsageInfo,
     start_time: Instant,
     pid: u32,
+    transport: Transport,
     #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
 ) {
     let latency = start_time.elapsed();
@@ -1023,6 +1038,7 @@ fn record_usage(
         model_str,
         latency_secs,
         is_error,
+        transport,
         #[cfg(feature = "k8s")]
         pod_info.as_ref(),
     );
@@ -1034,9 +1050,10 @@ fn record_usage(
 
     if is_error {
         info!(
-            "LLM FAILED/ERROR | PID: {} | Model: {} | Latency: {:.2}s{}",
+            "LLM FAILED/ERROR | PID: {} | Model: {} | Transport: {} | Latency: {:.2}s{}",
             pid,
             model_str,
+            transport.as_str(),
             latency.as_secs_f64(),
             pod_str
         );
@@ -1054,9 +1071,10 @@ fn record_usage(
             ),
         };
         info!(
-            "LLM SUCCESS | PID: {} | Model: {} | Latency: {:.2}s | Tokens: {} (Prompt: {}, Compl: {}{}{}){}",
+            "LLM SUCCESS | PID: {} | Model: {} | Transport: {} | Latency: {:.2}s | Tokens: {} (Prompt: {}, Compl: {}{}{}){}",
             pid,
             model_str,
+            transport.as_str(),
             latency.as_secs_f64(),
             usage.prompt_tokens.saturating_add(usage.completion_tokens),
             usage.prompt_tokens,
