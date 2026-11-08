@@ -9,7 +9,7 @@ const NOV_30: u32 = 20_787; // 2026-11-30
 #[test]
 fn test_builtin_prices_match_the_pricing_pages() {
     let table = PriceTable::builtin().expect("built-in table loads");
-    assert_eq!(table.version(), "2026-11-03");
+    assert_eq!(table.version(), "2026-11-07");
     let sources: Vec<_> = table
         .sources()
         .iter()
@@ -19,7 +19,7 @@ fn test_builtin_prices_match_the_pricing_pages() {
         sources,
         [
             ("anthropic", "2026-10-26"),
-            ("openai", "2026-11-03"),
+            ("openai", "2026-11-07"),
             ("gemini", "2026-10-26")
         ]
     );
@@ -87,6 +87,11 @@ fn test_builtin_prices_match_the_pricing_pages() {
         (NOV_30, million("gpt-5.3-codex").tier("priority"), Ok(3.5)),
         (NOV_30, million("chat-latest"), Ok(5.0)),
         (NOV_30, million("gpt-5-search-api"), Ok(1.25)),
+        // Embeddings (#79): input tokens only, no output or cached-input price.
+        (NOV_30, million("text-embedding-3-small"), Ok(0.02)),
+        (NOV_30, million("text-embedding-3-large"), Ok(0.13)),
+        (NOV_30, million("text-embedding-ada-002"), Ok(0.1)),
+        (NOV_30, call("text-embedding-3-small", 1000, 0), Ok(0.00002)),
     ];
     for (day, call, want) in cases {
         assert_eq!(table.cost_on(&call, day).map(total), want, "{call:?}");
