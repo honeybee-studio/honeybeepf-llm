@@ -1,0 +1,387 @@
+//! Socket-level plaintext (non-TLS) capture. connect4 records the connecting task's pid/cgroup by
+//! socket cookie (sock_ops gained those helpers only in 6.4/6.10); sockops copies it into PLAIN_CONNS
+//! by 4-tuple at establish and frees it on close; sk_msg/sk_skb copy each watched send/receive.
+use aya_ebpf::{
+    EbpfContext,
+    bindings::{
+        BPF_NOEXIST, BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB, BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB,
+        BPF_SOCK_OPS_STATE_CB, BPF_SOCK_OPS_STATE_CB_FLAG, BPF_TCP_CLOSE, sk_action::SK_PASS,
+    },
+    helpers::{
+        bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_get_socket_cookie,
+        bpf_msg_pull_data, bpf_probe_read_kernel_buf, bpf_skb_load_bytes,
+    },
+    macros::{cgroup_sock_addr, map, sk_msg, sock_ops, stream_verdict},
+    maps::{HashMap, LruHashMap, RingBuf, SockHash},
+    programs::{SkBuffContext, SkMsgContext, SockAddrContext, SockOpsContext},
+};
+use honeybeepf_llm_common::{
+    EventMetadata, LlmDirection, LlmEventHeader, MAX_SSL_BUF_SIZE, MAX_SSL_FRAGMENTS,
+    PLAIN_CONNS_ENTRIES, PLAIN_ENDPOINTS_ENTRIES, PLAIN_SOCKS_ENTRIES, PlainFlowKey, capture_limit,
+    plain_endpoint_key, plain_flow_key, plain_stream_id,
+};
+
+/// Minimum when plaintext is off; the loader bumps it to the full size when enabled.
+pub const PLAIN_RINGBUF_MIN: u32 = 4096;
+
+/// Payload buckets: a send reserves the smallest that holds its first bytes, so a short request
+/// takes a small ring slot. Largest is `MAX_SSL_BUF_SIZE`; a write is captured only up to it.
+const PLAIN_BUCKET_SMALL: usize = 512;
+const PLAIN_BUCKET_MED: usize = 2048;
+
+#[map]
+pub static PLAIN_ENDPOINTS: HashMap<u64, u8> =
+    HashMap::with_max_entries(PLAIN_ENDPOINTS_ENTRIES, 0);
+
+#[map]
+pub static PLAIN_SOCKS: SockHash<u64> = SockHash::with_max_entries(PLAIN_SOCKS_ENTRIES, 0);
+
+#[map]
+pub static PLAIN_CONNS: HashMap<PlainFlowKey, EventMetadata> =
+    HashMap::with_max_entries(PLAIN_CONNS_ENTRIES, 0);
+
+/// connect4 → sockops handoff: socket cookie → connecting task's pid/cgroup, read at establish. LRU
+/// so a connect that never establishes (refused) drops its entry instead of leaking.
+#[map]
+pub static PLAIN_CONNECT_META: LruHashMap<u64, EventMetadata> =
+    LruHashMap::with_max_entries(PLAIN_CONNS_ENTRIES, 0);
+
+#[map]
+pub static PLAIN_EVENTS: RingBuf = RingBuf::with_byte_size(PLAIN_RINGBUF_MIN, 0);
+
+/// Record the connecting task's pid/cgroup under its socket cookie when the destination is watched,
+/// so the sockops establish callback can attribute the socket without the 6.10+ task helpers.
+#[cgroup_sock_addr(connect4)]
+pub fn plaintext_connect4(ctx: SockAddrContext) -> i32 {
+    record_connect(&ctx);
+    // Always allow the connect; this program only observes.
+    1
+}
+
+#[inline(always)]
+fn record_connect(ctx: &SockAddrContext) {
+    // SAFETY: `ctx.sock_addr` is this callback's live bpf_sock_addr; only the destination is read.
+    let addr = unsafe { &*ctx.sock_addr };
+    // `user_ip4` is network order; `user_port`'s low 16 bits are the network-order port.
+    let key = plain_endpoint_key(addr.user_ip4, addr.user_port as u16);
+    // SAFETY: map lookup with a stack key; the returned reference is only tested for presence.
+    if unsafe { PLAIN_ENDPOINTS.get(&key) }.is_none() {
+        return;
+    }
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let meta = EventMetadata {
+        pid: (pid_tgid >> 32) as u32,
+        _pad: pid_tgid as u32,
+        // SAFETY: reads the connecting task's cgroup; 1 on cgroup v1, which userspace gates out.
+        cgroup_id: unsafe { bpf_get_current_cgroup_id() },
+        timestamp: 0,
+    };
+    // SAFETY: `ctx.as_ptr()` is the live context, valid for the cookie helper.
+    let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
+    let _ = PLAIN_CONNECT_META.insert(&cookie, &meta, 0);
+}
+
+/// Add a watched socket to the sockhash, copy its connect-time pid/cgroup (recorded by connect4
+/// under the socket cookie) into PLAIN_CONNS, and request a state callback so it is freed on close.
+#[sock_ops]
+pub fn plaintext_sockops(ctx: SockOpsContext) -> u32 {
+    let op = ctx.op();
+    if op == BPF_SOCK_OPS_STATE_CB {
+        // Fires only on sockets we flagged (watched ones); end their stream and free attribution.
+        if ctx.arg(1) == BPF_TCP_CLOSE {
+            let flow = plain_flow_key(
+                ctx.local_ip4(),
+                ctx.remote_ip4(),
+                ctx.local_port(),
+                ctx.remote_port(),
+            );
+            // SAFETY: map lookup with a stack key; the value is copied out before the remove below.
+            if let Some(meta) = unsafe { PLAIN_CONNS.get(&flow) } {
+                let meta = *meta;
+                emit_close(&flow, &meta);
+            }
+            let _ = PLAIN_CONNS.remove(&flow);
+        }
+        return 0;
+    }
+    if op != BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB && op != BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB {
+        return 0;
+    }
+    // SAFETY: `ctx.as_ptr()` is this callback's live context, valid for the cookie helper.
+    let mut cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
+    // Present only for a watched active connect (connect4 recorded it); passive sockets are skipped.
+    // SAFETY: map lookup with a stack key; the value is copied out before any other map call.
+    let Some(meta) = (unsafe { PLAIN_CONNECT_META.get(&cookie) }) else {
+        return 0;
+    };
+    let meta = *meta;
+    let _ = PLAIN_CONNECT_META.remove(&cookie);
+    // Key by the 4-tuple so the sk_msg side (which may not call the cookie helper) rebuilds the same key.
+    let flow = plain_flow_key(
+        ctx.local_ip4(),
+        ctx.remote_ip4(),
+        ctx.local_port(),
+        ctx.remote_port(),
+    );
+    let _ = PLAIN_CONNS.insert(&flow, &meta, 0);
+    // SAFETY: `ctx.ops` is the live bpf_sock_ops this callback was given, borrowed only for the update.
+    let ops = unsafe { &mut *ctx.ops };
+    let _ = PLAIN_SOCKS.update(&mut cookie, ops, BPF_NOEXIST as u64);
+    // Ask for the state callback so the close path above frees PLAIN_CONNS for this socket.
+    let _ = ctx.set_cb_flags((ctx.cb_flags() | BPF_SOCK_OPS_STATE_CB_FLAG) as i32);
+    0
+}
+
+/// Fill a reserved record's header; the caller sets `buf_filled` after the copy. `ssl_ptr` is the
+/// connection's stream id, so the userspace parser groups a connection's records.
+#[inline(always)]
+fn init_header(
+    h: &mut LlmEventHeader,
+    meta: &EventMetadata,
+    len: u32,
+    rw: LlmDirection,
+    truncated: u8,
+    offset: u32,
+    ssl_ptr: u64,
+) {
+    h.metadata = *meta;
+    h.ssl_ptr = ssl_ptr;
+    h.latency_ns = 0;
+    h.len = len;
+    h.offset = offset;
+    h.is_handshake = 0;
+    h.rw = rw as u8;
+    h.truncated = truncated;
+    h.closed = 0;
+    h.comm = [0u8; MAX_COMM];
+}
+
+/// Copy a watched send into PLAIN_EVENTS as an `N`-byte-payload record; `N` is constant so the
+/// verifier can bound the copy. The record is `LlmEventHeader` + payload, the SSL ring's shape.
+#[inline(always)]
+fn emit_send<const N: usize>(ctx: &SkMsgContext, meta: &EventMetadata, size: u32, stream: u64) {
+    let Some(mut slot) = PLAIN_EVENTS.reserve::<PlainEvent<N>>(0) else {
+        return;
+    };
+    // SAFETY: the slot is reserved for a PlainEvent<N>; every header field is set before submit.
+    let ev = unsafe { &mut *slot.as_mut_ptr() };
+    init_header(
+        &mut ev.header,
+        meta,
+        size,
+        LlmDirection::Write,
+        (size as usize > N) as u8,
+        0,
+        stream,
+    );
+    // The dispatch keeps `size` within the chosen bucket, but the compiler spills it and the verifier
+    // loses that bound; a volatile reload makes the min(.., N) survive so the copy stays <= N.
+    // SAFETY: &size is a valid initialized local.
+    let n = core::cmp::min(unsafe { core::ptr::read_volatile(&size) } as usize, N);
+    let data = ctx.data() as *const u8;
+    // SAFETY: `data` is the message's linear head after pull_data; n <= N keeps the ring write in bounds.
+    if unsafe { bpf_probe_read_kernel_buf(data, &mut ev.buf[..n]) }.is_err() {
+        ev.header.buf_filled = 0;
+        slot.discard(0);
+        return;
+    }
+    ev.header.buf_filled = 1;
+    slot.submit(0);
+}
+
+/// Copy one receive fragment at `offset` into PLAIN_EVENTS; mirrors `emit_send` but reads from the
+/// (possibly non-linear) skb with the bounded `bpf_skb_load_bytes` helper, so no pull is needed.
+/// Returns false when the slot or read fails, so the caller stops emitting further fragments.
+#[inline(always)]
+fn emit_recv<const N: usize>(
+    ctx: &SkBuffContext,
+    meta: &EventMetadata,
+    size: u32,
+    offset: u32,
+    truncated: u8,
+    stream: u64,
+) -> bool {
+    // The mask below needs a power-of-two bucket to bound the copy length.
+    const { assert!(N.is_power_of_two()) };
+    let Some(mut slot) = PLAIN_EVENTS.reserve::<PlainEvent<N>>(0) else {
+        return false;
+    };
+    // SAFETY: the slot is reserved for a PlainEvent<N>; every header field is set before submit.
+    let ev = unsafe { &mut *slot.as_mut_ptr() };
+    init_header(
+        &mut ev.header,
+        meta,
+        size,
+        LlmDirection::Read,
+        truncated,
+        offset,
+        stream,
+    );
+    // This fragment's bytes, capped to the bucket (the dispatch already keeps it <= N).
+    let n = core::cmp::min(size.saturating_sub(offset) as usize, N);
+    // bpf_skb_load_bytes rejects a zero-length read, so bail on an empty fragment.
+    if n == 0 {
+        ev.header.buf_filled = 0;
+        slot.discard(0);
+        return false;
+    }
+    // Clamp to [1, N] in asm so the compiler cannot fold the mask back into a branch. The old
+    // verifier (5.10) reads the length as [1, N] from the AND with a constant, which it trusts, not
+    // from an `n != 0` branch it won't propagate to bpf_skb_load_bytes's length register.
+    let mut len = n;
+    // SAFETY: pure register arithmetic on `len`; `N` is a power of two, so `& (N - 1)` gives [0,
+    // N-1] and the `+ 1` gives [1, N]. No memory access or side effects.
+    unsafe {
+        core::arch::asm!(
+            "{v} -= 1",
+            "{v} &= {m}",
+            "{v} += 1",
+            v = inout(reg) len,
+            m = const N - 1,
+        );
+    }
+    // Raw buffer pointer, not an `ev.buf[..len]` slice: the slice bounds check folds back into the
+    // branch the asm avoids. Call the helper directly, not aya's `load_bytes` (re-mins with skb->len).
+    // SAFETY: live skb; `ev.buf` is N bytes and `len` is [1, N], so the kernel write stays in bounds.
+    let loaded = unsafe {
+        bpf_skb_load_bytes(
+            ctx.as_ptr(),
+            offset,
+            ev.buf.as_mut_ptr() as *mut core::ffi::c_void,
+            len as u32,
+        )
+    };
+    if loaded != 0 {
+        ev.header.buf_filled = 0;
+        slot.discard(0);
+        return false;
+    }
+    ev.header.buf_filled = 1;
+    slot.submit(0);
+    true
+}
+
+/// Linearize the send's first bytes and emit them in the smallest bucket that fits.
+#[inline(never)]
+fn capture_send(ctx: &SkMsgContext, meta: &EventMetadata, stream: u64) {
+    let size = ctx.size();
+    if size == 0 {
+        return;
+    }
+    let to_read = core::cmp::min(size as usize, MAX_SSL_BUF_SIZE);
+    // SAFETY: `ctx.msg` is this callback's live message; [0, to_read) is within its size, and the
+    // pull makes that span contiguous so the kernel read below sees one linear region.
+    if unsafe { bpf_msg_pull_data(ctx.msg, 0, to_read as u32, 0) } != 0 {
+        return;
+    }
+    if to_read <= PLAIN_BUCKET_SMALL {
+        emit_send::<PLAIN_BUCKET_SMALL>(ctx, meta, size, stream);
+    } else if to_read <= PLAIN_BUCKET_MED {
+        emit_send::<PLAIN_BUCKET_MED>(ctx, meta, size, stream);
+    } else {
+        emit_send::<MAX_SSL_BUF_SIZE>(ctx, meta, size, stream);
+    }
+}
+
+/// Copy each send on a watched socket into PLAIN_EVENTS, attributed from the connect-time entry
+/// found by the connection's 4-tuple. Always SK_PASS: the bytes are copied, never redirected.
+#[sk_msg]
+pub fn plaintext_skmsg(ctx: SkMsgContext) -> u32 {
+    // SAFETY: `ctx.msg` is this callback's live sk_msg_md; only the 4-tuple fields are read here.
+    let msg = unsafe { &*ctx.msg };
+    let flow = plain_flow_key(
+        msg.local_ip4,
+        msg.remote_ip4,
+        msg.local_port,
+        msg.remote_port,
+    );
+    // SAFETY: map lookup with a stack key; the value is copied out before any other map or helper call.
+    let Some(meta) = (unsafe { PLAIN_CONNS.get(&flow) }) else {
+        return SK_PASS;
+    };
+    let meta = *meta;
+    capture_send(&ctx, &meta, plain_stream_id(&flow));
+    SK_PASS
+}
+
+/// Emit the receive as up to `MAX_SSL_FRAGMENTS` records so a skb past one bucket is captured whole
+/// instead of marked truncated and dropped; each fragment reads its own `offset` from the skb and
+/// the smallest bucket that fits. `truncated` marks the receive only when it exceeds the Read limit.
+#[inline(never)]
+fn capture_recv(ctx: &SkBuffContext, meta: &EventMetadata, stream: u64) {
+    let size = ctx.len();
+    if size == 0 {
+        return;
+    }
+    let limit = capture_limit(LlmDirection::Read);
+    let truncated = (size as usize > limit) as u8;
+    for i in 0..MAX_SSL_FRAGMENTS {
+        let offset = i * MAX_SSL_BUF_SIZE;
+        if i > 0 && (offset >= size as usize || offset >= limit) {
+            return;
+        }
+        let offset = offset as u32;
+        let to_read = core::cmp::min(size.saturating_sub(offset) as usize, MAX_SSL_BUF_SIZE);
+        let sent = if to_read <= PLAIN_BUCKET_SMALL {
+            emit_recv::<PLAIN_BUCKET_SMALL>(ctx, meta, size, offset, truncated, stream)
+        } else if to_read <= PLAIN_BUCKET_MED {
+            emit_recv::<PLAIN_BUCKET_MED>(ctx, meta, size, offset, truncated, stream)
+        } else {
+            emit_recv::<MAX_SSL_BUF_SIZE>(ctx, meta, size, offset, truncated, stream)
+        };
+        if !sent {
+            return;
+        }
+    }
+}
+
+/// Copy each receive on a watched socket into PLAIN_EVENTS, attributed from the connect-time entry
+/// found by the connection's 4-tuple. Always SK_PASS: the bytes are copied, never redirected.
+#[stream_verdict]
+pub fn plaintext_skskb(ctx: SkBuffContext) -> u32 {
+    let flow = plain_flow_key(
+        ctx.skb.local_ipv4(),
+        ctx.skb.remote_ipv4(),
+        ctx.skb.local_port(),
+        ctx.skb.remote_port(),
+    );
+    // SAFETY: map lookup with a stack key; the value is copied out before any other map or helper call.
+    let Some(meta) = (unsafe { PLAIN_CONNS.get(&flow) }) else {
+        return SK_PASS;
+    };
+    let meta = *meta;
+    capture_recv(&ctx, &meta, plain_stream_id(&flow));
+    SK_PASS
+}
+
+/// Emit a header-only record marking the connection closed, so the userspace parser ends this
+/// connection's stream and records any pending response.
+#[inline(always)]
+fn emit_close(flow: &PlainFlowKey, meta: &EventMetadata) {
+    let Some(mut slot) = PLAIN_EVENTS.reserve::<LlmEventHeader>(0) else {
+        return;
+    };
+    // SAFETY: the slot is reserved for one header; every field is set before submit.
+    let h = unsafe { &mut *slot.as_mut_ptr() };
+    init_header(
+        h,
+        meta,
+        0,
+        LlmDirection::Unknown,
+        0,
+        0,
+        plain_stream_id(flow),
+    );
+    h.buf_filled = 0;
+    h.closed = 1;
+    slot.submit(0);
+}
+
+const MAX_COMM: usize = 16;
+
+/// One PLAIN_EVENTS record: the header at offset 0, then `N` payload bytes.
+#[repr(C)]
+struct PlainEvent<const N: usize> {
+    header: LlmEventHeader,
+    buf: [u8; N],
+}
