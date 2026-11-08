@@ -27,7 +27,7 @@ struct ProviderUrls {
 #[test]
 fn test_default_providers() {
     let registry = ProviderRegistry::with_defaults();
-    assert_eq!(registry.providers.len(), 8);
+    assert_eq!(registry.providers.len(), 9);
 }
 
 // `with_defaults` panics only on a parse error, and serde skips unknown keys, so a key typo would go unnoticed.
@@ -36,10 +36,10 @@ fn test_default_providers_json_parses_with_known_keys_only() {
     let json = include_str!("../src/providers/default_providers.json");
     ProviderRegistry::from_json(json).unwrap();
 
-    let provider_keys = "name note hosts paths response request_extractor plaintext";
+    let provider_keys = "name note hosts paths response request_extractor operation plaintext";
     let response_keys = "usage_path prompt_tokens completion_tokens completion_optional extra_prompt_tokens thoughts_tokens \
         completion_excludes_thoughts cache_read_tokens cache_write_tokens cache_write_long_ttl_tokens \
-        speed inference_geo prompt_excludes_cache required_field model_path service_tier_path iterations_path billed_categories";
+        speed inference_geo prompt_excludes_cache required_field model_path service_tier_path iterations_path billed_categories root_object";
     let file: serde_json::Value = serde_json::from_str(json).unwrap();
     for provider in file["providers"].as_array().unwrap() {
         let name = &provider["name"];
@@ -84,7 +84,8 @@ fn test_default_provider_hosts() {
         "aiplatform.*.rep.googleapis.com",
     ];
     let gemini = ["generativelanguage.googleapis.com", vertex[0], vertex[1]];
-    let expected: [&[&str]; 8] = [
+    let expected: [&[&str]; 9] = [
+        &openai,
         &openai,
         &openai,
         &[
@@ -299,6 +300,7 @@ fn test_user_providers_are_added_to_the_defaults() {
         [
             "openai",
             "openai",
+            "openai",
             "anthropic",
             "gemini",
             "gemini",
@@ -340,6 +342,7 @@ fn test_user_provider_replaces_defaults_with_its_name_in_their_place() {
         [
             "openai",
             "openai",
+            "openai",
             "anthropic",
             "anthropic",
             "gemini",
@@ -349,7 +352,7 @@ fn test_user_provider_replaces_defaults_with_its_name_in_their_place() {
             "ollama"
         ]
     );
-    assert_eq!(registry.providers[3].paths, [":rawPredict$"]);
+    assert_eq!(registry.providers[4].paths, [":rawPredict$"]);
     assert_eq!(
         provider_for(&registry, "api.anthropic.com/v1/messages"),
         None

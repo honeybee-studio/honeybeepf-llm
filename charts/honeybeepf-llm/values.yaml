@@ -62,6 +62,16 @@ builtinProbes:
     #       completion_tokens: "eval_count"    # Field name for output tokens
     #       model_path: "model"
     #     request_extractor: "messages"       # How to extract prompt text (messages, contents, prompt, input)
+    # In-cluster plaintext (non-TLS) capture: add `plaintext: { port }` to a provider whose hosts are
+    # Services the app calls over HTTP. The agent captures those calls at the socket layer (no proxy)
+    # and records them with transport="plain". It needs cgroup v2 and kernel 5.10+, and the chart then
+    # grants get/list/watch on services and endpointslices (only when a provider sets plaintext). The
+    # app's request Host header must match one of the provider's hosts. OpenAI-compatible (e.g. vLLM)
+    # servers need no response block.
+    #   - name: "vllm"
+    #     hosts: ["vllm.default.svc.cluster.local"]
+    #     paths: ["/v1/chat/completions"]
+    #     plaintext: { port: 8000 }
     # Price overrides (optional), in the format of honeybeepf-llm-core/src/prices.json, merged per model.
     # "price_multiplier" multiplies the provider's built-in prices (0.8 = pay 80%), not models listed here.
     # A rejected file is logged and ignored. Changes reach the agent without a restart, within about a minute.

@@ -32,6 +32,11 @@ openai = [
   { url = "api.openai.com/openai/deployments/d1/chat/completions?api-version=2026-10-01", reason = "Azure-style path on any OpenAI host" },
   # Basic detection
   { url = "api.openai.com/v1/chat/completions", reason = "OpenAI chat" },
+  # Embeddings (#79): a separate entry, operation=embeddings
+  { url = "api.openai.com/v1/embeddings", reason = "OpenAI embeddings" },
+  { url = "myres.openai.azure.com/openai/deployments/d1/embeddings?api-version=2024-10-21", reason = "Azure api-version embeddings" },
+  { url = "myres.services.ai.azure.com/openai/v1/embeddings", reason = "Foundry v1 embeddings" },
+  { url = "bedrock-mantle.us-east-1.api.aws/openai/v1/embeddings", reason = "Bedrock Mantle embeddings" },
 ]
 
 anthropic = [
@@ -98,7 +103,7 @@ none = [
   { url = "us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/gemini-3.5-flash:countTokens", reason = "Gemini token counting" },
   { url = "generativelanguage.googleapis.com/v1beta/interactions/int_123", reason = "Interactions retrieval/polling (GET), path continues past the anchor" },
   { url = "aiplatform.googleapis.com/v1/projects/p/locations/global/interactions/int_123", reason = "Vertex Interactions retrieval/polling (GET), path continues past the anchor" },
-  { url = "myres.openai.azure.com/openai/deployments/d1/embeddings?api-version=2024-10-21", reason = "Azure embeddings" },
+  { url = "api.openai.com/v1/embeddings/x", reason = "path continues after /embeddings" },
   { url = "myres.openai.azure.com/openai/deployments/d1/audio/transcriptions?api-version=2024-10-21", reason = "Azure audio" },
   { url = "myres.openai.azure.com/openai/v1/responses/resp_1", reason = "Azure v1 Responses retrieval" },
   { url = "myres.openai.azure.com/openai/responses/resp_1?api-version=2025-04-01-preview", reason = "Azure api-version Responses retrieval" },
