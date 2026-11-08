@@ -1,6 +1,6 @@
-//! Socket-level plaintext (non-TLS) capture. The sockops program records each watched socket in a
-//! sockhash and its pid/cgroup in PLAIN_CONNS, and clears that entry on TCP close; the sk_msg and
-//! sk_skb programs copy each watched send and receive into PLAIN_EVENTS, attributed from that entry.
+//! Socket-level plaintext (non-TLS) capture. connect4 records the connecting task's pid/cgroup by
+//! socket cookie (sock_ops gained those helpers only in 6.4/6.10); sockops copies it into PLAIN_CONNS
+//! by 4-tuple at establish and frees it on close; sk_msg/sk_skb copy each watched send/receive.
 use aya_ebpf::{
     EbpfContext,
     bindings::{
@@ -11,14 +11,14 @@ use aya_ebpf::{
         bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_get_socket_cookie,
         bpf_msg_pull_data, bpf_probe_read_kernel_buf, bpf_skb_load_bytes,
     },
-    macros::{map, sk_msg, sock_ops, stream_verdict},
-    maps::{HashMap, RingBuf, SockHash},
-    programs::{SkBuffContext, SkMsgContext, SockOpsContext},
+    macros::{cgroup_sock_addr, map, sk_msg, sock_ops, stream_verdict},
+    maps::{HashMap, LruHashMap, RingBuf, SockHash},
+    programs::{SkBuffContext, SkMsgContext, SockAddrContext, SockOpsContext},
 };
 use honeybeepf_llm_common::{
     EventMetadata, LlmDirection, LlmEventHeader, MAX_SSL_BUF_SIZE, MAX_SSL_FRAGMENTS,
     PLAIN_CONNS_ENTRIES, PLAIN_ENDPOINTS_ENTRIES, PLAIN_SOCKS_ENTRIES, PlainFlowKey, capture_limit,
-    plain_endpoint_key, plain_flow_key, plain_stream_id, sock_ops_remote_port,
+    plain_endpoint_key, plain_flow_key, plain_stream_id,
 };
 
 /// Minimum when plaintext is off; the loader bumps it to the full size when enabled.
@@ -40,11 +40,49 @@ pub static PLAIN_SOCKS: SockHash<u64> = SockHash::with_max_entries(PLAIN_SOCKS_E
 pub static PLAIN_CONNS: HashMap<PlainFlowKey, EventMetadata> =
     HashMap::with_max_entries(PLAIN_CONNS_ENTRIES, 0);
 
+/// connect4 → sockops handoff: socket cookie → connecting task's pid/cgroup, read at establish. LRU
+/// so a connect that never establishes (refused) drops its entry instead of leaking.
+#[map]
+pub static PLAIN_CONNECT_META: LruHashMap<u64, EventMetadata> =
+    LruHashMap::with_max_entries(PLAIN_CONNS_ENTRIES, 0);
+
 #[map]
 pub static PLAIN_EVENTS: RingBuf = RingBuf::with_byte_size(PLAIN_RINGBUF_MIN, 0);
 
-/// Add a connecting socket to the sockhash only if its destination is watched, record the task's
-/// pid/cgroup for later attribution, and request a state callback so the entry is freed on close.
+/// Record the connecting task's pid/cgroup under its socket cookie when the destination is watched,
+/// so the sockops establish callback can attribute the socket without the 6.10+ task helpers.
+#[cgroup_sock_addr(connect4)]
+pub fn plaintext_connect4(ctx: SockAddrContext) -> i32 {
+    record_connect(&ctx);
+    // Always allow the connect; this program only observes.
+    1
+}
+
+#[inline(always)]
+fn record_connect(ctx: &SockAddrContext) {
+    // SAFETY: `ctx.sock_addr` is this callback's live bpf_sock_addr; only the destination is read.
+    let addr = unsafe { &*ctx.sock_addr };
+    // `user_ip4` is network order; `user_port`'s low 16 bits are the network-order port.
+    let key = plain_endpoint_key(addr.user_ip4, addr.user_port as u16);
+    // SAFETY: map lookup with a stack key; the returned reference is only tested for presence.
+    if unsafe { PLAIN_ENDPOINTS.get(&key) }.is_none() {
+        return;
+    }
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let meta = EventMetadata {
+        pid: (pid_tgid >> 32) as u32,
+        _pad: pid_tgid as u32,
+        // SAFETY: reads the connecting task's cgroup; 1 on cgroup v1, which userspace gates out.
+        cgroup_id: unsafe { bpf_get_current_cgroup_id() },
+        timestamp: 0,
+    };
+    // SAFETY: `ctx.as_ptr()` is the live context, valid for the cookie helper.
+    let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
+    let _ = PLAIN_CONNECT_META.insert(&cookie, &meta, 0);
+}
+
+/// Add a watched socket to the sockhash, copy its connect-time pid/cgroup (recorded by connect4
+/// under the socket cookie) into PLAIN_CONNS, and request a state callback so it is freed on close.
 #[sock_ops]
 pub fn plaintext_sockops(ctx: SockOpsContext) -> u32 {
     let op = ctx.op();
@@ -69,19 +107,15 @@ pub fn plaintext_sockops(ctx: SockOpsContext) -> u32 {
     if op != BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB && op != BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB {
         return 0;
     }
-    let key = plain_endpoint_key(ctx.remote_ip4(), sock_ops_remote_port(ctx.remote_port()));
-    // SAFETY: map lookup with a stack key; the returned reference is only tested for presence.
-    if unsafe { PLAIN_ENDPOINTS.get(&key) }.is_none() {
+    // SAFETY: `ctx.as_ptr()` is this callback's live context, valid for the cookie helper.
+    let mut cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
+    // Present only for a watched active connect (connect4 recorded it); passive sockets are skipped.
+    // SAFETY: map lookup with a stack key; the value is copied out before any other map call.
+    let Some(meta) = (unsafe { PLAIN_CONNECT_META.get(&cookie) }) else {
         return 0;
-    }
-    let pid_tgid = bpf_get_current_pid_tgid();
-    let meta = EventMetadata {
-        pid: (pid_tgid >> 32) as u32,
-        _pad: pid_tgid as u32,
-        // SAFETY: the helper reads the current task's cgroup; 1 on cgroup v1, which userspace gates out.
-        cgroup_id: unsafe { bpf_get_current_cgroup_id() },
-        timestamp: 0,
     };
+    let meta = *meta;
+    let _ = PLAIN_CONNECT_META.remove(&cookie);
     // Key by the 4-tuple so the sk_msg side (which may not call the cookie helper) rebuilds the same key.
     let flow = plain_flow_key(
         ctx.local_ip4(),
@@ -90,8 +124,6 @@ pub fn plaintext_sockops(ctx: SockOpsContext) -> u32 {
         ctx.remote_port(),
     );
     let _ = PLAIN_CONNS.insert(&flow, &meta, 0);
-    // SAFETY: `ctx.as_ptr()` is this callback's live context, valid for the helper call.
-    let mut cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
     // SAFETY: `ctx.ops` is the live bpf_sock_ops this callback was given, borrowed only for the update.
     let ops = unsafe { &mut *ctx.ops };
     let _ = PLAIN_SOCKS.update(&mut cookie, ops, BPF_NOEXIST as u64);
