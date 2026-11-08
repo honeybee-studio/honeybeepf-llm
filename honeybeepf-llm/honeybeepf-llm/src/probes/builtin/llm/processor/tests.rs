@@ -250,6 +250,37 @@ fn unparsed(out: &[Outcome]) -> Vec<UnparsedReason> {
         .collect()
 }
 
+const SESSION_REQUEST: &[u8] = b"POST /v1/sessions HTTP/1.1\r\nHost: api.anthropic.com\r\nContent-Type: application/json\r\n\r\n{\"system\":\"You are helpful\"}";
+const EVENTS_REQUEST: &[u8] = b"POST /v1/sessions/sess_1/events HTTP/1.1\r\nHost: api.anthropic.com\r\nContent-Type: application/json\r\n\r\n{\"events\":[]}";
+// The session object carries a cumulative session total; it must be counted, never recorded as tokens.
+const SESSION_RESPONSE: &str = r#"{"id":"sess_1","type":"session","usage":{"input_tokens":5000,"output_tokens":3200,"cache_read_input_tokens":20000,"list_cost":{"amount":"187","currency":"USD"}}}"#;
+// An events send is acknowledged with no usage; the call is still a session call and must be counted.
+const EVENTS_ACK: &str = r#"{"data":[{"id":"evt_1","type":"user.message"}]}"#;
+
+#[test]
+fn test_managed_agents_session_call_is_counted_agent_session_not_recorded() {
+    let mut p = StreamProcessor::new();
+    let out = exchange(
+        &mut p,
+        SESSION_REQUEST,
+        &h1("application/json", SESSION_RESPONSE),
+    );
+    assert_eq!(unparsed(&out), [UnparsedReason::AgentSession], "{out:?}");
+    assert_eq!(count(&out, Outcome::Recorded), 0, "{out:?}");
+
+    // A usage-less ack is counted the same way: completion, not usage, is the signal (matches HTTP/2).
+    let ack = exchange(&mut p, EVENTS_REQUEST, &h1("application/json", EVENTS_ACK));
+    assert_eq!(unparsed(&ack), [UnparsedReason::AgentSession], "{ack:?}");
+
+    // A later Messages call on the same stream records normally: record_only is cleared on reset.
+    let next = exchange(
+        &mut p,
+        MESSAGES_REQUEST,
+        &h1("application/json", MESSAGES_RESPONSE),
+    );
+    assert_eq!(next.last(), Some(&Outcome::Recorded), "{next:?}");
+}
+
 #[test]
 fn test_messages_after_count_tokens_is_recorded() {
     let mut p = StreamProcessor::new();

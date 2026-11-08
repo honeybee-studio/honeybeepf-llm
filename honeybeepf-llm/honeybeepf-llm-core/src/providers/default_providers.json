@@ -231,6 +231,16 @@
         "model_path": "model"
       },
       "request_extractor": "messages"
+    },
+    {
+      "name": "anthropic-agents",
+      "note": "Claude Managed Agents (beta managed-agents-2026-04-01): the pod POSTs these two paths while the model calls run inside Anthropic, so none match /v1/messages and the pod looks idle. record_only makes the processor count each call under the agent_session unparsed reason and never read the response, whose usage is a running session total. The entry is also inert in the shared usage parse, which ignores the host: the OpenAI-style token keys and required_field (list_cost sits inside a session usage, absent elsewhere) keep it from matching another provider's response.",
+      "hosts": ["api.anthropic.com"],
+      "paths": ["/v1/sessions$", "/v1/sessions/*/events$"],
+      "record_only": true,
+      "response": {
+        "required_field": "list_cost"
+      }
     }
   ]
 }

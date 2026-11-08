@@ -223,7 +223,9 @@ fn on_frame(
                 && streams.len() < MAX_STREAMS
             {
                 let (path, s) = match matched {
-                    Matched::Create(path) => (path, H2Stream::open(Instant::now())),
+                    Matched::Create { path, record_only } => {
+                        (path, H2Stream::open(Instant::now(), record_only))
+                    }
                     Matched::Poll { path, id } => (path, H2Stream::open_poll(Instant::now(), id)),
                 };
                 streams.insert(stream, s);
@@ -297,6 +299,13 @@ fn on_frame(
 /// its old handling; a matched stream routes a background create's `queued` result to `Deferred` and a poll
 /// to `Poll`, so its usage settles against the node-wide background-calls map.
 fn end_stream(s: H2Stream, on: &mut impl FnMut(H2Event)) {
+    if s.record_only() {
+        // A Managed Agents session call: counted at its end, its running session total never read.
+        on(H2Event::Unparsed {
+            reason: UnparsedReason::AgentSession,
+        });
+        return;
+    }
     let (over, speculative, start) = (s.over_limit(), s.speculative(), s.start());
     let poll = s.poll().map(Box::<str>::from);
     let (usage, background) = s.finish();
@@ -380,8 +389,9 @@ fn drop_stream(
 
 /// What a request HEADERS block is, for the stream map.
 enum Matched {
-    /// A POST a provider serves: a generation call, or a Responses create.
-    Create(String),
+    /// A POST a provider serves: a generation call, or a Responses create. `record_only` marks a Managed
+    /// Agents session call, counted at its end without reading its running session total.
+    Create { path: String, record_only: bool },
     /// A `GET <responses path>/{id}` poll of a background Responses call.
     Poll { path: String, id: Box<str> },
 }
@@ -412,9 +422,14 @@ fn match_request(decoder: &mut Decoder, block: &[u8]) -> Option<Matched> {
     let path = std::str::from_utf8(path.as_deref()?).ok()?;
     let base = path.split_once('?').map_or(path, |(p, _)| p);
     match method.as_deref() {
-        Some(b"POST") => PROVIDER_REGISTRY
-            .find_provider(authority, path)
-            .map(|_| Matched::Create(base.to_string())),
+        Some(b"POST") => {
+            PROVIDER_REGISTRY
+                .find_provider(authority, path)
+                .map(|p| Matched::Create {
+                    path: base.to_string(),
+                    record_only: p.record_only,
+                })
+        }
         Some(b"GET") => responses_poll_id(authority, base).map(|id| Matched::Poll {
             path: base.to_string(),
             id,
@@ -501,7 +516,16 @@ mod tests {
         };
         let m = |b: &[u8]| match_request(&mut Decoder::new(), b);
         let openai = block(b"POST", "api.openai.com", "/v1/chat/completions?x=1");
-        assert!(matches!(m(&openai), Some(Matched::Create(p)) if p == "/v1/chat/completions"));
+        assert!(matches!(
+            m(&openai),
+            Some(Matched::Create { path, record_only: false }) if path == "/v1/chat/completions"
+        ));
+        // A Managed Agents session POST is matched as record-only.
+        let session = block(b"POST", "api.anthropic.com", "/v1/sessions");
+        assert!(matches!(
+            m(&session),
+            Some(Matched::Create { path, record_only: true }) if path == "/v1/sessions"
+        ));
         assert!(m(&block(b"POST", "noise.internal", "/p")).is_none());
         // A background poll: GET /v1/responses/{id} to a provider host, query stripped.
         assert!(matches!(
@@ -692,6 +716,59 @@ mod tests {
         reads.extend(std::iter::repeat_n((LlmDirection::Read, chunk), n));
         reads.push((LlmDirection::Read, frame(0, 0x1, 1, b"")));
         assert_eq!(drive(&reads), (0, 0, 1));
+    }
+
+    #[test]
+    fn a_managed_agents_session_stream_is_counted_agent_session_not_recorded() {
+        let session_req = |stream, path: &[u8]| {
+            let block = [
+                lit(b":method", b"POST"),
+                lit(b":authority", b"api.anthropic.com"),
+                lit(b":path", path),
+            ]
+            .concat();
+            frame(1, 0x4 | 0x1, stream, &block)
+        };
+        let head = |stream| frame(1, 0x4, stream, &lit(b":status", b"200"));
+        // Stream 1's body carries a cumulative session total; it must not be recorded as a message.
+        let session_body = frame(
+            0,
+            0x1,
+            1,
+            b"{\"usage\":{\"input_tokens\":5000,\"output_tokens\":3200,\"list_cost\":{\"amount\":\"187\"}}}",
+        );
+        // Stream 3's events send is acked with no usage; it is still counted, completion being the signal.
+        let ack_body = frame(0, 0x1, 3, b"{\"data\":[{\"id\":\"evt_1\"}]}");
+
+        let mut conn = H2Conn::new();
+        let (mut recorded, mut agent) = (0, 0);
+        {
+            let mut on = |event| match event {
+                H2Event::Recorded { .. } => recorded += 1,
+                H2Event::Unparsed {
+                    reason: UnparsedReason::AgentSession,
+                } => agent += 1,
+                _ => {}
+            };
+            conn.feed(LlmDirection::Write, PREFACE, H2Gap::None, &mut on);
+            conn.feed(
+                LlmDirection::Write,
+                &session_req(1, b"/v1/sessions"),
+                H2Gap::None,
+                &mut on,
+            );
+            conn.feed(
+                LlmDirection::Write,
+                &session_req(3, b"/v1/sessions/sess_1/events"),
+                H2Gap::None,
+                &mut on,
+            );
+            conn.feed(LlmDirection::Read, &head(1), H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Read, &session_body, H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Read, &head(3), H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Read, &ack_body, H2Gap::None, &mut on);
+        }
+        assert_eq!((recorded, agent), (0, 2));
     }
 
     /// Opens stream 1 and feeds it `response` reads, returning the live `H2Conn` for an idle-sweep check.

@@ -74,6 +74,7 @@ pub enum UnparsedReason {
     ResponseTooLarge,
     BackgroundUnfinished,
     HeadersLost,
+    AgentSession,
 }
 
 impl UnparsedReason {
@@ -87,6 +88,7 @@ impl UnparsedReason {
             Self::ResponseTooLarge => "response_too_large",
             Self::BackgroundUnfinished => "background_unfinished",
             Self::HeadersLost => "headers_lost",
+            Self::AgentSession => "agent_session",
         }
     }
 }
@@ -111,6 +113,9 @@ impl std::fmt::Display for UnparsedReason {
             Self::HeadersLost => {
                 f.write_str("HTTP/2 request headers were lost, so the stream could not be matched")
             }
+            Self::AgentSession => {
+                f.write_str("Managed Agents session call; its usage is a running total, not read")
+            }
         }
     }
 }
@@ -134,6 +139,9 @@ pub struct StreamProcessor {
     /// A captured gap pending for an HTTP/2 direction (client=Write, server=Read), applied on its next feed.
     h2_gap_client: H2Gap,
     h2_gap_server: H2Gap,
+    /// The detected request is a record-only provider (Managed Agents session), so its response is
+    /// counted under `agent_session` without reading the running session total.
+    record_only: bool,
     /// Capture transport of this connection; a metric label on the calls it records.
     transport: Transport,
 }
@@ -160,6 +168,7 @@ impl StreamProcessor {
             continuation: None,
             h2_gap_client: H2Gap::None,
             h2_gap_server: H2Gap::None,
+            record_only: false,
             transport: Transport::Tls,
         }
     }
@@ -694,21 +703,38 @@ impl StreamProcessor {
             | ProcessorState::ProcessingResponse { start_time, parser } => {
                 // Parse once the SSL call's last fragment is in, not on a partial record
                 if complete {
-                    let usage = match &mut self.past_limit {
-                        Some(followed) => followed.take_usage(),
-                        None => parser.parse_response_from(&self.read_buf, &mut self.read_progress),
-                    };
-                    let state = self.read_progress.take_background();
-                    if let Some(outcome) = self.settle(
-                        usage,
-                        state,
-                        start_time,
-                        background,
-                        pid,
-                        #[cfg(feature = "k8s")]
-                        pod_info,
-                    ) {
-                        return outcome;
+                    // A Managed Agents session call: its usage is a running session total, so it is not
+                    // read at all; the call is counted when its response framing ends, matching the
+                    // HTTP/2 path, which counts every stream end regardless of the body.
+                    if self.record_only {
+                        if http::Http11Parser::is_complete_response(&self.read_buf) {
+                            self.state = ProcessorState::Finished;
+                            return Self::count_unparsed(
+                                pid,
+                                UnparsedReason::AgentSession,
+                                #[cfg(feature = "k8s")]
+                                pod_info.as_ref(),
+                            );
+                        }
+                    } else {
+                        let usage = match &mut self.past_limit {
+                            Some(followed) => followed.take_usage(),
+                            None => {
+                                parser.parse_response_from(&self.read_buf, &mut self.read_progress)
+                            }
+                        };
+                        let state = self.read_progress.take_background();
+                        if let Some(outcome) = self.settle(
+                            usage,
+                            state,
+                            start_time,
+                            background,
+                            pid,
+                            #[cfg(feature = "k8s")]
+                            pod_info,
+                        ) {
+                            return outcome;
+                        }
                     }
                 }
                 self.state = ProcessorState::ProcessingResponse { start_time, parser };
@@ -778,9 +804,11 @@ impl StreamProcessor {
         pid: u32,
         #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
     ) -> ProcessorState {
+        self.record_only = false;
         let (version, path, parser): (&str, String, Box<dyn ProtocolParser>) =
-            if let Some(path) = http::Http11Parser.detect_request(&self.write_buf) {
-                ("HTTP/1.1", path, Box::new(http::Http11Parser))
+            if let Some(d) = http::Http11Parser.detect_request(&self.write_buf) {
+                self.record_only = d.record_only;
+                ("HTTP/1.1", d.path, Box::new(http::Http11Parser))
             } else if let Some(id) = http::Http11Parser::retrieved_response_id(&self.write_buf)
                 .filter(|id| background.contains(id))
             {
@@ -791,8 +819,8 @@ impl StreamProcessor {
                     format!("poll of background call {id}"),
                     Box::new(http::Http11Parser),
                 )
-            } else if let Some(path) = http::Http2Parser.detect_request(&self.write_buf) {
-                ("HTTP/2", path, Box::new(http::Http2Parser))
+            } else if let Some(d) = http::Http2Parser.detect_request(&self.write_buf) {
+                ("HTTP/2", d.path, Box::new(http::Http2Parser))
             } else if self.write_buf.len() > DETECTION_BUFFER_THRESHOLD {
                 // Buffer too large and still not detected -> likely not LLM
                 return ProcessorState::Finished;
@@ -825,6 +853,7 @@ impl StreamProcessor {
         self.continuation = None;
         self.h2_gap_client = H2Gap::None;
         self.h2_gap_server = H2Gap::None;
+        self.record_only = false;
     }
 
     /// Record, defer or drop the call once its response parsed to `usage` and `state`; None keeps waiting.
