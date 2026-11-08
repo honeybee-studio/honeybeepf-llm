@@ -16,9 +16,9 @@ use aya_ebpf::{
     programs::{SkBuffContext, SkMsgContext, SockAddrContext, SockOpsContext},
 };
 use honeybeepf_llm_common::{
-    EventMetadata, LlmDirection, LlmEventHeader, MAX_SSL_BUF_SIZE, PLAIN_CONNS_ENTRIES,
-    PLAIN_ENDPOINTS_ENTRIES, PLAIN_SOCKS_ENTRIES, PlainFlowKey, plain_endpoint_key, plain_flow_key,
-    plain_stream_id,
+    EventMetadata, LlmDirection, LlmEventHeader, MAX_SSL_BUF_SIZE, MAX_SSL_FRAGMENTS,
+    PLAIN_CONNS_ENTRIES, PLAIN_ENDPOINTS_ENTRIES, PLAIN_SOCKS_ENTRIES, PlainFlowKey, capture_limit,
+    plain_endpoint_key, plain_flow_key, plain_stream_id,
 };
 
 /// Minimum when plaintext is off; the loader bumps it to the full size when enabled.
@@ -141,13 +141,14 @@ fn init_header(
     len: u32,
     rw: LlmDirection,
     truncated: u8,
+    offset: u32,
     ssl_ptr: u64,
 ) {
     h.metadata = *meta;
     h.ssl_ptr = ssl_ptr;
     h.latency_ns = 0;
     h.len = len;
-    h.offset = 0;
+    h.offset = offset;
     h.is_handshake = 0;
     h.rw = rw as u8;
     h.truncated = truncated;
@@ -170,6 +171,7 @@ fn emit_send<const N: usize>(ctx: &SkMsgContext, meta: &EventMetadata, size: u32
         size,
         LlmDirection::Write,
         (size as usize > N) as u8,
+        0,
         stream,
     );
     // The dispatch keeps `size` within the chosen bucket, but the compiler spills it and the verifier
@@ -187,12 +189,20 @@ fn emit_send<const N: usize>(ctx: &SkMsgContext, meta: &EventMetadata, size: u32
     slot.submit(0);
 }
 
-/// Copy a watched receive into PLAIN_EVENTS; mirrors `emit_send` but reads from the (possibly
-/// non-linear) skb with the bounded `bpf_skb_load_bytes` helper, so no pull is needed.
+/// Copy one receive fragment at `offset` into PLAIN_EVENTS; mirrors `emit_send` but reads from the
+/// (possibly non-linear) skb with the bounded `bpf_skb_load_bytes` helper, so no pull is needed.
+/// Returns false when the slot or read fails, so the caller stops emitting further fragments.
 #[inline(always)]
-fn emit_recv<const N: usize>(ctx: &SkBuffContext, meta: &EventMetadata, size: u32, stream: u64) {
+fn emit_recv<const N: usize>(
+    ctx: &SkBuffContext,
+    meta: &EventMetadata,
+    size: u32,
+    offset: u32,
+    truncated: u8,
+    stream: u64,
+) -> bool {
     let Some(mut slot) = PLAIN_EVENTS.reserve::<PlainEvent<N>>(0) else {
-        return;
+        return false;
     };
     // SAFETY: the slot is reserved for a PlainEvent<N>; every header field is set before submit.
     let ev = unsafe { &mut *slot.as_mut_ptr() };
@@ -201,16 +211,20 @@ fn emit_recv<const N: usize>(ctx: &SkBuffContext, meta: &EventMetadata, size: u3
         meta,
         size,
         LlmDirection::Read,
-        (size as usize > N) as u8,
+        truncated,
+        offset,
         stream,
     );
-    // SAFETY: &size is a valid initialized local; the volatile reload keeps the min(.., N) bound.
-    let n = core::cmp::min(unsafe { core::ptr::read_volatile(&size) } as usize, N);
-    // bpf_skb_load_bytes rejects a zero-length read, so bail on an empty record.
+    // This fragment's bytes, capped to the bucket. The dispatch already keeps it <= N, but the
+    // compiler spills it and the verifier loses that bound; a volatile reload keeps the min(.., N).
+    let want = size.saturating_sub(offset) as usize;
+    // SAFETY: &want is a valid initialized local.
+    let n = core::cmp::min(unsafe { core::ptr::read_volatile(&want) }, N);
+    // bpf_skb_load_bytes rejects a zero-length read, so bail on an empty fragment.
     if n == 0 {
         ev.header.buf_filled = 0;
         slot.discard(0);
-        return;
+        return false;
     }
     // Call the helper directly, not aya's `load_bytes`: that re-mins the length with `skb->len`,
     // whose lower bound of 0 the verifier keeps, so it rejects the read. The volatile reload plus
@@ -223,7 +237,7 @@ fn emit_recv<const N: usize>(ctx: &SkBuffContext, meta: &EventMetadata, size: u3
     let loaded = unsafe {
         bpf_skb_load_bytes(
             ctx.as_ptr(),
-            0,
+            offset,
             dst.as_mut_ptr() as *mut core::ffi::c_void,
             n as u32,
         )
@@ -231,10 +245,11 @@ fn emit_recv<const N: usize>(ctx: &SkBuffContext, meta: &EventMetadata, size: u3
     if loaded != 0 {
         ev.header.buf_filled = 0;
         slot.discard(0);
-        return;
+        return false;
     }
     ev.header.buf_filled = 1;
     slot.submit(0);
+    true
 }
 
 /// Linearize the send's first bytes and emit them in the smallest bucket that fits.
@@ -280,21 +295,34 @@ pub fn plaintext_skmsg(ctx: SkMsgContext) -> u32 {
     SK_PASS
 }
 
-/// Emit the receive's first bytes in the smallest bucket that fits; `bpf_skb_load_bytes` copies
-/// directly from the skb, so no pull is needed.
+/// Emit the receive as up to `MAX_SSL_FRAGMENTS` records so a skb past one bucket is captured whole
+/// instead of marked truncated and dropped; each fragment reads its own `offset` from the skb and
+/// the smallest bucket that fits. `truncated` marks the receive only when it exceeds the Read limit.
 #[inline(never)]
 fn capture_recv(ctx: &SkBuffContext, meta: &EventMetadata, stream: u64) {
     let size = ctx.len();
     if size == 0 {
         return;
     }
-    let to_read = core::cmp::min(size as usize, MAX_SSL_BUF_SIZE);
-    if to_read <= PLAIN_BUCKET_SMALL {
-        emit_recv::<PLAIN_BUCKET_SMALL>(ctx, meta, size, stream);
-    } else if to_read <= PLAIN_BUCKET_MED {
-        emit_recv::<PLAIN_BUCKET_MED>(ctx, meta, size, stream);
-    } else {
-        emit_recv::<MAX_SSL_BUF_SIZE>(ctx, meta, size, stream);
+    let limit = capture_limit(LlmDirection::Read);
+    let truncated = (size as usize > limit) as u8;
+    for i in 0..MAX_SSL_FRAGMENTS {
+        let offset = i * MAX_SSL_BUF_SIZE;
+        if i > 0 && (offset >= size as usize || offset >= limit) {
+            return;
+        }
+        let offset = offset as u32;
+        let to_read = core::cmp::min(size.saturating_sub(offset) as usize, MAX_SSL_BUF_SIZE);
+        let sent = if to_read <= PLAIN_BUCKET_SMALL {
+            emit_recv::<PLAIN_BUCKET_SMALL>(ctx, meta, size, offset, truncated, stream)
+        } else if to_read <= PLAIN_BUCKET_MED {
+            emit_recv::<PLAIN_BUCKET_MED>(ctx, meta, size, offset, truncated, stream)
+        } else {
+            emit_recv::<MAX_SSL_BUF_SIZE>(ctx, meta, size, offset, truncated, stream)
+        };
+        if !sent {
+            return;
+        }
     }
 }
 
@@ -326,7 +354,15 @@ fn emit_close(flow: &PlainFlowKey, meta: &EventMetadata) {
     };
     // SAFETY: the slot is reserved for one header; every field is set before submit.
     let h = unsafe { &mut *slot.as_mut_ptr() };
-    init_header(h, meta, 0, LlmDirection::Unknown, 0, plain_stream_id(flow));
+    init_header(
+        h,
+        meta,
+        0,
+        LlmDirection::Unknown,
+        0,
+        0,
+        plain_stream_id(flow),
+    );
     h.buf_filled = 0;
     h.closed = 1;
     slot.submit(0);
