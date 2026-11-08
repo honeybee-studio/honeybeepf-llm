@@ -15,9 +15,9 @@ use honeybeepf_llm_core::providers::ProviderRegistry;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{Api, Client, api::ListParams};
-use log::warn;
+use log::{debug, warn};
 
-use crate::probes::shutdown_flag;
+use crate::probes::{IdentityResolver, shutdown_flag};
 
 /// Full ring size once plaintext is enabled; the eBPF map declares a tiny default so a TLS-only
 /// node spends almost nothing on it.
@@ -306,10 +306,15 @@ pub fn configured_specs() -> Vec<EndpointSpec> {
     specs_from_registry(&registry)
 }
 
-/// Gate on cgroup v2 + kernel 5.10, attach the sockops program to the cgroup, fill the endpoint map,
-/// and run the reconcile driver. Returns Err (logged as disabled) when the node cannot support it.
-pub async fn start(bpf: &mut aya::Ebpf, specs: Vec<EndpointSpec>) -> Result<()> {
-    use aya::programs::{CgroupAttachMode, SockOps};
+/// Gate on cgroup v2 + kernel 5.10, attach the socket programs, start the parser, fill the endpoint
+/// map, and run the reconcile driver; a failure after the sockops attach undoes it. Returns Err
+/// (logged as disabled) when the node cannot support it.
+pub async fn start(
+    bpf: &mut aya::Ebpf,
+    specs: Vec<EndpointSpec>,
+    resolver: IdentityResolver,
+) -> Result<()> {
+    use aya::programs::{CgroupAttachMode, SkMsg, SkSkb, SockOps};
 
     if !KernelVersion::current().is_ok_and(|v| v >= KernelVersion::new(5, 10, 0)) {
         anyhow::bail!("kernel older than 5.10");
@@ -317,12 +322,39 @@ pub async fn start(bpf: &mut aya::Ebpf, specs: Vec<EndpointSpec>) -> Result<()> 
     let cgroup = cgroup_v2_root().context("no cgroup v2 hierarchy (pure cgroup v1 node)")?;
     let cgroup_fd = std::fs::File::open(&cgroup)?;
 
-    let prog: &mut SockOps = bpf
+    // Verify both programs before attaching either: a verifier rejection then leaves nothing attached.
+    {
+        let p: &mut SockOps = bpf
+            .program_mut("plaintext_sockops")
+            .context("plaintext_sockops program missing")?
+            .try_into()?;
+        p.load().map_err(|e| load_error("plaintext_sockops", e))?;
+    }
+    {
+        let p: &mut SkMsg = bpf
+            .program_mut("plaintext_skmsg")
+            .context("plaintext_skmsg program missing")?
+            .try_into()?;
+        p.load().map_err(|e| load_error("plaintext_skmsg", e))?;
+    }
+    {
+        let p: &mut SkSkb = bpf
+            .program_mut("plaintext_skskb")
+            .context("plaintext_skskb program missing")?
+            .try_into()?;
+        p.load().map_err(|e| load_error("plaintext_skskb", e))?;
+    }
+
+    let sockops: &mut SockOps = bpf
         .program_mut("plaintext_sockops")
         .context("plaintext_sockops program missing")?
         .try_into()?;
-    prog.load()?;
-    prog.attach(cgroup_fd, CgroupAttachMode::Single)?;
+    let sockops_link = sockops.attach(cgroup_fd, CgroupAttachMode::Single)?;
+
+    if let Err(e) = attach_programs_and_read(bpf, resolver) {
+        detach_sockops(bpf, sockops_link);
+        return Err(e);
+    }
 
     let map = aya::maps::HashMap::<_, u64, u8>::try_from(
         bpf.take_map("PLAIN_ENDPOINTS")
@@ -334,6 +366,62 @@ pub async fn start(bpf: &mut aya::Ebpf, specs: Vec<EndpointSpec>) -> Result<()> 
     };
     tokio::spawn(resolver.run(client, MapEndpointSink::new(map)));
     Ok(())
+}
+
+/// Attach the sk_msg (send) and sk_skb (receive) programs to the sockhash of watched sockets and
+/// start parsing PLAIN_EVENTS into LLM calls.
+fn attach_programs_and_read(bpf: &mut aya::Ebpf, resolver: IdentityResolver) -> Result<()> {
+    use aya::programs::{SkMsg, SkSkb};
+    let socks = aya::maps::SockHash::<_, u64>::try_from(
+        bpf.map("PLAIN_SOCKS").context("PLAIN_SOCKS map missing")?,
+    )?
+    .fd()
+    .try_clone()?;
+    {
+        let skmsg: &mut SkMsg = bpf
+            .program_mut("plaintext_skmsg")
+            .context("plaintext_skmsg program missing")?
+            .try_into()?;
+        skmsg.attach(&socks)?;
+    }
+    {
+        let skskb: &mut SkSkb = bpf
+            .program_mut("plaintext_skskb")
+            .context("plaintext_skskb program missing")?
+            .try_into()?;
+        skskb.attach(&socks)?;
+    }
+    crate::probes::builtin::llm::spawn_plaintext_parser(bpf, resolver)
+}
+
+/// Detach the sockops program so a failed later step leaves nothing attached to the cgroup.
+fn detach_sockops(bpf: &mut aya::Ebpf, link: aya::programs::sock_ops::SockOpsLinkId) {
+    use aya::programs::SockOps;
+    let prog = bpf
+        .program_mut("plaintext_sockops")
+        .expect("plaintext_sockops present after it was attached");
+    if let Ok(prog) = TryInto::<&mut SockOps>::try_into(prog) {
+        let _ = prog.detach(link);
+    }
+}
+
+/// Log a program's verifier rejection — the last lines at warn, the whole log at debug so the kernel
+/// matrix shows the cause — and return a short error for the caller.
+fn load_error(name: &str, e: aya::programs::ProgramError) -> anyhow::Error {
+    use aya::programs::ProgramError;
+    if let ProgramError::LoadError { verifier_log, .. } = &e {
+        let full = verifier_log.to_string();
+        let lines: Vec<&str> = full.lines().collect();
+        let keep = lines.len().min(25);
+        let tail = lines[lines.len() - keep..].join("\n");
+        warn!(
+            "{name}: verifier rejected the program; last {keep} of {} log lines:\n{tail}",
+            lines.len()
+        );
+        debug!("{name}: full verifier log:\n{full}\n--- end verifier log ---");
+        return anyhow::anyhow!("{name}: verifier rejected the program");
+    }
+    anyhow::anyhow!("{name}: {e}")
 }
 
 #[cfg(test)]
