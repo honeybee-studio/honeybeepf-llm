@@ -1,3 +1,4 @@
+use super::prices::reload_prices;
 use super::*;
 use opentelemetry::metrics::MeterProvider;
 use opentelemetry_sdk::metrics::data::{self, ResourceMetrics};
