@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use super::*;
 use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
 
