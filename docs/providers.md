@@ -18,6 +18,7 @@ replayed against it as well. A blank cell was not checked.
 | Claude on Vertex AI, Google Cloud and Microsoft Foundry | ✅ | ✅ | ✅ read/write |
 | Amazon Bedrock Converse | ✅ | ✅ ConverseStream (event stream) | ✅ read/write |
 | Amazon Bedrock InvokeModel (Anthropic Claude models) | ✅ | ✅ InvokeModelWithResponseStream, every model | ✅ read/write |
+| Meta Model API — Muse Spark (`api.meta.ai`: Chat Completions, Responses, Messages) | ✅ | ✅ | |
 
 Compressed responses (`gzip`, `br`, `zstd`, `deflate`) are decoded, SSE included.
 
