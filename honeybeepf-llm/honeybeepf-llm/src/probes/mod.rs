@@ -236,8 +236,10 @@ fn parse_llm_record(item: &[u8]) -> Option<(&LlmEventHeader, &[u8])> {
     if item.len() < H {
         return None;
     }
-    // SAFETY: BPF ring-buffer records are 8-byte aligned and `LlmEventHeader: aya::Pod` (repr(C),
-    // every byte pattern valid); the length is checked, so the header is reborrowed in place.
+    // SAFETY: BPF ring-buffer records are 8-byte aligned, which meets `align_of::<LlmEventHeader>()`
+    // (its widest field is u64); `LlmEventHeader: aya::Pod` (repr(C), every byte pattern valid) and the
+    // length is checked, so the header is reborrowed in place.
+    #[allow(clippy::cast_ptr_alignment)] // record alignment (8) covers the header; verified above
     let header: &LlmEventHeader = unsafe { &*(item.as_ptr() as *const LlmEventHeader) };
     let end = H + header.payload_len();
     item.get(H..end).map(|payload| (header, payload))
