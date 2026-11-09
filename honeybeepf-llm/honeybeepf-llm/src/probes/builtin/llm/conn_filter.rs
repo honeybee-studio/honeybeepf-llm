@@ -41,7 +41,9 @@ impl ConnFilter {
         }
         let key = (header.metadata.pid, header.ssl_ptr);
         {
-            let mut map = streams.lock().unwrap_or_else(|e| e.into_inner());
+            let mut map = streams
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             // A stream with an LLM call in progress keeps going, so it is still recorded or counted.
             if map.get(&key).is_some_and(StreamProcessor::is_llm) {
                 return false;

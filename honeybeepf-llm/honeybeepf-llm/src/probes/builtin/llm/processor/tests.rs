@@ -1333,7 +1333,7 @@ fn test_credentials_stay_out_of_logs() {
     for request in &requests {
         LOGS.with(|logs| logs.borrow_mut().clear());
         let out = exchange(&mut StreamProcessor::new(), request.as_bytes(), &response);
-        let logs = LOGS.with(|logs| logs.take());
+        let logs = LOGS.with(std::cell::RefCell::take);
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
         assert!(logs.contains("[LLM] Detected"), "{logs}");
         assert!(!logs.contains("HBTEST"), "{logs}");

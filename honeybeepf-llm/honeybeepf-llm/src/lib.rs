@@ -107,9 +107,7 @@ impl HoneyBeeEngine {
     pub async fn run(mut self) -> Result<()> {
         let _shutdown = ShutdownOnDrop;
         if let Err(e) = telemetry::init_metrics() {
-            warn!(
-                "Failed to initialize OpenTelemetry metrics: {e}. Metrics will not be exported."
-            );
+            warn!("Failed to initialize OpenTelemetry metrics: {e}. Metrics will not be exported.");
         }
 
         // Start K8s pod watcher if available
@@ -139,9 +137,7 @@ impl HoneyBeeEngine {
                         self.resolver = IdentityResolver::with_pod_resolver(pod_resolver);
                     }
                     Err(e) => {
-                        warn!(
-                            "K8s pod watcher failed to start: {e}. Pod resolution disabled."
-                        );
+                        warn!("K8s pod watcher failed to start: {e}. Pod resolution disabled.");
                     }
                 }
             } else {
@@ -168,13 +164,13 @@ impl HoneyBeeEngine {
         self.attach_probes()?;
 
         // Start dynamic probe discovery if any dynamic probes are enabled
-        if !self.dynamic_probes.is_empty() {
+        if self.dynamic_probes.is_empty() {
+            info!("Monitoring active. Press Ctrl-C to exit.");
+            signal::ctrl_c().await?;
+        } else {
             let exec_watch = setup_exec_watch(&mut self.bpf)?;
             let lib_watch = setup_lib_open_watch(&mut self.bpf)?;
             self.run_discovery(exec_watch, lib_watch).await?;
-        } else {
-            info!("Monitoring active. Press Ctrl-C to exit.");
-            signal::ctrl_c().await?;
         }
 
         info!("Exiting...");
@@ -200,7 +196,7 @@ impl HoneyBeeEngine {
                 _ = signal::ctrl_c() => break,
                 _ = lib_notify.notified() => {
                     let opens: Vec<LibOpen> = {
-                        let mut q = lib_queue.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut q = lib_queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         q.drain(..).collect()
                     };
                     for open in opens {
@@ -222,7 +218,7 @@ impl HoneyBeeEngine {
                 _ = tokio::time::sleep_until(exec_due.unwrap_or_else(Instant::now)), if exec_due.is_some() => {
                     exec_due = None;
                     let pids: Vec<u32> = {
-                        let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut q = queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         q.drain(..).collect()
                     };
 

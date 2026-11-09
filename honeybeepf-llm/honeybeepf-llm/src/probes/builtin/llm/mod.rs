@@ -229,7 +229,9 @@ where
     let mut out = Vec::new();
     for _ in 0..ATTACH_ROUNDS {
         let candidates = {
-            let known = known.lock().unwrap_or_else(|e| e.into_inner());
+            let known = known
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             unique_new_files(paths.clone(), &known)
         };
         let mut vanished = false;
@@ -240,7 +242,10 @@ where
                 vanished = true;
                 continue;
             }
-            known.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
+            known
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(id);
             out.push((path, id, result));
         }
         if !vanished {
@@ -270,8 +275,7 @@ impl DynamicProbe for LlmProbe {
             std::path::Path::new(path)
                 .file_name()
                 .and_then(|f| f.to_str())
-                .map(|f| f.starts_with("libssl.so"))
-                .unwrap_or(false)
+                .is_some_and(|f| f.starts_with("libssl.so"))
         });
         for (path, id, result) in self.attach_new(bpf, ssl_libs) {
             match result {
@@ -362,8 +366,12 @@ pub(crate) fn spawn_plaintext_parser(bpf: &mut Ebpf, resolver: IdentityResolver)
                 "plain record: pid={} stream={:#x} rw={} len={} closed={}",
                 header.metadata.pid, header.ssl_ptr, header.rw, data.len(), header.closed
             );
-            let mut map = handler_state.lock().unwrap_or_else(|e| e.into_inner());
-            let mut calls = handler_background.lock().unwrap_or_else(|e| e.into_inner());
+            let mut map = handler_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut calls = handler_background
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             route_event(&mut map, &mut calls, header, data, Transport::Plain, || {
                 resolver.resolve_pod(header.metadata.pid, header.metadata.cgroup_id)
             });
@@ -403,9 +411,7 @@ impl Probe for LlmProbe {
                     path,
                     id.ino()
                 ),
-                Ok(false) => warn!(
-                    "Failed to attach to {path}: SSL_read/SSL_write not exported"
-                ),
+                Ok(false) => warn!("Failed to attach to {path}: SSL_read/SSL_write not exported"),
                 Err(e) => warn!("Failed to attach to {path}: {e}"),
             }
         }
@@ -433,8 +439,12 @@ impl Probe for LlmProbe {
                     return;
                 }
 
-                let mut map = handler_state.lock().unwrap_or_else(|e| e.into_inner());
-                let mut calls = handler_background.lock().unwrap_or_else(|e| e.into_inner());
+                let mut map = handler_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut calls = handler_background
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 route_event(
                     &mut map,
                     &mut calls,
@@ -462,14 +472,14 @@ fn start_cleanup_task(state: StreamMap, background: BackgroundMap) {
             let now = std::time::Instant::now();
             state
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .retain(|_, v| {
                     now.duration_since(v.last_activity()).as_secs() < CONNECTION_RETENTION_SECS
                 });
             // Counted after both locks are released: the ringbuf handler waits on them.
             let expired: Vec<_> = background
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .expire(now)
                 .collect();
             for call in expired {
@@ -491,7 +501,10 @@ fn start_stats_log_task(state: StreamMap) {
                 log_event_stats();
                 last = current;
             }
-            let streams = state.lock().unwrap_or_else(|e| e.into_inner()).len();
+            let streams = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len();
             if streams != last_streams {
                 info!("[LLM streams] {streams} open");
                 last_streams = streams;
@@ -771,13 +784,13 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0, paths[1]);
         assert!(matches!(out[0].2, Ok(true)));
-        assert_eq!(known.lock().map(|k| k.len()).unwrap_or(0), 1);
+        assert_eq!(known.lock().map_or(0, |k| k.len()), 1);
 
         // A failure on a path that still exists is recorded, so the file is not retried.
         let known = Mutex::new(HashSet::new());
         let out = attach_new_files(&known, &paths[1..], |_| anyhow::bail!("verifier"));
         assert_eq!(out.len(), 1);
-        assert_eq!(known.lock().map(|k| k.len()).unwrap_or(0), 1);
+        assert_eq!(known.lock().map_or(0, |k| k.len()), 1);
 
         std::fs::remove_dir_all(&dir)
     }

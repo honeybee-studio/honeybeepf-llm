@@ -453,12 +453,9 @@ fn get_otlp_endpoint() -> Option<String> {
 /// Configures metrics export to OTLP Collector via gRPC.
 /// Skips initialization if OTEL_EXPORTER_OTLP_ENDPOINT is not set.
 pub fn init_metrics() -> Result<()> {
-    let endpoint = match get_otlp_endpoint() {
-        Some(ep) => ep,
-        None => {
-            info!("OTEL_EXPORTER_OTLP_ENDPOINT not set. Metrics export disabled.");
-            return Ok(());
-        }
+    let Some(endpoint) = get_otlp_endpoint() else {
+        info!("OTEL_EXPORTER_OTLP_ENDPOINT not set. Metrics export disabled.");
+        return Ok(());
     };
 
     info!("Initializing OpenTelemetry metrics exporter");

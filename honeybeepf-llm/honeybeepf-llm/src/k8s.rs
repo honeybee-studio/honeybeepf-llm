@@ -256,11 +256,7 @@ impl PodResolver {
             }
             // Clean cgroup_cache entries that pointed to deleted containers
             if let Ok(mut cache) = self.cgroup_cache.write() {
-                cache.retain(|_, v| {
-                    v.as_ref()
-                        .map(|id| !container_ids.contains(id))
-                        .unwrap_or(true)
-                });
+                cache.retain(|_, v| v.as_ref().map_or(true, |id| !container_ids.contains(id)));
             }
         } else {
             // Pre-warm cgroup_id cache: resolve cgroup_id from cgroup path on disk
@@ -321,11 +317,7 @@ impl PodResolver {
         if let (Ok(mut cgroup_cache), Ok(pod_store)) =
             (self.cgroup_cache.write(), self.pod_store.read())
         {
-            cgroup_cache.retain(|_, v| {
-                v.as_ref()
-                    .map(|cid| pod_store.contains_key(cid))
-                    .unwrap_or(true)
-            });
+            cgroup_cache.retain(|_, v| v.as_ref().map_or(true, |cid| pod_store.contains_key(cid)));
         }
     }
 }

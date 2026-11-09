@@ -21,7 +21,7 @@ where
                 .into_iter()
                 .map(|v| {
                     v.as_str()
-                        .map(|s| s.to_string())
+                        .map(std::string::ToString::to_string)
                         .ok_or_else(|| D::Error::custom("expected string in array"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;

@@ -329,7 +329,9 @@ pub fn setup_exec_watch(bpf: &mut Ebpf) -> Result<(ExecPidQueue, ExecNotify)> {
     let handler_notify = notify.clone();
 
     spawn_ringbuf_handler(bpf, "EXEC_EVENTS", move |event: &ExecEvent| {
-        let mut q = handler_queue.lock().unwrap_or_else(|e| e.into_inner());
+        let mut q = handler_queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Cap queue to avoid unbounded growth under extreme exec rates
         if q.len() < MAX_EXEC_QUEUE_SIZE {
             q.push_back(event.pid);
@@ -363,9 +365,7 @@ pub fn setup_lib_open_watch(bpf: &mut Ebpf) -> Result<(LibOpenQueue, ExecNotify,
         Ok(()) => info!("libssl open watch: fentry on do_sys_openat2"),
         Err(fentry_err) => match attach_kprobe(bpf, "probe_lib_open", "do_sys_openat2") {
             Ok(()) => info!("libssl open watch: kprobe (fentry: {fentry_err:#})"),
-            Err(e) => warn!(
-                "libssl open watch not attached: {e:#} (fentry: {fentry_err:#})"
-            ),
+            Err(e) => warn!("libssl open watch not attached: {e:#} (fentry: {fentry_err:#})"),
         },
     }
     let seen = AyaHashMap::try_from(
@@ -391,7 +391,9 @@ pub fn setup_lib_open_watch(bpf: &mut Ebpf) -> Result<(LibOpenQueue, ExecNotify,
             seen_key: event.seen_key,
             ts: event.ts,
         };
-        let mut q = handler_queue.lock().unwrap_or_else(|e| e.into_inner());
+        let mut q = handler_queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if q.len() < MAX_EXEC_QUEUE_SIZE {
             q.push_back(open);
         } else {

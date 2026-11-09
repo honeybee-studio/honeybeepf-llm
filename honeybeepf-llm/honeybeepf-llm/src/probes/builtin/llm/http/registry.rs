@@ -149,7 +149,7 @@ mod tests {
         let registry = config::Config::builder()
             .add_source(config::File::from_str(yaml, config::FileFormat::Yaml))
             .build()
-            .and_then(|c| c.try_deserialize::<ProviderRegistry>())?;
+            .and_then(config::Config::try_deserialize::<ProviderRegistry>)?;
         let provider = ConfigurableProvider::new(registry.providers[0].clone());
         let body = serde_json::json!({"served": {"model": "m-1"},
             "meta": {"usage": {"in": 10, "hit": 3, "mode": "fast"}}});

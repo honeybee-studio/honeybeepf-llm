@@ -146,9 +146,7 @@ pub fn find_libraries_all(
 
     // Include system libraries via ldconfig if a substring is provided
     if let Some(substring) = ldconfig_substring {
-        debug!(
-            "Finding system libraries via ldconfig for '{substring}'..."
-        );
+        debug!("Finding system libraries via ldconfig for '{substring}'...");
         if let Ok(system_libs) = find_system_libraries(substring) {
             for path in system_libs {
                 paths.insert(path);
@@ -160,14 +158,12 @@ pub fn find_libraries_all(
     debug!("Scanning processes for libraries matching pattern...");
     if let Ok(procs) = procfs::process::all_processes() {
         for p in procs {
-            let process = match p {
-                Ok(proc) => proc,
-                Err(_) => continue,
+            let Ok(process) = p else {
+                continue;
             };
 
-            let maps = match process.maps() {
-                Ok(m) => m,
-                Err(_) => continue,
+            let Ok(maps) = process.maps() else {
+                continue;
             };
 
             for map in maps {
@@ -275,7 +271,7 @@ pub fn find_executables_all() -> HashSet<String> {
         return HashSet::new();
     };
     procs
-        .filter_map(|p| p.ok())
+        .filter_map(std::result::Result::ok)
         .filter_map(|p| get_process_exe(p.pid as u32))
         .collect()
 }
