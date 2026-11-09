@@ -771,7 +771,7 @@ fn llm_cost_is_priced_per_call_and_unknown_models_stay_unpriced() -> Result<()> 
     );
     assert!(
         cost.data_points.iter().all(|p| {
-            label(&p.attributes, "price_table_version").as_deref() == Some("2026-11-07")
+            label(&p.attributes, "price_table_version").as_deref() == Some("2026-11-09")
         })
     );
     let unpriced = find("llm_unpriced_tokens_total")?
