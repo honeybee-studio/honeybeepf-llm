@@ -129,6 +129,18 @@ impl Http11Parser {
         final_head(buffer).is_some_and(|head| head.framing.ended(head.body))
     }
 
+    /// Whether a complete 2xx response framed by Content-Length is buffered. Only Content-Length is
+    /// counted: a chunked body can reach its terminator with broken framing (capture loss), which is not
+    /// a clean "provider returned no usage". SSE and event streams are read as they stream, not here.
+    pub fn is_complete_success_response(buffer: &[u8]) -> bool {
+        final_head(buffer).is_some_and(|head| {
+            (200..300).contains(&head.status)
+                && !head.is_sse
+                && !head.is_eventstream
+                && matches!(head.framing, Framing::Length(len) if head.body.len() >= len)
+        })
+    }
+
     /// Whether the buffer starts with a final response head that has headers; body text that merely starts with
     /// `HTTP/1.` parses with none, since SSE and JSON bodies have raw newlines only between events.
     pub fn starts_with_response_head(buffer: &[u8]) -> bool {
@@ -164,6 +176,7 @@ struct Head<'b> {
     is_sse: bool,
     /// AWS binary event stream (Bedrock `*-stream` routes).
     is_eventstream: bool,
+    status: u16,
 }
 
 impl<'b> Head<'b> {
@@ -200,6 +213,7 @@ fn final_head(buffer: &[u8]) -> Option<Head<'_>> {
         );
         // httparse fills the array from the front and shrinks `resp.headers` to the parsed ones.
         let header_count = resp.headers.len();
+        let status = resp.code.unwrap_or(0);
         return Some(Head {
             header_slots: headers,
             header_count,
@@ -207,6 +221,7 @@ fn final_head(buffer: &[u8]) -> Option<Head<'_>> {
             framing,
             is_sse,
             is_eventstream,
+            status,
         });
     }
 }

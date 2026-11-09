@@ -28,7 +28,7 @@ struct ProviderUrls {
 #[test]
 fn test_default_providers() {
     let registry = ProviderRegistry::with_defaults();
-    assert_eq!(registry.providers.len(), 12);
+    assert_eq!(registry.providers.len(), 13);
 }
 
 // `with_defaults` panics only on a parse error, and serde skips unknown keys, so a key typo would go unnoticed.
@@ -41,7 +41,7 @@ fn test_default_providers_json_parses_with_known_keys_only() {
         "name note hosts paths response request_extractor operation plaintext record_only";
     let response_keys = "usage_path prompt_tokens completion_tokens completion_optional extra_prompt_tokens thoughts_tokens \
         completion_excludes_thoughts cache_read_tokens cache_write_tokens cache_write_long_ttl_tokens \
-        speed inference_geo prompt_excludes_cache required_field model_path service_tier_path iterations_path billed_categories root_object";
+        speed inference_geo prompt_excludes_cache required_field model_path service_tier_path iterations_path billed_categories root_object required_root_field";
     let file: serde_json::Value = serde_json::from_str(json).unwrap();
     for provider in file["providers"].as_array().unwrap() {
         let name = &provider["name"];
@@ -88,7 +88,7 @@ fn test_default_provider_hosts() {
     let gemini = ["generativelanguage.googleapis.com", vertex[0], vertex[1]];
     // Image and transcription entries are first-party OpenAI only; Azure/Bedrock media is a follow-up.
     let media = ["api.openai.com"];
-    let expected: [&[&str]; 12] = [
+    let expected: [&[&str]; 13] = [
         &openai,
         &openai,
         &media,
@@ -101,6 +101,7 @@ fn test_default_provider_hosts() {
             "claude.googleapis.com",
             "services.ai.azure.com",
         ],
+        &gemini,
         &gemini,
         &gemini,
         &vertex,
@@ -314,6 +315,7 @@ fn test_user_providers_are_added_to_the_defaults() {
             "anthropic",
             "gemini",
             "gemini",
+            "gemini",
             "anthropic",
             "bedrock",
             "bedrock",
@@ -358,6 +360,7 @@ fn test_user_provider_replaces_defaults_with_its_name_in_their_place() {
             "openai",
             "anthropic",
             "anthropic",
+            "gemini",
             "gemini",
             "gemini",
             "bedrock",

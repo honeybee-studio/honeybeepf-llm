@@ -236,9 +236,9 @@ fn on_frame(
         // the table in sync. A block after DATA is trailers and `response_headers` leaves the body as is.
         Frame::Headers { stream, block } => {
             if streams.contains_key(&stream) {
-                let (content_type, coding) = collect_response(decoder, block);
+                let (status, content_type, coding) = collect_response(decoder, block);
                 if let Some(s) = streams.get_mut(&stream) {
-                    s.response_headers(content_type.as_deref(), &coding);
+                    s.response_headers(status, content_type.as_deref(), &coding);
                 }
             } else {
                 let _ = decoder.decode(block, |_| {});
@@ -307,6 +307,7 @@ fn end_stream(s: H2Stream, on: &mut impl FnMut(H2Event)) {
         return;
     }
     let (over, speculative, start) = (s.over_limit(), s.speculative(), s.start());
+    let success = s.is_success();
     let poll = s.poll().map(Box::<str>::from);
     let (usage, background) = s.finish();
     if speculative {
@@ -347,8 +348,13 @@ fn end_stream(s: H2Stream, on: &mut impl FnMut(H2Event)) {
         });
     } else if let Some(BackgroundState::Running(id)) = background {
         on(H2Event::Deferred { id, start });
+    } else if success {
+        // A matched 2xx call whose completed stream carried no usage (an embedding with none, or a chunk
+        // missed), apart from the capture-loss and too-large reasons; a non-2xx end records nothing.
+        on(H2Event::Unparsed {
+            reason: UnparsedReason::UsageAbsent,
+        });
     }
-    // A matched stream with no usage and no background state records nothing.
 }
 
 /// Drop every stream whose response began but then stalled since before `now - STREAM_IDLE`, counting each
@@ -450,16 +456,22 @@ fn responses_poll_id(authority: &str, base: &str) -> Option<Box<str>> {
 
 /// Decode a response header block (keeping the table in sync) and return its content type and the content
 /// codings joined with commas, which pick how the body is read.
-fn collect_response(decoder: &mut Decoder, block: &[u8]) -> (Option<Vec<u8>>, Vec<u8>) {
+fn collect_response(
+    decoder: &mut Decoder,
+    block: &[u8],
+) -> (Option<u16>, Option<Vec<u8>>, Vec<u8>) {
     // A real content coding is a short token list; `encoding::decode` takes at most four codings anyway.
     const MAX_CODING: usize = 256;
+    let mut status = None;
     let mut content_type = None;
     let mut coding = Vec::new();
     let decoded = decoder.decode(block, |field| {
         let (Text::Known(name), Text::Known(value)) = (field.name, field.value) else {
             return;
         };
-        if name == b"content-type" {
+        if name == b":status" {
+            status = std::str::from_utf8(value).ok().and_then(|s| s.parse().ok());
+        } else if name == b"content-type" {
             content_type = Some(value.to_vec());
         } else if name == b"content-encoding" && coding.len() < MAX_CODING {
             if !coding.is_empty() {
@@ -470,9 +482,9 @@ fn collect_response(decoder: &mut Decoder, block: &[u8]) -> (Option<Vec<u8>>, Ve
     });
     // A block that failed to decode left unreliable fields (hpack.rs); the table is already forgotten.
     if decoded.is_err() {
-        return (None, Vec::new());
+        return (None, None, Vec::new());
     }
-    (content_type, coding)
+    (status, content_type, coding)
 }
 
 /// Whether the bytes begin the client connection preface, so the connection is HTTP/2. The whole preface
@@ -975,6 +987,48 @@ mod tests {
             conn.feed(LlmDirection::Read, &data_run(7, junk), H2Gap::None, &mut on);
         }
         assert_eq!((rec, headers_lost), (1, 1));
+    }
+
+    #[test]
+    fn a_completed_success_stream_without_usage_counts_usage_absent() {
+        let head = frame(1, 0x4, 1, &lit(b":status", b"200"));
+        let body = frame(0, 0x1, 1, b"{\"embedding\":{\"values\":[0.1]}}");
+        let (mut rec, mut usage_absent) = (0, 0);
+        let mut conn = H2Conn::new();
+        {
+            let mut on = |e| match e {
+                H2Event::Recorded { .. } => rec += 1,
+                H2Event::Unparsed {
+                    reason: UnparsedReason::UsageAbsent,
+                } => usage_absent += 1,
+                _ => {}
+            };
+            conn.feed(LlmDirection::Write, PREFACE, H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Write, &req(1), H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Read, &head, H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Read, &body, H2Gap::None, &mut on);
+        }
+        assert_eq!((rec, usage_absent), (0, 1));
+    }
+
+    #[test]
+    fn an_error_stream_without_usage_is_not_usage_absent() {
+        let head = frame(1, 0x4, 1, &lit(b":status", b"503"));
+        let body = frame(0, 0x1, 1, b"{\"message\":\"unavailable\"}");
+        let mut unparsed = 0;
+        let mut conn = H2Conn::new();
+        {
+            let mut on = |e| {
+                if matches!(e, H2Event::Unparsed { .. }) {
+                    unparsed += 1;
+                }
+            };
+            conn.feed(LlmDirection::Write, PREFACE, H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Write, &req(1), H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Read, &head, H2Gap::None, &mut on);
+            conn.feed(LlmDirection::Read, &body, H2Gap::None, &mut on);
+        }
+        assert_eq!(unparsed, 0);
     }
 
     /// A provider request with END_STREAM for `method path` on `stream` (no request body).

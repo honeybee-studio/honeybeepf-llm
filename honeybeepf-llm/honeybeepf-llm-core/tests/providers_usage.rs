@@ -982,8 +982,8 @@ fn test_bedrock_converse_prompt_adds_cache_read_and_write() {
 #[test]
 fn test_new_defaults_parse_existing_bodies_like_before() {
     let registry = ProviderRegistry::with_defaults();
-    // Entries 0-6 are the OpenAI (embeddings, chat, image, Responses, transcription), Anthropic and Gemini first-party providers.
-    let (before, _) = registry.providers.split_at(7);
+    // Entries 0-7 are the OpenAI (embeddings, chat, image, Responses, transcription), Anthropic and Gemini (embeddings, chat) first-party providers.
+    let (before, _) = registry.providers.split_at(8);
 
     for response in [
         json!({"model": "gpt-4o", "usage": {"prompt_tokens": 2000, "completion_tokens": 40,
@@ -1353,4 +1353,63 @@ fn test_embeddings_entry_only_claims_embeddings_envelopes() {
         "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
     });
     assert_eq!(first(&chat).unwrap().operation, Operation::Chat);
+}
+
+// #79: a Gemini :embedContent response carries usageMetadata.promptTokenCount but no candidates and
+// no model field; it is recorded with operation=embeddings and an unknown model.
+#[test]
+fn test_gemini_embeddings_recorded_as_embedding_operation() {
+    let body = json!({
+        "embedding": {"values": [0.1, 0.2]},
+        "usageMetadata": {"promptTokenCount": 7, "promptTokenDetails": [{"modality": "TEXT", "tokenCount": 7}]}
+    });
+
+    let provider = default_provider(
+        "generativelanguage.googleapis.com",
+        "/v1beta/models/gemini-embedding-2:embedContent",
+    );
+    let usage = provider.parse_usage(&body).unwrap();
+    assert_eq!(usage.operation, Operation::Embeddings);
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (7, 0));
+    assert_eq!(usage.model, None);
+}
+
+// The chat entry reads the same usageMetadata keys with completion_optional, so the embeddings entry
+// is guarded by the root `embedding`: a generateContent body (no such field) stays chat, first match
+// over the default order (http/body.rs).
+#[test]
+fn test_gemini_embeddings_entry_only_claims_embedding_envelopes() {
+    let providers: Vec<ConfigurableProvider> = ProviderRegistry::with_defaults()
+        .providers
+        .into_iter()
+        .map(ConfigurableProvider::new)
+        .collect();
+    let first = |body: &serde_json::Value| providers.iter().find_map(|p| p.parse_usage(body));
+
+    let chat = json!({
+        "modelVersion": "gemini-3.5-flash",
+        "candidates": [],
+        "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 20, "totalTokenCount": 120}
+    });
+    let u = first(&chat).expect("chat recorded");
+    assert_eq!(u.operation, Operation::Chat);
+    assert_eq!(u.model.as_deref(), Some("gemini-3.5-flash"));
+
+    let embed = json!({"embedding": {"values": [0.1]}, "usageMetadata": {"promptTokenCount": 8}});
+    assert_eq!(first(&embed).unwrap().operation, Operation::Embeddings);
+}
+
+// gemini-embedding-001 and synchronous :batchEmbedContents carry no usageMetadata, so no entry
+// records them; the agent counts the framed response as usage_absent instead.
+#[test]
+fn test_gemini_embeddings_without_usage_are_not_recorded() {
+    let providers: Vec<ConfigurableProvider> = ProviderRegistry::with_defaults()
+        .providers
+        .into_iter()
+        .map(ConfigurableProvider::new)
+        .collect();
+    let first = |body: &serde_json::Value| providers.iter().find_map(|p| p.parse_usage(body));
+
+    assert!(first(&json!({"embedding": {"values": [0.1, 0.2]}})).is_none());
+    assert!(first(&json!({"embeddings": [{"values": [0.1]}, {"values": [0.2]}]})).is_none());
 }

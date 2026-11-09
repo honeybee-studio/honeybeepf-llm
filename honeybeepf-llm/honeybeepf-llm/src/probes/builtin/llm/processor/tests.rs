@@ -437,8 +437,31 @@ fn test_response_without_usage_is_unparsed_when_next_request_starts() {
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
 }
 
+// A complete 2xx response that carried no usage (an embedding whose provider omits it) is counted
+// as usage_absent when it ends, not left to the next-request or close reason.
+#[test]
+fn test_framed_success_without_usage_is_usage_absent() {
+    let mut p = StreamProcessor::new();
+    let body = r#"{"id":"msg_1","type":"message","model":"m"}"#;
+    let out = exchange(&mut p, MESSAGES_REQUEST, &h1("application/json", body));
+    assert_eq!(unparsed(&out), [UnparsedReason::UsageAbsent], "{out:?}");
+    assert_eq!(count(&out, Outcome::Recorded), 0, "{out:?}");
+}
+
+// A response still short of its Content-Length has no usage yet but must not be called usage_absent;
+// the reader keeps waiting for the rest.
+#[test]
+fn test_partial_response_is_not_usage_absent() {
+    let mut p = StreamProcessor::new();
+    let mut out = send(&mut p, LlmDirection::Write, MESSAGES_REQUEST, None);
+    let head = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 64\r\n\r\n{\"id\":\"msg_1\"";
+    out.extend(send(&mut p, LlmDirection::Read, head, None));
+    assert_eq!(unparsed(&out), [], "{out:?}");
+    assert_eq!(count(&out, Outcome::Recorded), 0, "{out:?}");
+}
+
 // A usage-less transcription body (whisper-1, or a duration-billed model whose tokens are not read
-// here) carries no tokens, so the call counts as unparsed ("seen, tokens unavailable") rather than
+// here) carries no tokens, so the call counts as usage_absent ("seen, tokens unavailable") rather than
 // being dropped silently.
 #[test]
 fn test_transcription_without_usage_is_unparsed() {
@@ -454,7 +477,7 @@ fn test_transcription_without_usage_is_unparsed() {
         MESSAGES_REQUEST,
         &h1("application/json", MESSAGES_RESPONSE),
     ));
-    assert_eq!(unparsed(&out), [UnparsedReason::NextRequest], "{out:?}");
+    assert_eq!(unparsed(&out), [UnparsedReason::UsageAbsent], "{out:?}");
     assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
 }
 
@@ -1575,7 +1598,8 @@ fn test_only_a_queued_background_object_defers_its_call() {
         BG_POLL,
         &h1("application/json", &stored),
     ));
-    assert_eq!(unparsed(&out), [UnparsedReason::NextRequest], "{out:?}");
+    // The lookalike is a complete response with null usage, so it counts as usage_absent, not deferred.
+    assert_eq!(unparsed(&out), [UnparsedReason::UsageAbsent], "{out:?}");
     assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
     assert_eq!(count(&out, Outcome::Deferred), 0, "{out:?}");
 }
