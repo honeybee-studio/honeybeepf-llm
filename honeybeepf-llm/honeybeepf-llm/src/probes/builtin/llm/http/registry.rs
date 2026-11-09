@@ -1,8 +1,22 @@
 //! Provider registry loaded from config and shared by the HTTP parsers.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use once_cell::sync::Lazy;
 
 use honeybeepf_llm_core::providers::{ConfigurableProvider, ProviderRegistry, path_matches};
+
+/// Shape detection: when on, an LLM call to a host no entry lists is still admitted and
+/// recorded by request path plus response usage shape. Off by default; set once at probe start.
+static DETECT_BY_SHAPE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_detect_by_shape(on: bool) {
+    DETECT_BY_SHAPE.store(on, Ordering::Relaxed);
+}
+
+pub(super) fn detect_by_shape() -> bool {
+    DETECT_BY_SHAPE.load(Ordering::Relaxed)
+}
 
 /// Cached providers - built once at initialization
 static CACHED_PROVIDERS: Lazy<Vec<ConfigurableProvider>> = Lazy::new(|| {

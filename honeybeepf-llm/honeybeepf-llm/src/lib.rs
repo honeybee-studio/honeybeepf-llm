@@ -91,7 +91,8 @@ impl HoneyBeeEngine {
         let mut dynamic_probes: Vec<Box<dyn DynamicProbe>> = Vec::new();
         if settings.builtin_probes.llm.unwrap_or(false) {
             let executables = settings.builtin_probes.llm_executables.unwrap_or(true);
-            dynamic_probes.push(Box::new(LlmProbe::new(executables)));
+            let detect_by_shape = settings.builtin_probes.llm_detect_by_shape.unwrap_or(false);
+            dynamic_probes.push(Box::new(LlmProbe::new(executables, detect_by_shape)));
         }
 
         let resolver = IdentityResolver::none();

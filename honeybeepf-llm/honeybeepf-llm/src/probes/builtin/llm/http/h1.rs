@@ -7,7 +7,7 @@ use honeybeepf_llm_core::types::UsageInfo;
 use super::body::{BackgroundState, extract_text_from_json, is_response_id, parse_response_json};
 use super::encoding;
 use super::eventstream::{EventStreamCursor, parse_event_stream_body};
-use super::registry::PROVIDER_REGISTRY;
+use super::registry::{PROVIDER_REGISTRY, detect_by_shape, is_llm_path};
 use super::sse::{SseCursor, parse_sse_body};
 use super::{Detected, ProtocolParser};
 use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
@@ -115,6 +115,10 @@ impl Http11Parser {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
         if !matches!(req.parse(buffer), Ok(httparse::Status::Complete(_))) {
+            return false;
+        }
+        // Shape detection: keep an unknown-host connection whose request path is an LLM pattern.
+        if detect_by_shape() && req.path.is_some_and(is_llm_path) {
             return false;
         }
         req.headers
@@ -275,8 +279,16 @@ impl ProtocolParser for Http11Parser {
                 .map(|h| String::from_utf8_lossy(h.value).to_string())
                 .unwrap_or_default();
 
-            // Check if host+path matches any configured provider
-            if let Some(provider) = PROVIDER_REGISTRY.find_provider(&host_header, path) {
+            // Host+path matches a configured provider; with shape detection on, fall back to a
+            // path-only match so an LLM call to a host no entry lists is still tracked.
+            let provider = PROVIDER_REGISTRY
+                .find_provider(&host_header, path)
+                .or_else(|| {
+                    detect_by_shape()
+                        .then(|| PROVIDER_REGISTRY.find_provider_by_path(path))
+                        .flatten()
+                });
+            if let Some(provider) = provider {
                 // The path is logged and the query can carry a credential (Gemini `?key=`).
                 return Some(Detected {
                     path: path.split_once('?').map_or(path, |(p, _)| p).to_string(),
