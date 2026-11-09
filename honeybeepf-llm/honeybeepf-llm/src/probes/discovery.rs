@@ -18,7 +18,7 @@ pub fn resolve_host_path(pid: i32, container_path: &std::path::Path) -> PathBuf 
     }
 
     // /proc/<PID>/root/<CONTAINER_PATH>
-    let mut root_path = PathBuf::from(format!("/proc/{}/root", pid));
+    let mut root_path = PathBuf::from(format!("/proc/{pid}/root"));
     let relative_path = container_path.strip_prefix("/").unwrap_or(container_path);
     root_path.push(relative_path);
 
@@ -147,8 +147,7 @@ pub fn find_libraries_all(
     // Include system libraries via ldconfig if a substring is provided
     if let Some(substring) = ldconfig_substring {
         debug!(
-            "Finding system libraries via ldconfig for '{}'...",
-            substring
+            "Finding system libraries via ldconfig for '{substring}'..."
         );
         if let Ok(system_libs) = find_system_libraries(substring) {
             for path in system_libs {
@@ -209,7 +208,7 @@ pub fn find_system_libraries(substring: &str) -> Result<Vec<String>> {
                     if parts.len() > 1 {
                         let path = parts[1].trim().to_string();
                         if !paths.contains(&path) {
-                            debug!("Found system library via ldconfig: {}", path);
+                            debug!("Found system library via ldconfig: {path}");
                             paths.push(path);
                         }
                     }
@@ -217,7 +216,7 @@ pub fn find_system_libraries(substring: &str) -> Result<Vec<String>> {
             }
         }
         Err(e) => {
-            warn!("Failed to execute ldconfig: {}", e);
+            warn!("Failed to execute ldconfig: {e}");
         }
     }
 
@@ -289,7 +288,7 @@ pub fn get_process_libraries(pid: u32) -> Result<HashSet<String>> {
     let process = match procfs::process::Process::new(pid as i32) {
         Ok(p) => p,
         Err(e) => {
-            debug!("Failed to open process {}: {}", pid, e);
+            debug!("Failed to open process {pid}: {e}");
             return Ok(paths);
         }
     };
@@ -297,7 +296,7 @@ pub fn get_process_libraries(pid: u32) -> Result<HashSet<String>> {
     let maps = match process.maps() {
         Ok(m) => m,
         Err(e) => {
-            debug!("Failed to read maps for process {}: {}", pid, e);
+            debug!("Failed to read maps for process {pid}: {e}");
             return Ok(paths);
         }
     };

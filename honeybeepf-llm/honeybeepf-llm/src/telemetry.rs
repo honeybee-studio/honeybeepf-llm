@@ -442,7 +442,7 @@ fn get_otlp_endpoint() -> Option<String> {
     }
 
     if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
-        Some(format!("http://{}", endpoint))
+        Some(format!("http://{endpoint}"))
     } else {
         Some(endpoint)
     }
@@ -462,7 +462,7 @@ pub fn init_metrics() -> Result<()> {
     };
 
     info!("Initializing OpenTelemetry metrics exporter");
-    info!("OTLP endpoint: {}", endpoint);
+    info!("OTLP endpoint: {endpoint}");
 
     let exporter = opentelemetry_otlp::MetricExporter::builder()
         .with_tonic()
@@ -593,7 +593,7 @@ pub fn record_active_probe(probe_name: &str, count: u64) {
     // Update the global map (ObservableGauge callback reads from this)
     if let Ok(mut probes) = active_probes_map().write() {
         probes.insert(probe_name.to_string(), count);
-        info!("Active probe registered: {} = {}", probe_name, count);
+        info!("Active probe registered: {probe_name} = {count}");
     }
 }
 
@@ -742,7 +742,7 @@ pub fn shutdown_metrics() {
     info!("Shutting down OpenTelemetry metrics...");
     if let Some(provider) = METER_PROVIDER.get() {
         if let Err(e) = provider.shutdown() {
-            log::warn!("Failed to shutdown MeterProvider: {}", e);
+            log::warn!("Failed to shutdown MeterProvider: {e}");
         } else {
             info!("OpenTelemetry metrics shutdown complete");
         }

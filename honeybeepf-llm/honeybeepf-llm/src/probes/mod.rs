@@ -256,7 +256,7 @@ pub fn attach_uprobe(
 ) -> Result<UProbeLinkId> {
     let program: &mut UProbe = bpf
         .program_mut(prog_name)
-        .with_context(|| format!("Failed to find program {}", prog_name))?
+        .with_context(|| format!("Failed to find program {prog_name}"))?
         .try_into()?;
 
     // Check if loaded using fd()
@@ -267,21 +267,21 @@ pub fn attach_uprobe(
     // With a name, aya would read the whole file again for every program.
     program
         .attach(None, offset, path, None)
-        .with_context(|| format!("Failed to attach {} to {}", prog_name, func_name))
+        .with_context(|| format!("Failed to attach {prog_name} to {func_name}"))
 }
 
 /// Load (if needed) and attach a kprobe program to a kernel function.
 pub fn attach_kprobe(bpf: &mut Ebpf, prog_name: &str, func_name: &str) -> Result<()> {
     let program: &mut KProbe = bpf
         .program_mut(prog_name)
-        .with_context(|| format!("Failed to find program {}", prog_name))?
+        .with_context(|| format!("Failed to find program {prog_name}"))?
         .try_into()?;
     if program.fd().is_err() {
         program.load()?;
     }
     program
         .attach(func_name, 0)
-        .with_context(|| format!("Failed to attach {} to {}", prog_name, func_name))?;
+        .with_context(|| format!("Failed to attach {prog_name} to {func_name}"))?;
     Ok(())
 }
 
@@ -290,12 +290,12 @@ pub fn attach_fentry(bpf: &mut Ebpf, prog_name: &str, func_name: &str) -> Result
     let btf = Btf::from_sys_fs().context("kernel BTF not available")?;
     let program: &mut FEntry = bpf
         .program_mut(prog_name)
-        .with_context(|| format!("Failed to find program {}", prog_name))?
+        .with_context(|| format!("Failed to find program {prog_name}"))?
         .try_into()?;
     program.load(func_name, &btf)?;
     program
         .attach()
-        .with_context(|| format!("Failed to attach {} to {}", prog_name, func_name))?;
+        .with_context(|| format!("Failed to attach {prog_name} to {func_name}"))?;
     Ok(())
 }
 
@@ -303,11 +303,11 @@ pub fn attach_fentry(bpf: &mut Ebpf, prog_name: &str, func_name: &str) -> Result
 pub fn detach_uprobe(bpf: &mut Ebpf, prog_name: &str, link_id: UProbeLinkId) -> Result<()> {
     let program: &mut UProbe = bpf
         .program_mut(prog_name)
-        .with_context(|| format!("Failed to find program {}", prog_name))?
+        .with_context(|| format!("Failed to find program {prog_name}"))?
         .try_into()?;
     program
         .detach(link_id)
-        .with_context(|| format!("Failed to detach {}", prog_name))
+        .with_context(|| format!("Failed to detach {prog_name}"))
 }
 
 /// Set up the `sched_process_exec` tracepoint and return a queue that collects
@@ -362,10 +362,9 @@ pub fn setup_lib_open_watch(bpf: &mut Ebpf) -> Result<(LibOpenQueue, ExecNotify,
     match attach_fentry(bpf, "probe_lib_open_fentry", "do_sys_openat2") {
         Ok(()) => info!("libssl open watch: fentry on do_sys_openat2"),
         Err(fentry_err) => match attach_kprobe(bpf, "probe_lib_open", "do_sys_openat2") {
-            Ok(()) => info!("libssl open watch: kprobe (fentry: {:#})", fentry_err),
+            Ok(()) => info!("libssl open watch: kprobe (fentry: {fentry_err:#})"),
             Err(e) => warn!(
-                "libssl open watch not attached: {:#} (fentry: {:#})",
-                e, fentry_err
+                "libssl open watch not attached: {e:#} (fentry: {fentry_err:#})"
             ),
         },
     }

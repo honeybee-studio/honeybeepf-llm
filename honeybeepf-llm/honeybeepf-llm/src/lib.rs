@@ -81,7 +81,7 @@ impl HoneyBeeEngine {
         // Initialize the eBPF Logger only in debug mode
         if settings.debug.unwrap_or(false) {
             if let Err(e) = EbpfLogger::init(&mut bpf) {
-                warn!("Failed to initialize eBPF logger: {}", e);
+                warn!("Failed to initialize eBPF logger: {e}");
             } else {
                 debug!("eBPF logger enabled (debug mode)");
             }
@@ -108,8 +108,7 @@ impl HoneyBeeEngine {
         let _shutdown = ShutdownOnDrop;
         if let Err(e) = telemetry::init_metrics() {
             warn!(
-                "Failed to initialize OpenTelemetry metrics: {}. Metrics will not be exported.",
-                e
+                "Failed to initialize OpenTelemetry metrics: {e}. Metrics will not be exported."
             );
         }
 
@@ -129,7 +128,7 @@ impl HoneyBeeEngine {
                 });
 
             if let Ok(node_name) = resolved_node_name {
-                info!("Starting K8s pod watcher for node: {}", node_name);
+                info!("Starting K8s pod watcher for node: {node_name}");
                 let pod_labels = self.settings.builtin_probes.llm_pod_labels.as_deref();
                 let pod_resolver = Arc::new(k8s::PodResolver::with_pod_labels(
                     pod_labels.unwrap_or_default(),
@@ -141,8 +140,7 @@ impl HoneyBeeEngine {
                     }
                     Err(e) => {
                         warn!(
-                            "K8s pod watcher failed to start: {}. Pod resolution disabled.",
-                            e
+                            "K8s pod watcher failed to start: {e}. Pod resolution disabled."
                         );
                     }
                 }
@@ -162,7 +160,7 @@ impl HoneyBeeEngine {
                 let resolver = self.resolver.clone();
                 match plaintext::start(&mut self.bpf, specs, resolver).await {
                     Ok(()) => info!("Plaintext capture enabled"),
-                    Err(e) => warn!("Plaintext capture disabled: {}", e),
+                    Err(e) => warn!("Plaintext capture disabled: {e}"),
                 }
             }
         }
@@ -235,7 +233,7 @@ impl HoneyBeeEngine {
                                 Ok(l) => l,
                                 Err(e) => {
                                     // Debug level because this can happen for short-lived processes
-                                    log::debug!("Failed to get libraries for PID {}: {}", pid, e);
+                                    log::debug!("Failed to get libraries for PID {pid}: {e}");
                                     continue;
                                 }
                             };
@@ -266,7 +264,7 @@ impl HoneyBeeEngine {
     fn notify_probes(&mut self, process_info: &ProcessInfo) {
         for probe in &self.dynamic_probes {
             if let Err(e) = probe.on_exec(&mut self.bpf, process_info) {
-                warn!("Probe on_exec error: {}", e);
+                warn!("Probe on_exec error: {e}");
             }
         }
     }

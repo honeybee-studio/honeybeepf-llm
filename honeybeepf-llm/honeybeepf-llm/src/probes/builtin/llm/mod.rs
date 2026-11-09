@@ -64,10 +64,10 @@ pub fn log_event_stats() {
         let line = LLM_STAT_NAMES
             .iter()
             .zip(totals.iter())
-            .map(|(name, v)| format!("{}={}", name, v))
+            .map(|(name, v)| format!("{name}={v}"))
             .collect::<Vec<_>>()
             .join(" ");
-        info!("[LLM stats] {}", line);
+        info!("[LLM stats] {line}");
     }
 }
 
@@ -136,7 +136,7 @@ pub fn attach_probes_to_path(bpf: &mut Ebpf, libssl_path: &str) -> Result<bool> 
                 Err(e) => {
                     for (prog, link) in attached {
                         if let Err(de) = detach_uprobe(bpf, prog, link) {
-                            warn!("Failed to roll back {} on {}: {}", prog, libssl_path, de);
+                            warn!("Failed to roll back {prog} on {libssl_path}: {de}");
                         }
                     }
                     return Err(e);
@@ -163,7 +163,7 @@ pub fn attach_probes_to_path(bpf: &mut Ebpf, libssl_path: &str) -> Result<bool> 
         .context("not exported")
         .and_then(|&offset| attach_uprobe(bpf, prog, func, libssl_path, offset))
     {
-        warn!("{} not probed in {}: {}", func, libssl_path, e);
+        warn!("{func} not probed in {libssl_path}: {e}");
     }
 
     Ok(true)
@@ -259,7 +259,7 @@ fn log_executable(path: &str, id: FileId, result: Result<bool>) {
             id.ino()
         ),
         Ok(false) => {}
-        Err(e) => warn!("Failed to attach to executable {}: {}", path, e),
+        Err(e) => warn!("Failed to attach to executable {path}: {e}"),
     }
 }
 
@@ -282,10 +282,9 @@ impl DynamicProbe for LlmProbe {
                     id.ino()
                 ),
                 Ok(false) => warn!(
-                    "[Re-discovery] Failed to attach to {}: SSL_read/SSL_write not exported",
-                    path
+                    "[Re-discovery] Failed to attach to {path}: SSL_read/SSL_write not exported"
                 ),
-                Err(e) => warn!("[Re-discovery] Failed to attach to {}: {}", path, e),
+                Err(e) => warn!("[Re-discovery] Failed to attach to {path}: {e}"),
             }
         }
 
@@ -392,7 +391,7 @@ impl Probe for LlmProbe {
 
         // Without it, every thread killed inside an SSL call keeps its session map entries until restart.
         if let Err(e) = attach_tracepoint(bpf, TASK_EXIT_PROBE) {
-            warn!("{:#}; session entries of killed threads are not cleared", e);
+            warn!("{e:#}; session entries of killed threads are not cleared");
         }
 
         // Skip libcrypto for SSL_* probes as they usually don't contain them
@@ -405,10 +404,9 @@ impl Probe for LlmProbe {
                     id.ino()
                 ),
                 Ok(false) => warn!(
-                    "Failed to attach to {}: SSL_read/SSL_write not exported",
-                    path
+                    "Failed to attach to {path}: SSL_read/SSL_write not exported"
                 ),
-                Err(e) => warn!("Failed to attach to {}: {}", path, e),
+                Err(e) => warn!("Failed to attach to {path}: {e}"),
             }
         }
 
@@ -495,7 +493,7 @@ fn start_stats_log_task(state: StreamMap) {
             }
             let streams = state.lock().unwrap_or_else(|e| e.into_inner()).len();
             if streams != last_streams {
-                info!("[LLM streams] {} open", streams);
+                info!("[LLM streams] {streams} open");
                 last_streams = streams;
             }
         }
@@ -713,7 +711,7 @@ mod tests {
             .collect();
 
         let new = unique_new_files(&paths, &HashSet::new());
-        assert_eq!(new.len(), 2, "same inode attached twice: {:?}", new);
+        assert_eq!(new.len(), 2, "same inode attached twice: {new:?}");
         assert_eq!(new[0].0, paths[0]);
         assert_eq!(new[1].0, paths[2]);
 

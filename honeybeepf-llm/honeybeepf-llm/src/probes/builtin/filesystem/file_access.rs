@@ -52,7 +52,7 @@ impl Probe for FileAccessProbe {
         info!("Attached tracepoint: syscalls/sys_enter_openat");
         info!("Watching {} sensitive paths", self.watched_paths.len());
         for path in &self.watched_paths {
-            info!("  - {}", path);
+            info!("  - {path}");
         }
 
         self.spawn_event_handler(bpf, _resolver)?;
@@ -76,7 +76,7 @@ impl FileAccessProbe {
         for path in &self.watched_paths {
             let hash = simple_hash(path.as_bytes());
             watched_map.insert(hash, 1, 0)?;
-            info!("Added watched path: {} (hash: {:#x})", path, hash);
+            info!("Added watched path: {path} (hash: {hash:#x})");
         }
 
         Ok(())

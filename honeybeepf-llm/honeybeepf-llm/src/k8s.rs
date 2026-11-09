@@ -159,7 +159,7 @@ impl PodResolver {
         // Therefore, we use Api::all() to get cluster-wide visibility.
         let api: Api<Pod> = Api::all(client);
         let watcher_config = watcher::Config {
-            field_selector: Some(format!("spec.nodeName={}", node_name)),
+            field_selector: Some(format!("spec.nodeName={node_name}")),
             ..Default::default()
         };
 
@@ -182,7 +182,7 @@ impl PodResolver {
                     Ok(watcher::Event::Init | watcher::Event::InitDone) => {}
                     Err(e) => {
                         // One line per backoff step, not per request.
-                        warn!("K8s pod watcher error: {}. Will retry.", e);
+                        warn!("K8s pod watcher error: {e}. Will retry.");
                     }
                 }
             }
@@ -458,7 +458,7 @@ fn extract_container_ids_from_pod(pod: &Pod) -> Vec<String> {
 /// - v1: `12:memory:/kubepods/besteffort/pod<uid>/<64-hex-container-id>`
 /// - systemd scope: `cri-containerd-<64hex>.scope` or `docker-<64hex>.scope`
 fn extract_container_id(pid: u32) -> Option<String> {
-    let path = format!("/proc/{}/cgroup", pid);
+    let path = format!("/proc/{pid}/cgroup");
     let content = std::fs::read_to_string(&path).ok()?;
 
     for line in content.lines() {

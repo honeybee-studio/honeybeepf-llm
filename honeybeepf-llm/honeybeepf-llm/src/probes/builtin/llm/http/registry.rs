@@ -55,10 +55,10 @@ pub(super) fn configured_from(
             .build()
             && let Ok(reg) = settings.try_deserialize::<ProviderRegistry>()
         {
-            log::info!("Loaded LLM providers from: {}", path);
+            log::info!("Loaded LLM providers from: {path}");
             return Some(reg);
         }
-        log::warn!("Failed to load or parse config file: {}", path);
+        log::warn!("Failed to load or parse config file: {path}");
     }
 
     // 2. Try inline JSON (for Kubernetes ConfigMap)
