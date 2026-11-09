@@ -101,7 +101,8 @@ pub const LLM_STAT_TRUNCATED: u32 = 5; // call sent with bytes missing (> captur
 pub const LLM_STAT_HANDSHAKE: u32 = 6; // handshake events submitted
 pub const LLM_STAT_FRAGMENT: u32 = 7; // fragments after the first (offset > 0), subset of submit
 pub const LLM_STAT_FILTERED: u32 = 8; // calls dropped before reserving because SSL_CLASS skips them
-pub const LLM_STAT_COUNT: usize = 9;
+pub const LLM_STAT_PLAIN_RECV_TRUNCATED: u32 = 9; // plaintext receive skb past the 16 KB capture window (loopback/GRO)
+pub const LLM_STAT_COUNT: usize = 10;
 pub const LLM_STAT_NAMES: [&str; LLM_STAT_COUNT] = [
     "enter",
     "submit",
@@ -112,6 +113,7 @@ pub const LLM_STAT_NAMES: [&str; LLM_STAT_COUNT] = [
     "handshake",
     "fragment",
     "filtered",
+    "plain_recv_truncated",
 ];
 
 pub mod ssl_class;
@@ -341,6 +343,23 @@ unsafe impl aya::Pod for FileAccessEvent {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn llm_stat_names_cover_every_index_without_duplicates() {
+        // The plaintext-truncation counter is the last index, and the names array covers it.
+        assert_eq!(LLM_STAT_PLAIN_RECV_TRUNCATED as usize, LLM_STAT_COUNT - 1);
+        assert_eq!(
+            LLM_STAT_NAMES[LLM_STAT_PLAIN_RECV_TRUNCATED as usize],
+            "plain_recv_truncated"
+        );
+        assert_eq!(LLM_STAT_NAMES[LLM_STAT_FILTERED as usize], "filtered");
+        for (i, name) in LLM_STAT_NAMES.iter().enumerate() {
+            assert!(
+                !LLM_STAT_NAMES[..i].contains(name),
+                "duplicate stage name {name}"
+            );
+        }
+    }
 
     #[test]
     fn remote_port_reads_the_high_16_bits() {

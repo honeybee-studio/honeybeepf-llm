@@ -16,10 +16,12 @@ use aya_ebpf::{
     programs::{SkBuffContext, SkMsgContext, SockAddrContext, SockOpsContext},
 };
 use honeybeepf_llm_common::{
-    EventMetadata, LlmDirection, LlmEventHeader, MAX_SSL_BUF_SIZE, MAX_SSL_FRAGMENTS,
-    PLAIN_CONNS_ENTRIES, PLAIN_ENDPOINTS_ENTRIES, PLAIN_SOCKS_ENTRIES, PlainFlowKey, capture_limit,
-    plain_endpoint_key, plain_flow_key, plain_stream_id,
+    EventMetadata, LLM_STAT_PLAIN_RECV_TRUNCATED, LlmDirection, LlmEventHeader, MAX_SSL_BUF_SIZE,
+    MAX_SSL_FRAGMENTS, PLAIN_CONNS_ENTRIES, PLAIN_ENDPOINTS_ENTRIES, PLAIN_SOCKS_ENTRIES,
+    PlainFlowKey, capture_limit, plain_endpoint_key, plain_flow_key, plain_stream_id,
 };
+
+use crate::probes::builtin::llm::helpers::count;
 
 /// Minimum when plaintext is off; the loader bumps it to the full size when enabled.
 pub const PLAIN_RINGBUF_MIN: u32 = 4096;
@@ -315,6 +317,9 @@ fn capture_recv(ctx: &SkBuffContext, meta: &EventMetadata, stream: u64) {
     }
     let limit = capture_limit(LlmDirection::Read);
     let truncated = (size as usize > limit) as u8;
+    if truncated != 0 {
+        count(LLM_STAT_PLAIN_RECV_TRUNCATED);
+    }
     for i in 0..MAX_SSL_FRAGMENTS {
         let offset = i * MAX_SSL_BUF_SIZE;
         if i > 0 && (offset >= size as usize || offset >= limit) {

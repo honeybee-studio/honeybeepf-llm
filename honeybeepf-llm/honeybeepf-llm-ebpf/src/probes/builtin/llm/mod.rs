@@ -27,7 +27,7 @@ use honeybeepf_llm_common::{
 };
 
 mod filter;
-mod helpers;
+pub(crate) mod helpers;
 pub mod maps;
 
 use helpers::{Session, SslCall, count, fill_header, get_current_tid};
