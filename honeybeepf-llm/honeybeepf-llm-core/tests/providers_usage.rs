@@ -1373,7 +1373,7 @@ fn test_transcription_tokens_with_bad_counts_is_not_recorded() {
     }
 }
 
-// #79: an embeddings response (input tokens only) is recorded with operation=embeddings. The chat
+// An embeddings response (input tokens only) is recorded with operation=embeddings. The chat
 // entry has no completion field as optional, so it cannot claim the same body, which is why the
 // embeddings entry can sit after it without stealing chat responses.
 #[test]
@@ -1406,7 +1406,7 @@ fn test_openai_embeddings_recorded_as_embedding_operation() {
     );
 }
 
-// #79 regression: operation must not flip when a proxy embeddings body carries completion_tokens 0
+// Operation must not flip when a proxy embeddings body carries completion_tokens 0
 // (LiteLLM/vLLM/Mistral), and a generation body missing its completion count must not be claimed as an
 // embedding. First-match over the default order, as the agent parses a response body (http/body.rs).
 #[test]
@@ -1429,8 +1429,8 @@ fn test_embeddings_entry_only_claims_embeddings_envelopes() {
     assert_eq!(u.operation, Operation::Embeddings);
     assert_eq!((u.prompt_tokens, u.completion_tokens), (8, 0));
 
-    // A chat body missing its completion count is not an embeddings envelope, so no entry claims it
-    // (as before #79), rather than being mislabelled as an embedding.
+    // A chat body missing its completion count is not an embeddings envelope, so no entry claims it,
+    // rather than being mislabelled as an embedding.
     let malformed_chat = json!({
         "object": "chat.completion",
         "model": "gpt-5.4-mini",
@@ -1448,7 +1448,7 @@ fn test_embeddings_entry_only_claims_embeddings_envelopes() {
     assert_eq!(first(&chat).unwrap().operation, Operation::Chat);
 }
 
-// #79: a Gemini :embedContent response carries usageMetadata.promptTokenCount but no candidates and
+// A Gemini :embedContent response carries usageMetadata.promptTokenCount but no candidates and
 // no model field; it is recorded with operation=embeddings and an unknown model.
 #[test]
 fn test_gemini_embeddings_recorded_as_embedding_operation() {

@@ -107,9 +107,6 @@ impl H2Conn {
     }
 
     /// Read one direction's bytes, emitting an event as each matched stream is detected and finished.
-    /// `gap` says how the bytes are discontinuous: a known lost count is skipped inside the current frame
-    /// when it fits, keeping the HPACK table; otherwise the reader re-anchors and that table, now out of
-    /// sync, is forgotten (later indexed fields decode as unknown until a fresh literal).
     pub(crate) fn feed(
         &mut self,
         direction: LlmDirection,

@@ -328,8 +328,7 @@ fn test_responses_compact_after_input_tokens_is_recorded() {
 fn test_chat_after_non_llm_request_is_recorded() {
     let mut p = StreamProcessor::new();
     // Moderations is not a generation endpoint, so it is detected as non-LLM; the chat that follows on
-    // the same connection must still be recorded (#29, bug b-1). Embeddings was the example here until
-    // #79 made it an LLM call.
+    // the same connection must still be recorded.
     let non_llm = b"POST /v1/moderations HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"omni-moderation-latest\",\"input\":\"hi\"}";
     let mut out = exchange(
         &mut p,
