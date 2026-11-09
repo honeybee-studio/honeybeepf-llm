@@ -56,6 +56,8 @@ pub(super) struct H2Stream {
     got_data: bool,
     /// Tracked without a matched request (mid-join or lost request headers), so its host is unknown.
     speculative: bool,
+    /// The response `:status`, read from the first HEADERS block; a 2xx with no usage is usage_absent.
+    status: Option<u16>,
     /// A record-only provider (Managed Agents session): counted under `agent_session` at its end,
     /// its running session total never read.
     record_only: bool,
@@ -72,6 +74,7 @@ impl H2Stream {
             body: Body::plain_json(),
             got_data: false,
             speculative: false,
+            status: None,
             record_only,
             poll: None,
         }
@@ -121,6 +124,12 @@ impl H2Stream {
         self.got_data
     }
 
+    /// Whether the response status is 2xx, so a stream that ended with no usage is the provider
+    /// omitting it rather than an error; an unseen status (None) is not counted as success.
+    pub(super) fn is_success(&self) -> bool {
+        matches!(self.status, Some(s) if (200..300).contains(&s))
+    }
+
     /// Whether the body was given up for a memory cap, so its end counts as a too-large response.
     pub(super) fn over_limit(&self) -> bool {
         matches!(
@@ -142,11 +151,17 @@ impl H2Stream {
 
     /// Pick how to read the body from the response's content type and coding. A HEADERS block after DATA
     /// is trailers (the frame reader cannot tell it apart), so it is ignored rather than resetting the body.
-    pub(super) fn response_headers(&mut self, content_type: Option<&[u8]>, coding: &[u8]) {
+    pub(super) fn response_headers(
+        &mut self,
+        status: Option<u16>,
+        content_type: Option<&[u8]>,
+        coding: &[u8],
+    ) {
         self.last = Instant::now();
         if self.got_data {
             return;
         }
+        self.status = status;
         let sse = content_type.is_some_and(|c| contains_pattern(c, b"text/event-stream"));
         self.body = if !coding.is_empty() {
             Body::Buffered {
@@ -256,7 +271,7 @@ mod tests {
 
     fn usage(content_type: Option<&[u8]>, coding: &[u8], body: &[u8]) -> Option<(u64, u64)> {
         let mut s = H2Stream::open(Instant::now(), false);
-        s.response_headers(content_type, coding);
+        s.response_headers(Some(200), content_type, coding);
         s.data(body, usize::MAX);
         s.finish().0.map(|u| (u.prompt_tokens, u.completion_tokens))
     }
@@ -297,9 +312,9 @@ mod tests {
     fn a_later_headers_block_does_not_reset_the_body() {
         // Trailers (HEADERS after DATA): the body kind and buffer must survive so usage is still read.
         let mut s = H2Stream::open(Instant::now(), false);
-        s.response_headers(Some(b"application/json"), b"");
+        s.response_headers(Some(200), Some(b"application/json"), b"");
         s.data(JSON, usize::MAX);
-        s.response_headers(None, b"");
+        s.response_headers(None, None, b"");
         assert_eq!(
             s.finish().0.map(|u| (u.prompt_tokens, u.completion_tokens)),
             Some((11, 4))
@@ -309,7 +324,7 @@ mod tests {
     #[test]
     fn an_sse_line_without_a_newline_is_bounded() {
         let mut s = H2Stream::open(Instant::now(), false);
-        s.response_headers(Some(b"text/event-stream"), b"");
+        s.response_headers(Some(200), Some(b"text/event-stream"), b"");
         let chunk = vec![b'a'; 16 * 1024];
         for _ in 0..(MAX_RESPONSE_BUFFER_SIZE / chunk.len() + 2) {
             s.data(&chunk, usize::MAX);
@@ -323,7 +338,7 @@ mod tests {
     fn a_queued_background_create_reports_running_with_no_usage() {
         let body = br#"{"id":"resp_bg1","status":"queued","background":true}"#;
         let mut s = H2Stream::open(Instant::now(), false);
-        s.response_headers(Some(b"application/json"), b"");
+        s.response_headers(Some(200), Some(b"application/json"), b"");
         s.data(body, usize::MAX);
         let (usage, bg) = s.finish();
         assert!(usage.is_none());

@@ -120,6 +120,11 @@ pub struct IdentityConfig {
     /// output tokens, so `completion_optional`) would otherwise claim a generation body that is
     /// missing or zeroes its completion count; requiring `object: "list"` keeps it to embeddings.
     pub root_object: Option<String>,
+
+    /// Optional: a response root field that must be present. Where two entries read the same usage
+    /// keys (Gemini embeddings and chat both use usageMetadata.promptTokenCount with
+    /// completion_optional), the embeddings body's root `embedding` tells them apart.
+    pub required_root_field: Option<String>,
 }
 
 // Not `#[serde(flatten)]`: it skips the config crate's conversions (`yes` or `1` as a boolean).
@@ -157,6 +162,7 @@ struct FlatResponseConfig {
     output_modality_details: Option<String>,
     input_modality_array: Option<String>,
     output_modality_array: Option<String>,
+    required_root_field: Option<String>,
 }
 
 impl From<FlatResponseConfig> for ResponseConfig {
@@ -188,6 +194,7 @@ impl From<FlatResponseConfig> for ResponseConfig {
                 required_field: flat.required_field,
                 iterations_path: flat.iterations_path,
                 root_object: flat.root_object,
+                required_root_field: flat.required_root_field,
             },
             modalities: ModalityConfig {
                 input_details: flat.input_modality_details,
@@ -233,6 +240,7 @@ impl Default for IdentityConfig {
             required_field: None,
             iterations_path: None,
             root_object: None,
+            required_root_field: None,
         }
     }
 }

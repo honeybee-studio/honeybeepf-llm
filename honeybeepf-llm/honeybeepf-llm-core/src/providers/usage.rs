@@ -52,6 +52,11 @@ impl ConfigurableProvider {
         {
             return None;
         }
+        if let Some(field) = &response.identity.required_root_field
+            && get_nested_value(json, field).is_none()
+        {
+            return None;
+        }
         let usage = get_nested_value(json, &response.tokens.usage_path)?;
         if !is_own_usage(&response.identity, usage) {
             return None;

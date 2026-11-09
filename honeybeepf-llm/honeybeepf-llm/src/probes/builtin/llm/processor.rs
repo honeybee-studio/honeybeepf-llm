@@ -74,6 +74,7 @@ pub enum UnparsedReason {
     ResponseTooLarge,
     BackgroundUnfinished,
     HeadersLost,
+    UsageAbsent,
     AgentSession,
 }
 
@@ -88,6 +89,7 @@ impl UnparsedReason {
             Self::ResponseTooLarge => "response_too_large",
             Self::BackgroundUnfinished => "background_unfinished",
             Self::HeadersLost => "headers_lost",
+            Self::UsageAbsent => "usage_absent",
             Self::AgentSession => "agent_session",
         }
     }
@@ -113,6 +115,7 @@ impl std::fmt::Display for UnparsedReason {
             Self::HeadersLost => {
                 f.write_str("HTTP/2 request headers were lost, so the stream could not be matched")
             }
+            Self::UsageAbsent => f.write_str("response completed with no usage to record"),
             Self::AgentSession => {
                 f.write_str("Managed Agents session call; its usage is a running total, not read")
             }
@@ -724,6 +727,24 @@ impl StreamProcessor {
                             }
                         };
                         let state = self.read_progress.take_background();
+                        // A framed 2xx response that ended with no usage is the provider omitting it, not
+                        // capture loss, so count it apart from the next-request and close reasons. An
+                        // error body, SSE and background polls are left to their existing paths.
+                        let framed_no_usage = usage.is_none()
+                            && state.is_none()
+                            && self.continuation.is_none()
+                            && self.past_limit.is_none()
+                            && !parser.writes_during_response()
+                            && http::Http11Parser::is_complete_success_response(&self.read_buf);
+                        if framed_no_usage {
+                            self.state = ProcessorState::ProcessingResponse { start_time, parser };
+                            return self.drop_response(
+                                pid,
+                                UnparsedReason::UsageAbsent,
+                                #[cfg(feature = "k8s")]
+                                pod_info.as_ref(),
+                            );
+                        }
                         if let Some(outcome) = self.settle(
                             usage,
                             state,
