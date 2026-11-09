@@ -244,10 +244,10 @@ fn read_modalities(
     details: &Option<String>,
     array: &Option<String>,
 ) -> ModalityTokens {
-    let mut m = ModalityTokens::default();
+    let mut modalities = ModalityTokens::default();
     if let Some(obj) = details.as_ref().and_then(|p| get_nested_value(usage, p)) {
-        m.audio = obj.get("audio_tokens").and_then(Value::as_u64).unwrap_or(0);
-        m.image = obj.get("image_tokens").and_then(Value::as_u64).unwrap_or(0);
+        modalities.audio = obj.get("audio_tokens").and_then(Value::as_u64).unwrap_or(0);
+        modalities.image = obj.get("image_tokens").and_then(Value::as_u64).unwrap_or(0);
     }
     if let Some(arr) = array
         .as_ref()
@@ -257,14 +257,14 @@ fn read_modalities(
         for el in arr {
             let count = el.get("tokenCount").and_then(Value::as_u64).unwrap_or(0);
             match el.get("modality").and_then(Value::as_str) {
-                Some("AUDIO") => m.audio = m.audio.saturating_add(count),
-                Some("IMAGE") => m.image = m.image.saturating_add(count),
-                Some("VIDEO") => m.video = m.video.saturating_add(count),
+                Some("AUDIO") => modalities.audio = modalities.audio.saturating_add(count),
+                Some("IMAGE") => modalities.image = modalities.image.saturating_add(count),
+                Some("VIDEO") => modalities.video = modalities.video.saturating_add(count),
                 _ => {}
             }
         }
     }
-    m
+    modalities
 }
 
 fn optional_count(root: &Value, path: &Option<String>) -> Option<u64> {

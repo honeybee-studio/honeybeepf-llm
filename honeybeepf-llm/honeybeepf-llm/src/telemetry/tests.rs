@@ -457,8 +457,8 @@ fn llm_fallback_attempt_label_separates_declined_tokens_from_served() -> Result<
     // rather than summed into the served call to the same model.
     assert_eq!(prompt_by_attempt("served"), 100);
     assert_eq!(prompt_by_attempt("declined"), 70);
-    // The declined attempt's cost lands on its own attempt="declined" row (the #152/#154
-    // visibility this label exists for), not inside the served model's cost.
+    // The declined attempt's cost lands on its own attempt="declined" row, not inside
+    // the served model's cost.
     let cost_attempts: std::collections::BTreeSet<String> = rm
         .scope_metrics
         .iter()
