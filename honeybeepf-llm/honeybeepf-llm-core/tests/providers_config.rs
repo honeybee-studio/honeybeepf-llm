@@ -19,6 +19,7 @@ struct UrlCase {
 struct ProviderUrls {
     openai: Vec<UrlCase>,
     anthropic: Vec<UrlCase>,
+    anthropic_agents: Vec<UrlCase>,
     bedrock: Vec<UrlCase>,
     gemini: Vec<UrlCase>,
     none: Vec<UrlCase>,
@@ -27,7 +28,7 @@ struct ProviderUrls {
 #[test]
 fn test_default_providers() {
     let registry = ProviderRegistry::with_defaults();
-    assert_eq!(registry.providers.len(), 10);
+    assert_eq!(registry.providers.len(), 13);
 }
 
 // `with_defaults` panics only on a parse error, and serde skips unknown keys, so a key typo would go unnoticed.
@@ -36,11 +37,12 @@ fn test_default_providers_json_parses_with_known_keys_only() {
     let json = include_str!("../src/providers/default_providers.json");
     ProviderRegistry::from_json(json).unwrap();
 
-    let provider_keys = "name note hosts paths response request_extractor plaintext";
+    let provider_keys =
+        "name note hosts paths response request_extractor operation plaintext record_only";
     let response_keys = "usage_path prompt_tokens completion_tokens completion_optional extra_prompt_tokens thoughts_tokens \
         completion_excludes_thoughts cache_read_tokens cache_write_tokens cache_write_long_ttl_tokens \
-        speed inference_geo prompt_excludes_cache required_field model_path service_tier_path iterations_path billed_categories \
-        input_modality_details output_modality_details input_modality_array output_modality_array";
+        speed inference_geo prompt_excludes_cache required_field model_path service_tier_path iterations_path billed_categories root_object \
+        required_root_field input_modality_details output_modality_details input_modality_array output_modality_array";
     let file: serde_json::Value = serde_json::from_str(json).unwrap();
     for provider in file["providers"].as_array().unwrap() {
         let name = &provider["name"];
@@ -87,7 +89,8 @@ fn test_default_provider_hosts() {
     let gemini = ["generativelanguage.googleapis.com", vertex[0], vertex[1]];
     // Image and transcription entries are first-party OpenAI only; Azure/Bedrock media is a follow-up.
     let media = ["api.openai.com"];
-    let expected: [&[&str]; 10] = [
+    let expected: [&[&str]; 13] = [
+        &openai,
         &openai,
         &media,
         &openai,
@@ -101,9 +104,11 @@ fn test_default_provider_hosts() {
         ],
         &gemini,
         &gemini,
+        &gemini,
         &vertex,
         &["bedrock-runtime.*.amazonaws.com"],
         &["bedrock-runtime.*.amazonaws.com"],
+        &["api.anthropic.com"],
     ];
     let registry = ProviderRegistry::with_defaults();
     for (provider, hosts) in registry.providers.iter().zip(expected) {
@@ -125,6 +130,7 @@ fn test_find_provider_url_fixtures() {
     let groups = [
         ("openai", &fixture.openai),
         ("anthropic", &fixture.anthropic),
+        ("anthropic-agents", &fixture.anthropic_agents),
         ("bedrock", &fixture.bedrock),
         ("gemini", &fixture.gemini),
         ("none", &fixture.none),
@@ -196,6 +202,20 @@ fn test_path_matches_wildcard_before_anchor() {
     assert!(!path_matches(
         "/model/amazon.titan-text-express-v1/invoke",
         "anthropic.*/invoke$"
+    ));
+    // Vertex Interactions: /locations/{l}/interactions, but not its GET polling path, and the
+    // Gemini API path (no /locations/ segment) must not fall into the Vertex pattern.
+    assert!(path_matches(
+        "/v1/projects/p/locations/global/interactions",
+        "/locations/*/interactions$"
+    ));
+    assert!(!path_matches(
+        "/v1/projects/p/locations/global/interactions/int_123",
+        "/locations/*/interactions$"
+    ));
+    assert!(!path_matches(
+        "/v1beta/interactions",
+        "/locations/*/interactions$"
     ));
 }
 
@@ -292,12 +312,15 @@ fn test_user_providers_are_added_to_the_defaults() {
             "openai",
             "openai",
             "openai",
+            "openai",
             "anthropic",
+            "gemini",
             "gemini",
             "gemini",
             "anthropic",
             "bedrock",
             "bedrock",
+            "anthropic-agents",
             "ollama",
             "vllm"
         ]
@@ -335,16 +358,19 @@ fn test_user_provider_replaces_defaults_with_its_name_in_their_place() {
             "openai",
             "openai",
             "openai",
+            "openai",
             "anthropic",
             "anthropic",
             "gemini",
             "gemini",
+            "gemini",
             "bedrock",
             "bedrock",
+            "anthropic-agents",
             "ollama"
         ]
     );
-    assert_eq!(registry.providers[5].paths, [":rawPredict$"]);
+    assert_eq!(registry.providers[6].paths, [":rawPredict$"]);
     assert_eq!(
         provider_for(&registry, "api.anthropic.com/v1/messages"),
         None

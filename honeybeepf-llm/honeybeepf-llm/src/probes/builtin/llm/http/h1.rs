@@ -4,12 +4,12 @@ use honeybeepf_llm_core::byte_utils;
 use honeybeepf_llm_core::chunked::{ChunkRules, ChunkState, ChunkWalk};
 use honeybeepf_llm_core::types::UsageInfo;
 
-use super::ProtocolParser;
 use super::body::{BackgroundState, extract_text_from_json, is_response_id, parse_response_json};
 use super::encoding;
 use super::eventstream::{EventStreamCursor, parse_event_stream_body};
 use super::registry::PROVIDER_REGISTRY;
 use super::sse::{SseCursor, parse_sse_body};
+use super::{Detected, ProtocolParser};
 use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
 
 /// What earlier reads of one response already decoded, so each read costs only its new bytes.
@@ -129,6 +129,18 @@ impl Http11Parser {
         final_head(buffer).is_some_and(|head| head.framing.ended(head.body))
     }
 
+    /// Whether a complete 2xx response framed by Content-Length is buffered. Only Content-Length is
+    /// counted: a chunked body can reach its terminator with broken framing (capture loss), which is not
+    /// a clean "provider returned no usage". SSE and event streams are read as they stream, not here.
+    pub fn is_complete_success_response(buffer: &[u8]) -> bool {
+        final_head(buffer).is_some_and(|head| {
+            (200..300).contains(&head.status)
+                && !head.is_sse
+                && !head.is_eventstream
+                && matches!(head.framing, Framing::Length(len) if head.body.len() >= len)
+        })
+    }
+
     /// Whether the buffer starts with a final response head that has headers; body text that merely starts with
     /// `HTTP/1.` parses with none, since SSE and JSON bodies have raw newlines only between events.
     pub fn starts_with_response_head(buffer: &[u8]) -> bool {
@@ -164,6 +176,7 @@ struct Head<'b> {
     is_sse: bool,
     /// AWS binary event stream (Bedrock `*-stream` routes).
     is_eventstream: bool,
+    status: u16,
 }
 
 impl<'b> Head<'b> {
@@ -200,6 +213,7 @@ fn final_head(buffer: &[u8]) -> Option<Head<'_>> {
         );
         // httparse fills the array from the front and shrinks `resp.headers` to the parsed ones.
         let header_count = resp.headers.len();
+        let status = resp.code.unwrap_or(0);
         return Some(Head {
             header_slots: headers,
             header_count,
@@ -207,6 +221,7 @@ fn final_head(buffer: &[u8]) -> Option<Head<'_>> {
             framing,
             is_sse,
             is_eventstream,
+            status,
         });
     }
 }
@@ -224,6 +239,19 @@ pub(super) fn plain_sse_body(buffer: &[u8]) -> Option<(Framing, &[u8])> {
     (head.is_sse && !encoding::is_encoded(head.headers())).then_some((head.framing, head.body))
 }
 
+/// Framing, body and the single content coding of an SSE response sent under one content coding.
+type EncodedSse<'a> = (Framing, &'a [u8], Box<[u8]>);
+
+/// Framing, body and the one content coding of a final SSE response under a single content coding.
+pub(super) fn encoded_sse_body(buffer: &[u8]) -> Option<EncodedSse<'_>> {
+    let head = final_head(buffer)?;
+    let coding = head
+        .is_sse
+        .then(|| encoding::single_coding(head.headers()))
+        .flatten()?;
+    Some((head.framing, head.body, coding))
+}
+
 fn header_contains(headers: &[httparse::Header], name: &str, pattern: &[u8]) -> bool {
     headers.iter().any(|h| {
         h.name.eq_ignore_ascii_case(name) && byte_utils::contains_pattern(h.value, pattern)
@@ -231,7 +259,7 @@ fn header_contains(headers: &[httparse::Header], name: &str, pattern: &[u8]) -> 
 }
 
 impl ProtocolParser for Http11Parser {
-    fn detect_request(&self, buffer: &[u8]) -> Option<String> {
+    fn detect_request(&self, buffer: &[u8]) -> Option<Detected> {
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
 
@@ -248,12 +276,12 @@ impl ProtocolParser for Http11Parser {
                 .unwrap_or_default();
 
             // Check if host+path matches any configured provider
-            if PROVIDER_REGISTRY
-                .find_provider(&host_header, path)
-                .is_some()
-            {
+            if let Some(provider) = PROVIDER_REGISTRY.find_provider(&host_header, path) {
                 // The path is logged and the query can carry a credential (Gemini `?key=`).
-                return Some(path.split_once('?').map_or(path, |(p, _)| p).to_string());
+                return Some(Detected {
+                    path: path.split_once('?').map_or(path, |(p, _)| p).to_string(),
+                    record_only: provider.record_only,
+                });
             }
         }
         None
@@ -443,11 +471,11 @@ mod tests {
     fn responses_create_is_detected_but_retrieval_is_not() {
         let post = b"POST /v1/responses HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{\"input\":\"hi\"}";
         assert_eq!(
-            Http11Parser.detect_request(post).as_deref(),
+            Http11Parser.detect_request(post).map(|d| d.path).as_deref(),
             Some("/v1/responses")
         );
         let get = b"GET /v1/responses/r1 HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
-        assert_eq!(Http11Parser.detect_request(get), None);
+        assert!(Http11Parser.detect_request(get).is_none());
     }
 
     #[test]
@@ -471,11 +499,14 @@ mod tests {
     fn responses_compact_is_detected_but_input_tokens_is_not() {
         let compact = b"POST /v1/responses/compact HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{\"model\":\"gpt-6\",\"input\":\"hi\"}";
         assert_eq!(
-            Http11Parser.detect_request(compact).as_deref(),
+            Http11Parser
+                .detect_request(compact)
+                .map(|d| d.path)
+                .as_deref(),
             Some("/v1/responses/compact")
         );
         let count = b"POST /v1/responses/input_tokens HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{\"model\":\"gpt-6\",\"input\":\"hi\"}";
-        assert_eq!(Http11Parser.detect_request(count), None);
+        assert!(Http11Parser.detect_request(count).is_none());
     }
 
     #[test]
@@ -488,16 +519,19 @@ mod tests {
         ] {
             let req = format!("POST {path} HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{{}}");
             assert_eq!(
-                Http11Parser.detect_request(req.as_bytes()).as_deref(),
+                Http11Parser
+                    .detect_request(req.as_bytes())
+                    .map(|d| d.path)
+                    .as_deref(),
                 Some(path),
                 "{path}"
             );
         }
         // Speech (TTS) is not a recorded path yet, and a GET is not a generation call.
         let tts = b"POST /v1/audio/speech HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{}";
-        assert_eq!(Http11Parser.detect_request(tts), None);
+        assert!(Http11Parser.detect_request(tts).is_none());
         let get = b"GET /v1/images/generations HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
-        assert_eq!(Http11Parser.detect_request(get), None);
+        assert!(Http11Parser.detect_request(get).is_none());
     }
 
     #[test]
@@ -513,7 +547,7 @@ mod tests {
             b"GET /v1/messages/batches/msgbatch_01 HTTP/1.1\r\nHost: api.anthropic.com\r\n\r\n",
         ] {
             let line = String::from_utf8_lossy(req);
-            assert_eq!(Http11Parser.detect_request(req), None, "{line}");
+            assert!(Http11Parser.detect_request(req).is_none(), "{line}");
         }
     }
 
@@ -521,9 +555,28 @@ mod tests {
     fn detected_path_leaves_out_the_query() {
         let req = b"POST /v1beta/models/m:generateContent?key=AIzaFAKE HTTP/1.1\r\nHost: generativelanguage.googleapis.com\r\n\r\n{}";
         assert_eq!(
-            Http11Parser.detect_request(req).as_deref(),
+            Http11Parser.detect_request(req).map(|d| d.path).as_deref(),
             Some("/v1beta/models/m:generateContent")
         );
+    }
+
+    #[test]
+    fn managed_agents_session_posts_are_detected_as_record_only() {
+        for path in ["/v1/sessions", "/v1/sessions/sess_01/events"] {
+            let req = format!("POST {path} HTTP/1.1\r\nHost: api.anthropic.com\r\n\r\n{{}}");
+            let detected = Http11Parser
+                .detect_request(req.as_bytes())
+                .unwrap_or_else(|| panic!("{path} not detected"));
+            assert_eq!(detected.path, path);
+            assert!(detected.record_only, "{path}");
+        }
+        // The event stream is a GET, and the Messages path stays a normal recorded call.
+        let stream =
+            b"GET /v1/sessions/sess_01/events/stream HTTP/1.1\r\nHost: api.anthropic.com\r\n\r\n";
+        assert!(Http11Parser.detect_request(stream).is_none());
+        let messages = b"POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\n\r\n{}";
+        let msg = Http11Parser.detect_request(messages).expect("messages");
+        assert!(!msg.record_only);
     }
 
     #[test]

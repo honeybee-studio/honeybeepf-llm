@@ -1,6 +1,6 @@
 # Compression test fixtures
 
-Binary inputs for the `encoding.rs` tests. gzip and deflate inputs are built inside the tests with flate2.
+Binary inputs for the `encoding.rs` and `sse_stream.rs` tests. gzip and deflate inputs are built inside the tests with flate2.
 Brotli fixtures are fixed files because the `brotli` encoder crate pins `brotli-decompressor ~6.0`, which
 cannot be used next to the 6.1 decoder. The zstd fixtures come from the reference libzstd, so the tests do
 not only round-trip ruzstd's own encoder.
@@ -19,6 +19,7 @@ for byte with the committed file.
 | json-large-window.br | c78b82631fc6bac24f8b8f2aeafdd1b3713d796a2850453843961bccdd3c8ecd | `cargo run -q --release --manifest-path brotli-lw/Cargo.toml < json.txt > json-large-window.br` |
 | json.zst | 048750a5c8122a7086bb7ed232f028ac3be4def4260c5417247d1a5cb1fa386a | `zstd -3 --check -q -c < json.txt > json.zst` |
 | sse-2frames.zst | b3bbf21021b3dd6ee59964e3966987a17437adc900fb0d51899cb13d91df5bdc | `{ zstd -3 --check -q -c < sse-a.txt; zstd -3 --check -q -c < sse-b.txt; } > sse-2frames.zst` |
+| sse-over-16mb.br | 8272b11a522b9b77870ab5557f1b46ec5aafddfdf666f6406115f16dbef5510a | `python3 -c 'import brotli; W=lambda i: ("data: {\"choices\":[{\"delta\":{\"content\":\"pad %08d\"}}]}\n\n"%i).encode(); L=len(W(0)); n=16*1024*1024//L+1; body=b"".join(W(i) for i in range(n))+b"data: {\"model\":\"gpt-4o\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\n"+b"data: [DONE]\n\n"; open("sse-over-16mb.br","wb").write(brotli.compress(body,quality=5,lgwin=22))'` |
 
 ## Contents
 
@@ -31,6 +32,7 @@ for byte with the committed file.
 | json-large-window.br | `json.txt` in a large-window stream (window 2^26) | `brotli_large_window_stream_is_rejected` |
 | json.zst | `json.txt`, one frame with content checksum, no content size | `multi_member_gzip_and_multi_frame_zstd_decode_whole` |
 | sse-2frames.zst | `sse.txt` split at byte 80 (`SSE.len() / 2`), one checksummed frame per half | `multi_member_gzip_and_multi_frame_zstd_decode_whole` |
+| sse-over-16mb.br | varied events (`pad %08d` counter) + one usage event + `[DONE]`, 16,777,358 bytes (> `MAX_RESPONSE_BUFFER_SIZE`) | `every_codec_streams_a_compressed_sse_past_16mb` |
 
 Inputs (sha256 of each: json.txt `ea982ff5…27c1`, sse.txt `fd69e268…2c8b`, sse-a.txt `f8fcb345…1fd0`,
 sse-b.txt `b7063a10…35a8`, a-16777216.txt `5b6ff2e1…783a`, a-16777217.txt `422a9e5e…1503`):

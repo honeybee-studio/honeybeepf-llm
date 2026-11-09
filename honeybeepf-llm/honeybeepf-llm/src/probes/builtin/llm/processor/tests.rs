@@ -124,6 +124,71 @@ fn test_read_over_capture_limit_is_unparsed() {
     assert!(!out.contains(&Outcome::Recorded), "{out:?}");
 }
 
+/// The receive the way the pre-fix kernel emitted it: one record of at most MAX_SSL_BUF_SIZE, marked
+/// truncated when the skb is larger, so the tail where usage lives is never sent.
+fn plain_recv_one_bucket(p: &mut StreamProcessor, bg: &mut BackgroundCalls, skb: &[u8]) -> Outcome {
+    let captured = &skb[..skb.len().min(MAX_SSL_BUF_SIZE)];
+    p.handle_fragment(
+        LlmDirection::Read,
+        captured,
+        0,
+        skb.len() as u32,
+        skb.len() > MAX_SSL_BUF_SIZE,
+        bg,
+        1,
+        #[cfg(feature = "k8s")]
+        None,
+    )
+}
+
+/// The receive the way the fixed `capture_recv` emits it: up to MAX_SSL_FRAGMENTS records of at most
+/// MAX_SSL_BUF_SIZE, each at its own offset, truncated only when the skb exceeds the Read limit.
+fn plain_recv_skb(p: &mut StreamProcessor, bg: &mut BackgroundCalls, skb: &[u8]) -> Vec<Outcome> {
+    let limit = capture_limit(LlmDirection::Read);
+    let truncated = skb.len() > limit;
+    let mut out = Vec::new();
+    for i in 0..MAX_SSL_FRAGMENTS {
+        let offset = i * MAX_SSL_BUF_SIZE;
+        if i > 0 && (offset >= skb.len() || offset >= limit) {
+            break;
+        }
+        let data = &skb[offset..skb.len().min(offset + MAX_SSL_BUF_SIZE)];
+        out.push(p.handle_fragment(
+            LlmDirection::Read,
+            data,
+            offset as u32,
+            skb.len() as u32,
+            truncated,
+            bg,
+            1,
+            #[cfg(feature = "k8s")]
+            None,
+        ));
+    }
+    out
+}
+
+#[test]
+fn plaintext_large_response_in_one_skb_records_only_when_fragmented() {
+    // The same >4 KB non-streaming JSON response, delivered GRO-coalesced in one skb.
+    let resp: Vec<u8> = h1_response(6000).concat();
+    assert!(resp.len() > MAX_SSL_BUF_SIZE);
+
+    // Pre-fix: one truncated record, so the tail never arrives and the processor drops the response.
+    let mut dropped = StreamProcessor::new();
+    let mut bg = BackgroundCalls::default();
+    send_with(&mut dropped, &mut bg, LlmDirection::Write, REQUEST, None);
+    let one = plain_recv_one_bucket(&mut dropped, &mut bg, &resp);
+    assert_ne!(one, Outcome::Recorded, "one truncated record: {one:?}");
+
+    // Fixed: the skb is split into fragments, so the whole response reaches the parser and records.
+    let mut p = StreamProcessor::new();
+    let mut bg = BackgroundCalls::default();
+    send_with(&mut p, &mut bg, LlmDirection::Write, REQUEST, None);
+    let out = plain_recv_skb(&mut p, &mut bg, &resp);
+    assert_eq!(out.last(), Some(&Outcome::Recorded), "fragmented: {out:?}");
+}
+
 #[test]
 fn test_request_over_capture_limit_still_detected() {
     // Large prompts (images) arrive as one SSL_write; only the head is needed for detection.
@@ -185,6 +250,37 @@ fn unparsed(out: &[Outcome]) -> Vec<UnparsedReason> {
         .collect()
 }
 
+const SESSION_REQUEST: &[u8] = b"POST /v1/sessions HTTP/1.1\r\nHost: api.anthropic.com\r\nContent-Type: application/json\r\n\r\n{\"system\":\"You are helpful\"}";
+const EVENTS_REQUEST: &[u8] = b"POST /v1/sessions/sess_1/events HTTP/1.1\r\nHost: api.anthropic.com\r\nContent-Type: application/json\r\n\r\n{\"events\":[]}";
+// The session object carries a cumulative session total; it must be counted, never recorded as tokens.
+const SESSION_RESPONSE: &str = r#"{"id":"sess_1","type":"session","usage":{"input_tokens":5000,"output_tokens":3200,"cache_read_input_tokens":20000,"list_cost":{"amount":"187","currency":"USD"}}}"#;
+// An events send is acknowledged with no usage; the call is still a session call and must be counted.
+const EVENTS_ACK: &str = r#"{"data":[{"id":"evt_1","type":"user.message"}]}"#;
+
+#[test]
+fn test_managed_agents_session_call_is_counted_agent_session_not_recorded() {
+    let mut p = StreamProcessor::new();
+    let out = exchange(
+        &mut p,
+        SESSION_REQUEST,
+        &h1("application/json", SESSION_RESPONSE),
+    );
+    assert_eq!(unparsed(&out), [UnparsedReason::AgentSession], "{out:?}");
+    assert_eq!(count(&out, Outcome::Recorded), 0, "{out:?}");
+
+    // A usage-less ack is counted the same way: completion, not usage, is the signal (matches HTTP/2).
+    let ack = exchange(&mut p, EVENTS_REQUEST, &h1("application/json", EVENTS_ACK));
+    assert_eq!(unparsed(&ack), [UnparsedReason::AgentSession], "{ack:?}");
+
+    // A later Messages call on the same stream records normally: record_only is cleared on reset.
+    let next = exchange(
+        &mut p,
+        MESSAGES_REQUEST,
+        &h1("application/json", MESSAGES_RESPONSE),
+    );
+    assert_eq!(next.last(), Some(&Outcome::Recorded), "{next:?}");
+}
+
 #[test]
 fn test_messages_after_count_tokens_is_recorded() {
     let mut p = StreamProcessor::new();
@@ -231,13 +327,16 @@ fn test_responses_compact_after_input_tokens_is_recorded() {
 #[test]
 fn test_chat_after_non_llm_request_is_recorded() {
     let mut p = StreamProcessor::new();
-    let embeddings = b"POST /v1/embeddings HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"text-embedding-3-small\",\"input\":\"hi\"}";
+    // Moderations is not a generation endpoint, so it is detected as non-LLM; the chat that follows on
+    // the same connection must still be recorded (#29, bug b-1). Embeddings was the example here until
+    // #79 made it an LLM call.
+    let non_llm = b"POST /v1/moderations HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\n\r\n{\"model\":\"omni-moderation-latest\",\"input\":\"hi\"}";
     let mut out = exchange(
         &mut p,
-        embeddings,
+        non_llm,
         &h1(
             "application/json",
-            r#"{"object":"list","data":[],"usage":{"prompt_tokens":1,"total_tokens":1}}"#,
+            r#"{"id":"modr-1","model":"omni-moderation-latest","results":[]}"#,
         ),
     );
     let reads = h1_response(3000);
@@ -338,8 +437,31 @@ fn test_response_without_usage_is_unparsed_when_next_request_starts() {
     assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
 }
 
+// A complete 2xx response that carried no usage (an embedding whose provider omits it) is counted
+// as usage_absent when it ends, not left to the next-request or close reason.
+#[test]
+fn test_framed_success_without_usage_is_usage_absent() {
+    let mut p = StreamProcessor::new();
+    let body = r#"{"id":"msg_1","type":"message","model":"m"}"#;
+    let out = exchange(&mut p, MESSAGES_REQUEST, &h1("application/json", body));
+    assert_eq!(unparsed(&out), [UnparsedReason::UsageAbsent], "{out:?}");
+    assert_eq!(count(&out, Outcome::Recorded), 0, "{out:?}");
+}
+
+// A response still short of its Content-Length has no usage yet but must not be called usage_absent;
+// the reader keeps waiting for the rest.
+#[test]
+fn test_partial_response_is_not_usage_absent() {
+    let mut p = StreamProcessor::new();
+    let mut out = send(&mut p, LlmDirection::Write, MESSAGES_REQUEST, None);
+    let head = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 64\r\n\r\n{\"id\":\"msg_1\"";
+    out.extend(send(&mut p, LlmDirection::Read, head, None));
+    assert_eq!(unparsed(&out), [], "{out:?}");
+    assert_eq!(count(&out, Outcome::Recorded), 0, "{out:?}");
+}
+
 // A usage-less transcription body (whisper-1, or a duration-billed model whose tokens are not read
-// here) carries no tokens, so the call counts as unparsed ("seen, tokens unavailable") rather than
+// here) carries no tokens, so the call counts as usage_absent ("seen, tokens unavailable") rather than
 // being dropped silently.
 #[test]
 fn test_transcription_without_usage_is_unparsed() {
@@ -355,7 +477,7 @@ fn test_transcription_without_usage_is_unparsed() {
         MESSAGES_REQUEST,
         &h1("application/json", MESSAGES_RESPONSE),
     ));
-    assert_eq!(unparsed(&out), [UnparsedReason::NextRequest], "{out:?}");
+    assert_eq!(unparsed(&out), [UnparsedReason::UsageAbsent], "{out:?}");
     assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
 }
 
@@ -1476,7 +1598,8 @@ fn test_only_a_queued_background_object_defers_its_call() {
         BG_POLL,
         &h1("application/json", &stored),
     ));
-    assert_eq!(unparsed(&out), [UnparsedReason::NextRequest], "{out:?}");
+    // The lookalike is a complete response with null usage, so it counts as usage_absent, not deferred.
+    assert_eq!(unparsed(&out), [UnparsedReason::UsageAbsent], "{out:?}");
     assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
     assert_eq!(count(&out, Outcome::Deferred), 0, "{out:?}");
 }
@@ -1569,4 +1692,110 @@ fn a_connection_joined_mid_stream_is_detected_and_records_from_data() {
     .concat();
     let out = send(&mut p, LlmDirection::Read, &server, None);
     assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+}
+
+/// An HPACK literal field (no indexing, new name, not Huffman): names/values < 127 B.
+fn h2_lit(name: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x00, name.len() as u8];
+    out.extend_from_slice(name);
+    out.push(value.len() as u8);
+    out.extend_from_slice(value);
+    out
+}
+
+/// A client request HEADERS frame (END_HEADERS, END_STREAM: no body) for `method authority path`.
+fn h2_req(method: &[u8], authority: &[u8], path: &[u8], stream: u32) -> Vec<u8> {
+    let block = [
+        h2_lit(b":method", method),
+        h2_lit(b":authority", authority),
+        h2_lit(b":path", path),
+    ]
+    .concat();
+    h2_frame(1, 0x4 | 0x1, stream, &block)
+}
+
+/// A server JSON response: HEADERS (status 200, END_HEADERS) then DATA (`body`, END_STREAM).
+fn h2_json_response(stream: u32, body: &[u8]) -> Vec<u8> {
+    [
+        h2_frame(1, 0x4, stream, &h2_lit(b":status", b"200")),
+        h2_frame(0, 0x1, stream, body),
+    ]
+    .concat()
+}
+
+#[test]
+fn h2_background_call_is_recorded_once_from_a_later_poll() {
+    use LlmDirection::{Read, Write};
+    use honeybeepf_llm_core::h2::frame::PREFACE;
+    let mut bg = BackgroundCalls::default();
+
+    // Create on one connection: POST /v1/responses answered "queued" → the call is deferred, not recorded.
+    let mut a = StreamProcessor::new();
+    let mut out = send_with(&mut a, &mut bg, Write, PREFACE, None);
+    out.extend(send_with(
+        &mut a,
+        &mut bg,
+        Write,
+        &h2_req(b"POST", b"api.openai.com", b"/v1/responses", 1),
+        None,
+    ));
+    let queued = bg_object("queued", "null");
+    out.extend(send_with(
+        &mut a,
+        &mut bg,
+        Read,
+        &h2_json_response(1, queued.as_bytes()),
+        None,
+    ));
+    assert!(bg.contains("resp_bg1"), "{out:?}");
+    assert_eq!(out.last(), Some(&Outcome::Deferred), "{out:?}");
+
+    // Poll on a second connection: GET /v1/responses/{id} answered "completed" → recorded once, against the create.
+    let mut b = StreamProcessor::new();
+    let done = bg_object("completed", BG_USAGE);
+    out.extend(send_with(&mut b, &mut bg, Write, PREFACE, None));
+    out.extend(send_with(
+        &mut b,
+        &mut bg,
+        Write,
+        &h2_req(b"GET", b"api.openai.com", b"/v1/responses/resp_bg1", 1),
+        None,
+    ));
+    out.extend(send_with(
+        &mut b,
+        &mut bg,
+        Read,
+        &h2_json_response(1, done.as_bytes()),
+        None,
+    ));
+    assert_eq!(count(&out, Outcome::Recorded), 1, "{out:?}");
+    assert!(!bg.contains("resp_bg1"), "{out:?}");
+}
+
+#[test]
+fn h2_a_stored_response_get_we_never_queued_is_not_recorded() {
+    // A GET /v1/responses/{id} the node never deferred (no matching create) settles nothing: its body is a
+    // stored object, not our background result.
+    use LlmDirection::{Read, Write};
+    use honeybeepf_llm_core::h2::frame::PREFACE;
+    let mut bg = BackgroundCalls::default();
+    let mut p = StreamProcessor::new();
+    let mut out = send_with(&mut p, &mut bg, Write, PREFACE, None);
+    out.extend(send_with(
+        &mut p,
+        &mut bg,
+        Write,
+        &h2_req(b"GET", b"api.openai.com", b"/v1/responses/resp_other", 1),
+        None,
+    ));
+    let done = bg_object("completed", BG_USAGE).replace("resp_bg1", "resp_other");
+    out.extend(send_with(
+        &mut p,
+        &mut bg,
+        Read,
+        &h2_json_response(1, done.as_bytes()),
+        None,
+    ));
+    assert_eq!(count(&out, Outcome::Recorded), 0, "{out:?}");
+    assert!(unparsed(&out).is_empty(), "{out:?}");
 }

@@ -91,6 +91,7 @@ replayed against it as well. A blank cell was not checked.
 | OpenAI Responses API | ✅ | ✅ | |
 | Anthropic Messages | ✅ | ✅ | ✅ read/write |
 | Google Gemini (`generateContent`, `streamGenerateContent`) | ✅ | ✅ | ✅ read |
+| Google Gemini Interactions API (Gemini API and Vertex AI) | ✅ | ✅ | ✅ read |
 | Azure OpenAI | ✅ Chat Completions | ✅ Responses API | |
 | Google Vertex AI (Gemini) | ✅ | ✅ | |
 | Claude on Vertex AI, Google Cloud and Microsoft Foundry | ✅ | ✅ | ✅ read/write |
@@ -105,8 +106,25 @@ built-in providers; a provider with a built-in name (`openai`, `anthropic`, `gem
 replaces every built-in entry of that name, so an `openai` entry must also cover the Responses API and an
 `anthropic` entry Claude on Vertex AI. Usage is read by matching the response's fields, not its host, with the
 built-in entries tried first: a gateway that returns an OpenAI-, Anthropic- or Gemini-shaped body is read with the
-built-in fields. Only HTTPS calls made through OpenSSL are seen; a plain-HTTP endpoint (a typical in-cluster
-Ollama or vLLM) is not.
+built-in fields.
+
+By default only HTTPS calls made through OpenSSL are seen. An in-cluster **plain-HTTP** endpoint (a typical Ollama
+or vLLM) is captured at the socket layer when a provider opts in with `plaintext`:
+
+```yaml
+builtinProbes:
+  llm:
+    providers:
+      - name: vllm                 # a non-built-in name, so it is added, not replacing a built-in
+        hosts: ["vllm.default.svc.cluster.local"]   # must match the Host header the app sends
+        paths: ["/v1/chat/completions"]             # optional; omit to match any path on the host
+        plaintext: { port: 8000 }
+```
+
+The agent resolves those Service endpoints and records matching calls with `transport="plain"` (TLS calls carry
+`transport="tls"`), with no proxy and no app change. It needs a node with cgroup v2 and kernel 5.10+; the chart
+grants read access to `services` and `endpointslices` only when a provider sets `plaintext`. OpenAI-compatible
+servers need no `response` block, and the request's `Host` header must match one of the provider's `hosts`. IPv4 only so far.
 
 **Runtimes** (also checked in pods on k3s: `python:3.12-slim`, `python:3.13-alpine`, `node:24-slim`)
 
@@ -129,7 +147,8 @@ Ollama or vLLM) is not.
 
 HTTP/2 is recorded from the start of a connection. A connection the agent joins mid-stream is still recorded, but
 with the provider host unknown; a request head lost to a capture gap counts under
-`llm_responses_unparsed_total{reason="headers_lost"}`. Node.js 26 uses HTTP/2 by default (its built-in `fetch`,
+`llm_responses_unparsed_total{reason="headers_lost"}`. A Responses call made with `"background": true` is linked
+to the later poll that carries its usage over HTTP/2 as well as HTTP/1.1. Node.js 26 uses HTTP/2 by default (its built-in `fetch`,
 undici 8), so the official OpenAI and Anthropic Node SDKs now record with no change, checked with Node.js 26.13.0,
 `openai` 7.39.0 and `@anthropic-ai/sdk` 0.135.0, JSON and streaming.
 
@@ -164,6 +183,10 @@ are checked on Linux 7.0 (the tables above).
 | `honeybeepf_llm_llm_latency_seconds` | histogram | same as requests |
 | `honeybeepf_llm_llm_responses_unparsed_total` | counter | `reason`, `target_namespace`, `target_pod_name`, `target_workload_kind`, `target_workload_name` |
 
+`llm_requests_total`, `llm_tokens_total` and `llm_latency_seconds` also carry `transport` (`tls` or `plain`),
+which tells an OpenSSL-captured call apart from one captured on the socket-level plaintext path; the cache and
+reasoning metrics do not carry it.
+
 `llm_responses_unparsed_total` counts LLM calls the agent saw but could not record, so a drop in recorded calls
 can be told apart from a drop in traffic. `reason` is one of:
 
@@ -175,14 +198,23 @@ can be told apart from a drop in traffic. `reason` is one of:
 | `request_too_large` | the captured request bytes (the first 4 KB of each write) passed the 8 MB buffer limit |
 | `response_too_large` | the response passed the 16 MB buffer limit and is neither an uncompressed HTTP/1.1 JSON body with usage in its first or last 64 KB nor an uncompressed HTTP/1.1 SSE stream (compressed and HTTP/2 responses always count here) |
 | `background_unfinished` | an OpenAI Responses call made with `"background": true` had no usage in any poll the node saw: not polled for an hour, more than 4096 such calls waiting, or ended without usage |
+| `usage_absent` | a complete 2xx response (an HTTP/1.1 body framed by Content-Length, or a finished HTTP/2 stream) carried no usage, for example a `gemini-embedding-001` embedding, which returns none |
+| `agent_session` | a Claude Managed Agents session call (`POST /v1/sessions`, `/v1/sessions/{id}/events`): seen, but its usage is a running session total, so it is counted here on purpose and not read as one call's tokens — not a dropped call |
 
 Not counted here: a read lost whole because the ring buffer was full (see `llm_events_total{stage="reserve_fail"}`),
 and a connection left idle for 300 s without being closed (for example a killed process).
 
-Unparsed calls per minute by reason, for an alert on `> 0`:
+Unparsed calls per minute by reason, for an alert on `> 0` (excluding `agent_session`, which is counted on
+purpose, not a drop, and `usage_absent`, which some providers cause on every call):
 
 ```promql
-sum by (target_namespace, reason) (rate(honeybeepf_llm_llm_responses_unparsed_total[5m])) * 60
+sum by (target_namespace, reason) (rate(honeybeepf_llm_llm_responses_unparsed_total{reason!~"agent_session|usage_absent"}[5m])) * 60
+```
+
+Calls whose response had no usage, per minute, for a panel rather than an alert:
+
+```promql
+sum by (target_namespace) (rate(honeybeepf_llm_llm_responses_unparsed_total{reason="usage_absent"}[5m])) * 60
 ```
 
 The collector and Prometheus add more labels, such as `k8s_pod_name`, `k8s_node_name` and `namespace`; those name
