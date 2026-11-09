@@ -34,11 +34,18 @@ enum ProcessorState {
 }
 
 #[cfg(feature = "k8s")]
-fn fmt_pod(pod_info: &Option<std::sync::Arc<crate::k8s::PodInfo>>) -> String {
+fn fmt_pod(pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>) -> String {
     pod_info
-        .as_ref()
         .map(|p| format!(" | Pod: {}/{}", p.namespace, p.pod_name))
         .unwrap_or_default()
+}
+
+/// The identity a recorded call is attributed to: the process, and with k8s its pod. Passed by
+/// reference so the one place that owns it (the ringbuf handler) reads `/proc` at most once per event.
+pub struct CallContext {
+    pub(crate) pid: u32,
+    #[cfg(feature = "k8s")]
+    pub(crate) pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
 }
 
 /// What one fragment led to.
@@ -202,8 +209,7 @@ impl StreamProcessor {
         len: u32,
         truncated: bool,
         background: &mut BackgroundCalls,
-        pid: u32,
-        #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
+        ctx: &CallContext,
     ) -> Outcome {
         let end = offset.saturating_add(data.len() as u32);
         let complete = end as usize >= (len as usize).min(capture_limit(direction));
@@ -226,30 +232,14 @@ impl StreamProcessor {
             let gap = self.h2_loss(direction, offset, len, data.len(), truncated);
             self.frag_next = if complete { 0 } else { end };
             self.frag_dir = direction;
-            return self.feed_http2(
-                direction,
-                data,
-                gap,
-                background,
-                pid,
-                #[cfg(feature = "k8s")]
-                pod_info,
-            );
+            return self.feed_http2(direction, data, gap, background, ctx);
         }
 
         // A connection joined after its preface is recognized by a run of client frame heads.
         if matches!(self.state, ProcessorState::Detecting)
             && direction == LlmDirection::Write
-            && let Some(outcome) = self.detect_h2_midjoin(
-                data,
-                complete,
-                end,
-                direction,
-                background,
-                pid,
-                #[cfg(feature = "k8s")]
-                pod_info.as_ref(),
-            )
+            && let Some(outcome) =
+                self.detect_h2_midjoin(data, complete, end, direction, background, ctx)
         {
             return outcome;
         }
@@ -273,28 +263,12 @@ impl StreamProcessor {
         };
         let mut dropped = match reason {
             None => Outcome::Pending,
-            Some(reason) => {
-                #[cfg(feature = "k8s")]
-                let dropped = self.drop_response(pid, reason, pod_info.as_ref());
-                #[cfg(not(feature = "k8s"))]
-                let dropped = self.drop_response(pid, reason);
-                dropped
-            }
+            Some(reason) => self.drop_response(reason, ctx),
         };
         if resync {
-            self.resume_next_request(
-                background,
-                pid,
-                #[cfg(feature = "k8s")]
-                pod_info.as_ref(),
-            );
+            self.resume_next_request(background, ctx);
         } else if offset == 0 && direction == LlmDirection::Write {
-            let noted = self.note_next_request(
-                data,
-                pid,
-                #[cfg(feature = "k8s")]
-                pod_info.as_ref(),
-            );
+            let noted = self.note_next_request(data, ctx);
             if matches!(noted, Outcome::Unparsed(_)) {
                 dropped = noted;
             }
@@ -303,10 +277,7 @@ impl StreamProcessor {
             return dropped;
         }
 
-        #[cfg(feature = "k8s")]
-        let fed = self.handle_event(direction, data, complete, background, pid, pod_info);
-        #[cfg(not(feature = "k8s"))]
-        let fed = self.handle_event(direction, data, complete, background, pid);
+        let fed = self.handle_event(direction, data, complete, background, ctx);
         if matches!(dropped, Outcome::Unparsed(_)) {
             dropped
         } else {
@@ -317,7 +288,6 @@ impl StreamProcessor {
     /// Classify a connection joined after its preface: no preface was seen, but the client bytes form a run
     /// of frame heads (HTTP/1.1, which starts with an uppercase method, never does). On a match it starts an
     /// HTTP/2 connection with both directions unknown and feeds what was buffered, returning its outcome.
-    #[allow(clippy::too_many_arguments)]
     fn detect_h2_midjoin(
         &mut self,
         data: &[u8],
@@ -325,8 +295,7 @@ impl StreamProcessor {
         end: u32,
         direction: LlmDirection,
         background: &mut BackgroundCalls,
-        pid: u32,
-        #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
+        ctx: &CallContext,
     ) -> Option<Outcome> {
         if starts_ascii_upper(&self.write_buf, data) {
             return None;
@@ -335,7 +304,7 @@ impl StreamProcessor {
         if !http::looks_like_http2(&client) {
             return None;
         }
-        info!("[LLM] Detected HTTP/2 (mid-stream join) (PID: {})", pid);
+        info!("[LLM] Detected HTTP/2 (mid-stream join) (PID: {})", ctx.pid);
         self.write_buf = Vec::new();
         self.state = ProcessorState::Http2(Box::new(http::H2Conn::new_midjoin()));
         self.h2_gap_client = H2Gap::Resync;
@@ -343,15 +312,7 @@ impl StreamProcessor {
         self.frag_next = if complete { 0 } else { end };
         self.frag_dir = direction;
         let gap = self.take_h2_gap(direction);
-        Some(self.feed_http2(
-            direction,
-            &client,
-            gap,
-            background,
-            pid,
-            #[cfg(feature = "k8s")]
-            pod_info.cloned(),
-        ))
+        Some(self.feed_http2(direction, &client, gap, background, ctx))
     }
 
     /// Feed one fragment to the HTTP/2 connection, recording each stream whose response ended. `gap` tells
@@ -362,8 +323,7 @@ impl StreamProcessor {
         data: &[u8],
         gap: H2Gap,
         background: &mut BackgroundCalls,
-        pid: u32,
-        #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
+        ctx: &CallContext,
     ) -> Outcome {
         self.last_activity = Instant::now();
         let ProcessorState::Http2(conn) = &mut self.state else {
@@ -373,28 +333,24 @@ impl StreamProcessor {
         conn.feed(direction, data, gap, |event| match event {
             http::H2Event::Detected { path } => {
                 #[cfg(feature = "k8s")]
-                let pod_str = fmt_pod(&pod_info);
+                let pod_str = fmt_pod(ctx.pod_info.as_ref());
                 #[cfg(not(feature = "k8s"))]
                 let pod_str = "";
-                info!("[LLM] Detected HTTP/2: {} (PID: {}){}", path, pid, pod_str);
+                info!(
+                    "[LLM] Detected HTTP/2: {} (PID: {}){}",
+                    path, ctx.pid, pod_str
+                );
             }
             http::H2Event::Recorded {
                 usage,
                 start,
                 midjoin,
             } => {
-                record_usage(
-                    &usage,
-                    start,
-                    pid,
-                    self.transport,
-                    #[cfg(feature = "k8s")]
-                    pod_info.clone(),
-                );
+                record_usage(&usage, start, self.transport, ctx);
                 if midjoin {
                     crate::telemetry::record_h2_midjoin(
                         #[cfg(feature = "k8s")]
-                        pod_info.as_ref(),
+                        ctx.pod_info.as_ref(),
                     );
                 }
                 outcome = Outcome::Recorded;
@@ -402,9 +358,9 @@ impl StreamProcessor {
             http::H2Event::Deferred { id, start } => {
                 let call = PendingCall::new(
                     start,
-                    pid,
+                    ctx.pid,
                     #[cfg(feature = "k8s")]
-                    pod_info.clone(),
+                    ctx.pod_info.clone(),
                 );
                 outcome = defer(id, call, background);
             }
@@ -416,16 +372,11 @@ impl StreamProcessor {
                 outcome = settle_h2_poll(id, usage.map(|u| *u), state, background, self.transport);
             }
             http::H2Event::Unparsed { reason } => {
-                outcome = Self::count_unparsed(
-                    pid,
-                    reason,
-                    #[cfg(feature = "k8s")]
-                    pod_info.as_ref(),
-                );
+                outcome = Self::count_unparsed(reason, ctx);
             }
             http::H2Event::Resynced => crate::telemetry::record_h2_resynced(
                 #[cfg(feature = "k8s")]
-                pod_info.as_ref(),
+                ctx.pod_info.as_ref(),
             ),
         });
         outcome
@@ -477,32 +428,18 @@ impl StreamProcessor {
     }
 
     /// End of the connection: an LLM call still without usage (request or response) is counted as unparsed.
-    pub fn close(
-        &mut self,
-        pid: u32,
-        #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
-    ) -> Outcome {
+    pub fn close(&mut self, ctx: &CallContext) -> Outcome {
         // Each HTTP/2 stream still open at close was a detected call that never reported usage.
         if let ProcessorState::Http2(conn) = &self.state {
             let open = conn.open_streams();
             self.state = ProcessorState::Finished;
             let mut outcome = Outcome::Pending;
             for _ in 0..open {
-                outcome = Self::count_unparsed(
-                    pid,
-                    UnparsedReason::ConnectionClosed,
-                    #[cfg(feature = "k8s")]
-                    pod_info,
-                );
+                outcome = Self::count_unparsed(UnparsedReason::ConnectionClosed, ctx);
             }
             return outcome;
         }
-        self.drop_response(
-            pid,
-            UnparsedReason::ConnectionClosed,
-            #[cfg(feature = "k8s")]
-            pod_info,
-        )
+        self.drop_response(UnparsedReason::ConnectionClosed, ctx)
     }
 
     /// Whether a whole HTTP/1.1 response without usage is buffered, so the next Write starts a new request.
@@ -534,12 +471,7 @@ impl StreamProcessor {
     }
 
     /// Remember a request head written mid-response; one already remembered never got its response.
-    fn note_next_request(
-        &mut self,
-        data: &[u8],
-        pid: u32,
-        #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
-    ) -> Outcome {
+    fn note_next_request(&mut self, data: &[u8], ctx: &CallContext) -> Outcome {
         if !self.mid_http11_response() || !http::Http11Parser::is_request_head(data) {
             return Outcome::Pending;
         }
@@ -550,21 +482,11 @@ impl StreamProcessor {
         if skipped.is_none() {
             return Outcome::Pending;
         }
-        Self::count_unparsed(
-            pid,
-            UnparsedReason::CaptureLost,
-            #[cfg(feature = "k8s")]
-            pod_info,
-        )
+        Self::count_unparsed(UnparsedReason::CaptureLost, ctx)
     }
 
     /// Start over from the request written mid-response, so this Read is parsed as its response.
-    fn resume_next_request(
-        &mut self,
-        background: &BackgroundCalls,
-        pid: u32,
-        #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
-    ) {
+    fn resume_next_request(&mut self, background: &BackgroundCalls, ctx: &CallContext) {
         let Some((at, start_time)) = self.next_request.take() else {
             return;
         };
@@ -572,12 +494,7 @@ impl StreamProcessor {
         self.read_buf.clear();
         self.read_progress = http::ResponseProgress::default();
         // Detected again, so a non-LLM request after the loss is skipped like any other.
-        self.state = match self.detect(
-            background,
-            pid,
-            #[cfg(feature = "k8s")]
-            pod_info,
-        ) {
+        self.state = match self.detect(background, ctx) {
             ProcessorState::ProcessingRequest { parser, .. } => {
                 ProcessorState::ProcessingRequest { start_time, parser }
             }
@@ -609,12 +526,7 @@ impl StreamProcessor {
     }
 
     /// Count the response in progress as unparsed rather than record it as a 0-token failure; a poll's is not a call.
-    fn drop_response(
-        &mut self,
-        pid: u32,
-        reason: UnparsedReason,
-        #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
-    ) -> Outcome {
+    fn drop_response(&mut self, reason: UnparsedReason, ctx: &CallContext) -> Outcome {
         if !self.is_llm() {
             return Outcome::Pending;
         }
@@ -623,34 +535,25 @@ impl StreamProcessor {
         if self.continuation.take().is_some() {
             return Outcome::Pending;
         }
-        Self::count_unparsed(
-            pid,
-            reason,
-            #[cfg(feature = "k8s")]
-            pod_info,
-        )
+        Self::count_unparsed(reason, ctx)
     }
 
     /// Count one LLM call as unparsed, in the metric and the log.
-    fn count_unparsed(
-        pid: u32,
-        reason: UnparsedReason,
-        #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
-    ) -> Outcome {
+    fn count_unparsed(reason: UnparsedReason, ctx: &CallContext) -> Outcome {
         crate::telemetry::record_llm_unparsed(
             reason.as_str(),
             #[cfg(feature = "k8s")]
-            pod_info,
+            ctx.pod_info.as_ref(),
         );
 
         #[cfg(feature = "k8s")]
-        let pod_str = fmt_pod(&pod_info.cloned());
+        let pod_str = fmt_pod(ctx.pod_info.as_ref());
         #[cfg(not(feature = "k8s"))]
         let pod_str = "";
 
         info!(
             "LLM UNPARSED | PID: {} | {}, not recorded{}",
-            pid, reason, pod_str
+            ctx.pid, reason, pod_str
         );
         Outcome::Unparsed(reason)
     }
@@ -661,8 +564,7 @@ impl StreamProcessor {
         data: &[u8],
         complete: bool,
         background: &mut BackgroundCalls,
-        pid: u32,
-        #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
+        ctx: &CallContext,
     ) -> Outcome {
         self.last_activity = Instant::now();
 
@@ -675,12 +577,7 @@ impl StreamProcessor {
             Ok(true) => {}
             Ok(false) => return Outcome::Pending,
             Err(reason) => {
-                let dropped = self.drop_response(
-                    pid,
-                    reason,
-                    #[cfg(feature = "k8s")]
-                    pod_info.as_ref(),
-                );
+                let dropped = self.drop_response(reason, ctx);
                 self.reset();
                 return dropped;
             }
@@ -689,12 +586,7 @@ impl StreamProcessor {
         // Take ownership of current state to enable transitions
         match std::mem::replace(&mut self.state, ProcessorState::Finished) {
             ProcessorState::Detecting => {
-                self.state = self.detect(
-                    background,
-                    pid,
-                    #[cfg(feature = "k8s")]
-                    pod_info.as_ref(),
-                );
+                self.state = self.detect(background, ctx);
             }
             ProcessorState::ProcessingRequest { start_time, parser }
                 if direction != LlmDirection::Read =>
@@ -712,12 +604,7 @@ impl StreamProcessor {
                     if self.record_only {
                         if http::Http11Parser::is_complete_response(&self.read_buf) {
                             self.state = ProcessorState::Finished;
-                            return Self::count_unparsed(
-                                pid,
-                                UnparsedReason::AgentSession,
-                                #[cfg(feature = "k8s")]
-                                pod_info.as_ref(),
-                            );
+                            return Self::count_unparsed(UnparsedReason::AgentSession, ctx);
                         }
                     } else {
                         let usage = match &mut self.past_limit {
@@ -738,22 +625,11 @@ impl StreamProcessor {
                             && http::Http11Parser::is_complete_success_response(&self.read_buf);
                         if framed_no_usage {
                             self.state = ProcessorState::ProcessingResponse { start_time, parser };
-                            return self.drop_response(
-                                pid,
-                                UnparsedReason::UsageAbsent,
-                                #[cfg(feature = "k8s")]
-                                pod_info.as_ref(),
-                            );
+                            return self.drop_response(UnparsedReason::UsageAbsent, ctx);
                         }
-                        if let Some(outcome) = self.settle(
-                            usage,
-                            state,
-                            start_time,
-                            background,
-                            pid,
-                            #[cfg(feature = "k8s")]
-                            pod_info,
-                        ) {
+                        if let Some(outcome) =
+                            self.settle(usage, state, start_time, background, ctx)
+                        {
                             return outcome;
                         }
                     }
@@ -819,12 +695,7 @@ impl StreamProcessor {
     }
 
     /// Next state for the request bytes buffered so far.
-    fn detect(
-        &mut self,
-        background: &BackgroundCalls,
-        pid: u32,
-        #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<crate::k8s::PodInfo>>,
-    ) -> ProcessorState {
+    fn detect(&mut self, background: &BackgroundCalls, ctx: &CallContext) -> ProcessorState {
         self.record_only = false;
         let (version, path, parser): (&str, String, Box<dyn ProtocolParser>) =
             if let Some(d) = http::Http11Parser.detect_request(&self.write_buf) {
@@ -850,13 +721,13 @@ impl StreamProcessor {
             };
 
         #[cfg(feature = "k8s")]
-        let pod_str = fmt_pod(&pod_info.cloned());
+        let pod_str = fmt_pod(ctx.pod_info.as_ref());
         #[cfg(not(feature = "k8s"))]
         let pod_str = "";
 
         info!(
             "[LLM] Detected {}: {} (PID: {}){}",
-            version, path, pid, pod_str
+            version, path, ctx.pid, pod_str
         );
         ProcessorState::ProcessingRequest {
             start_time: Instant::now(),
@@ -884,21 +755,11 @@ impl StreamProcessor {
         state: Option<BackgroundState>,
         start_time: Instant,
         background: &mut BackgroundCalls,
-        pid: u32,
-        #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
+        ctx: &CallContext,
     ) -> Option<Outcome> {
         match self.continuation.take() {
             Some(id) => self.settle_poll(id, usage, state, background),
-            None => settle_create(
-                usage,
-                state,
-                start_time,
-                background,
-                pid,
-                self.transport,
-                #[cfg(feature = "k8s")]
-                pod_info,
-            ),
+            None => settle_create(usage, state, start_time, background, self.transport, ctx),
         }
     }
 
@@ -945,10 +806,12 @@ impl StreamProcessor {
         record_usage(
             &usage,
             call.start_time,
-            call.pid,
             self.transport,
-            #[cfg(feature = "k8s")]
-            call.pod_info,
+            &CallContext {
+                pid: call.pid,
+                #[cfg(feature = "k8s")]
+                pod_info: call.pod_info,
+            },
         );
         Some(Outcome::Recorded)
     }
@@ -960,28 +823,20 @@ fn settle_create(
     state: Option<BackgroundState>,
     start_time: Instant,
     background: &mut BackgroundCalls,
-    pid: u32,
     transport: Transport,
-    #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
+    ctx: &CallContext,
 ) -> Option<Outcome> {
     match (usage, state) {
         (Some(usage), _) => {
-            record_usage(
-                &usage,
-                start_time,
-                pid,
-                transport,
-                #[cfg(feature = "k8s")]
-                pod_info,
-            );
+            record_usage(&usage, start_time, transport, ctx);
             Some(Outcome::Recorded)
         }
         (None, Some(BackgroundState::Running(id))) => {
             let call = PendingCall::new(
                 start_time,
-                pid,
+                ctx.pid,
                 #[cfg(feature = "k8s")]
-                pod_info,
+                ctx.pod_info.clone(),
             );
             Some(defer(id, call, background))
         }
@@ -1030,10 +885,12 @@ fn settle_h2_poll(
     record_usage(
         &usage,
         call.start_time,
-        call.pid,
         transport,
-        #[cfg(feature = "k8s")]
-        call.pod_info,
+        &CallContext {
+            pid: call.pid,
+            #[cfg(feature = "k8s")]
+            pod_info: call.pod_info,
+        },
     );
     Outcome::Recorded
 }
@@ -1041,7 +898,7 @@ fn settle_h2_poll(
 /// Keep a queued background call until a poll brings its result.
 fn defer(id: Box<str>, call: PendingCall, background: &mut BackgroundCalls) -> Outcome {
     #[cfg(feature = "k8s")]
-    let pod_str = fmt_pod(&call.pod_info);
+    let pod_str = fmt_pod(call.pod_info.as_ref());
     #[cfg(not(feature = "k8s"))]
     let pod_str = "";
     info!(
@@ -1057,10 +914,12 @@ fn defer(id: Box<str>, call: PendingCall, background: &mut BackgroundCalls) -> O
 /// Count a background call whose usage will not be seen: evicted, idle past its TTL, or ended without it.
 pub(super) fn give_up(call: PendingCall) -> Outcome {
     StreamProcessor::count_unparsed(
-        call.pid,
         UnparsedReason::BackgroundUnfinished,
-        #[cfg(feature = "k8s")]
-        call.pod_info.as_ref(),
+        &CallContext {
+            pid: call.pid,
+            #[cfg(feature = "k8s")]
+            pod_info: call.pod_info,
+        },
     )
 }
 
@@ -1114,13 +973,7 @@ fn skip_empty_lines(buf: &[u8]) -> &[u8] {
 }
 
 /// Export one finished call's usage and log it.
-fn record_usage(
-    usage: &UsageInfo,
-    start_time: Instant,
-    pid: u32,
-    transport: Transport,
-    #[cfg(feature = "k8s")] pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
-) {
+fn record_usage(usage: &UsageInfo, start_time: Instant, transport: Transport, ctx: &CallContext) {
     let latency = start_time.elapsed();
     let latency_secs = latency.as_secs_f64();
     let model_str = usage.model.as_deref().unwrap_or("unknown");
@@ -1133,18 +986,18 @@ fn record_usage(
         is_error,
         transport,
         #[cfg(feature = "k8s")]
-        pod_info.as_ref(),
+        ctx.pod_info.as_ref(),
     );
 
     #[cfg(feature = "k8s")]
-    let pod_str = fmt_pod(&pod_info);
+    let pod_str = fmt_pod(ctx.pod_info.as_ref());
     #[cfg(not(feature = "k8s"))]
     let pod_str = "";
 
     if is_error {
         info!(
             "LLM FAILED/ERROR | PID: {} | Model: {} | Transport: {} | Latency: {:.2}s{}",
-            pid,
+            ctx.pid,
             model_str,
             transport.as_str(),
             latency.as_secs_f64(),
@@ -1165,7 +1018,7 @@ fn record_usage(
         };
         info!(
             "LLM SUCCESS | PID: {} | Model: {} | Transport: {} | Latency: {:.2}s | Tokens: {} (Prompt: {}, Compl: {}{}{}){}",
-            pid,
+            ctx.pid,
             model_str,
             transport.as_str(),
             latency.as_secs_f64(),

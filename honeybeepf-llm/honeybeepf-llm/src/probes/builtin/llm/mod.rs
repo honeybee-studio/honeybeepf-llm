@@ -21,7 +21,7 @@ use honeybeepf_llm_core::types::LlmDirection;
 #[cfg(feature = "k8s")]
 use log::debug;
 use log::{info, warn};
-use processor::{Outcome, StreamProcessor};
+use processor::{CallContext, Outcome, StreamProcessor};
 
 use crate::telemetry::Transport;
 use regex::Regex;
@@ -316,11 +316,11 @@ fn route_event(
     let key = (header.metadata.pid, header.ssl_ptr);
     if header.closed != 0 {
         return match streams.remove(&key) {
-            Some(mut stream) if stream.is_llm() => stream.close(
-                header.metadata.pid,
+            Some(mut stream) if stream.is_llm() => stream.close(&CallContext {
+                pid: header.metadata.pid,
                 #[cfg(feature = "k8s")]
-                pod_info().as_ref(),
-            ),
+                pod_info: pod_info(),
+            }),
             _ => Outcome::Pending,
         };
     }
@@ -329,6 +329,11 @@ fn route_event(
     }
     let stream = streams.entry(key).or_default();
     stream.set_transport(transport);
+    let ctx = CallContext {
+        pid: header.metadata.pid,
+        #[cfg(feature = "k8s")]
+        pod_info: pod_info(),
+    };
     stream.handle_fragment(
         LlmDirection::from(header.rw),
         data,
@@ -336,9 +341,7 @@ fn route_event(
         header.len,
         header.truncated != 0,
         background,
-        header.metadata.pid,
-        #[cfg(feature = "k8s")]
-        pod_info(),
+        &ctx,
     )
 }
 
