@@ -1506,3 +1506,80 @@ fn test_gemini_embeddings_without_usage_are_not_recorded() {
     assert!(first(&json!({"embedding": {"values": [0.1, 0.2]}})).is_none());
     assert!(first(&json!({"embeddings": [{"values": [0.1]}, {"values": [0.2]}]})).is_none());
 }
+
+// Meta Model API (Muse Spark, api.meta.ai): OpenAI chat/Responses and Anthropic Messages shapes on
+// one host, read with the OpenAI chat, OpenAI Responses and anthropic response blocks respectively.
+fn meta_provider(path: &str) -> ConfigurableProvider {
+    let registry = ProviderRegistry::with_defaults();
+    let config = registry.find_provider("api.meta.ai", path).unwrap().clone();
+    assert_eq!(config.name, "meta", "{path}");
+    ConfigurableProvider::new(config)
+}
+
+#[test]
+fn test_meta_chat_reads_openai_shape_with_reasoning() {
+    let provider = meta_provider("/v1/chat/completions");
+    let response = json!({
+        "model": "muse-spark-1",
+        "usage": {
+            "prompt_tokens": 30,
+            "completion_tokens": 40,
+            "completion_tokens_details": {"reasoning_tokens": 12},
+            "prompt_tokens_details": {"cached_tokens": 8}
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!(usage.prompt_tokens, 30);
+    assert_eq!(usage.completion_tokens, 40);
+    assert_eq!(usage.thoughts_tokens, Some(12));
+    assert_eq!(usage.cache_read_tokens, Some(8));
+    assert_eq!(usage.model, Some("muse-spark-1".to_string()));
+    assert_eq!(usage.operation, Operation::Chat);
+}
+
+#[test]
+fn test_meta_responses_reads_openai_responses_shape() {
+    let provider = meta_provider("/v1/responses");
+    let response = json!({
+        "model": "muse-spark-1",
+        "status": "completed",
+        "error": null,
+        "usage": {
+            "input_tokens": 50,
+            "input_tokens_details": {"cached_tokens": 10},
+            "output_tokens": 25,
+            "output_tokens_details": {"reasoning_tokens": 7}
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!(usage.prompt_tokens, 50);
+    assert_eq!(usage.completion_tokens, 25);
+    assert_eq!(usage.thoughts_tokens, Some(7));
+    assert_eq!(usage.cache_read_tokens, Some(10));
+    assert_eq!(usage.model, Some("muse-spark-1".to_string()));
+}
+
+#[test]
+fn test_meta_messages_reads_anthropic_shape() {
+    let provider = meta_provider("/v1/messages");
+    let response = json!({
+        "type": "message",
+        "model": "muse-spark-1",
+        "usage": {
+            "input_tokens": 50,
+            "cache_creation_input_tokens": 2000,
+            "cache_read_input_tokens": 100000,
+            "output_tokens": 300
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    // Anthropic shape: prompt = input + cache read + write.
+    assert_eq!(usage.prompt_tokens, 102_050);
+    assert_eq!(usage.completion_tokens, 300);
+    assert_eq!(usage.cache_read_tokens, Some(100_000));
+    assert_eq!(usage.cache_write_tokens, Some(2000));
+    assert_eq!(usage.model, Some("muse-spark-1".to_string()));
+}

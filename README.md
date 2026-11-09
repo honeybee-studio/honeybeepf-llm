@@ -13,7 +13,7 @@ repository against a local mock of the provider APIs with fake keys.</sub>
 
 - **0 lines of app code changed** — SDKs keep calling the real provider; nothing to import, wrap or redeploy.
 - **~7.7 µs of agent CPU per request** at ~31 MB RSS, measured A/B at ~6.8k HTTPS requests/s ([benchmark](docs/benchmark.md)).
-- **10 built-in provider APIs** — OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI.
+- **11 built-in provider APIs** — OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI, Meta.
 - **10 kernels in CI** — Linux 5.10 through 7.2 and RHEL 8.10 / 9.6 / 9.7, probes loaded and attached on x86-64 (and arm64 on 5.15 and 6.1).
 
 honeybeepf-llm is a Rust eBPF agent that runs as a DaemonSet. It attaches uprobes to OpenSSL's `SSL_write` and
@@ -56,7 +56,7 @@ commands, required capabilities, resources and uninstall are in [docs/install.md
 
 | Dimension | Covered |
 |---|---|
-| Providers | 10 built-in APIs: OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI — JSON, streaming (SSE), cache tokens |
+| Providers | 11 built-in APIs: OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI, Meta — JSON, streaming (SSE), cache tokens |
 | Runtimes | Python, Node.js, curl, anything linked to OpenSSL `libssl` — not Go `crypto/tls`, rustls, JSSE, GnuTLS, NSS |
 | Protocols | HTTP/1.1 and HTTP/2 — not WebSocket, not HTTP/3 (QUIC) |
 | Transport | HTTPS through OpenSSL; in-cluster plain HTTP (Ollama, vLLM) on opt-in |

@@ -104,6 +104,15 @@ gemini = [
   { url = "aiplatform.eu.rep.googleapis.com/v1/projects/p/locations/eu/interactions", reason = "Vertex Interactions, multi-region" },
 ]
 
+meta = [
+  # Meta Model API (Muse Spark): OpenAI chat/Responses and Anthropic Messages shapes on one host
+  { url = "api.meta.ai/v1/chat/completions", reason = "Meta chat completions (OpenAI-shaped)" },
+  { url = "api.meta.ai/v1/responses", reason = "Meta Responses (OpenAI-shaped)" },
+  { url = "api.meta.ai/v1/messages", reason = "Meta Messages (Anthropic-shaped)" },
+  { url = "api.meta.ai/v1/chat/completions?stream=true", reason = "query ignored by the anchor" },
+  { url = "api.meta.ai/v1/messages/", reason = "trailing slash" },
+]
+
 none = [
   # Other services under the same parent domains
   { url = "ec2.us-east-1.api.aws/v1/messages", reason = "other api.aws service" },
@@ -162,4 +171,8 @@ none = [
   { url = "api.anthropic.com/v1/sessions/sess_01/events/evt_01", reason = "event retrieval, past the /events anchor" },
   { url = "api.openai.com/v1/chat/completions/chatcmpl-abc123", reason = "stored completion" },
   { url = "api.openai.com/v1/chat/completions/chatcmpl-abc123/messages", reason = "stored completion messages" },
+  # Meta Model API: only the three generation paths match; others and the host alone stay out
+  { url = "api.meta.ai/v1/embeddings", reason = "Meta embeddings not supported (no such entry, api.meta.ai not an OpenAI host)" },
+  { url = "api.meta.ai/v1/messages/count_tokens", reason = "token counting, past the /v1/messages anchor" },
+  { url = "api.meta.ai/v1/responses/resp_1", reason = "stored response, past the /v1/responses anchor" },
 ]
