@@ -2,10 +2,6 @@ use super::super::test_support::{GEMINI_ZERO_USAGE, RESPONSES_CREATED, tokens};
 use super::super::{Http2Parser, Http11Parser, ProtocolParser};
 use super::*;
 
-fn http11_sse(body: &str) -> Vec<u8> {
-    format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{body}").into_bytes()
-}
-
 const ANTHROPIC_SSE: &str = concat!(
     "event: message_start\n",
     "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\n\n",
@@ -14,6 +10,34 @@ const ANTHROPIC_SSE: &str = concat!(
     "event: message_delta\n",
     "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":15}}\n\n",
 );
+
+// Gemini Interactions streaming: usage rides inside `interaction`, cumulative, last event wins.
+const INTERACTIONS_SSE: &str = concat!(
+    "event: interaction.created\n",
+    "data: {\"event_id\":\"e1\",\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"int_1\",",
+    "\"model\":\"gemini-3.6-flash\",\"status\":\"in_progress\",",
+    "\"usage\":{\"total_input_tokens\":7,\"total_output_tokens\":0,\"total_thought_tokens\":0,\"total_cached_tokens\":0,\"total_tokens\":7}}}\n\n",
+    "event: interaction.completed\n",
+    "data: {\"event_id\":\"e2\",\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"int_1\",",
+    "\"model\":\"gemini-3.6-flash\",\"status\":\"completed\",",
+    "\"usage\":{\"total_input_tokens\":7,\"total_output_tokens\":23,\"total_thought_tokens\":49,\"total_cached_tokens\":0,\"total_tokens\":79}}}\n\n",
+);
+
+const DONE_IN_TEXT: &str = "The stream ends with data: [DONE]";
+
+const ANTHROPIC_SSE_CACHE_START: &str = concat!(
+    "event: message_start\n",
+    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"type\":\"message\",\"model\":\"claude-test\",",
+    "\"usage\":{\"input_tokens\":50,\"cache_creation_input_tokens\":2000,\"cache_read_input_tokens\":100000,\"output_tokens\":1}}}\n\n",
+);
+
+fn http11_sse(body: &str) -> Vec<u8> {
+    format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{body}").into_bytes()
+}
+
+fn cache(info: &UsageInfo) -> (Option<u64>, Option<u64>) {
+    (info.cache_read_tokens, info.cache_write_tokens)
+}
 
 #[test]
 fn anthropic_sse_merges_message_start_and_delta_usage() {
@@ -118,18 +142,6 @@ fn anthropic_fallback_sse_suppresses_a_non_billed_before_output_decline() {
     assert_eq!(info.iterations.len(), 1);
     assert!(info.iterations[0].cost_suppressed);
 }
-
-// Gemini Interactions streaming: usage rides inside `interaction`, cumulative, last event wins.
-const INTERACTIONS_SSE: &str = concat!(
-    "event: interaction.created\n",
-    "data: {\"event_id\":\"e1\",\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"int_1\",",
-    "\"model\":\"gemini-3.6-flash\",\"status\":\"in_progress\",",
-    "\"usage\":{\"total_input_tokens\":7,\"total_output_tokens\":0,\"total_thought_tokens\":0,\"total_cached_tokens\":0,\"total_tokens\":7}}}\n\n",
-    "event: interaction.completed\n",
-    "data: {\"event_id\":\"e2\",\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"int_1\",",
-    "\"model\":\"gemini-3.6-flash\",\"status\":\"completed\",",
-    "\"usage\":{\"total_input_tokens\":7,\"total_output_tokens\":23,\"total_thought_tokens\":49,\"total_cached_tokens\":0,\"total_tokens\":79}}}\n\n",
-);
 
 #[test]
 fn gemini_interactions_sse_ends_on_completed_and_sums_output_and_thoughts() {
@@ -270,8 +282,6 @@ fn gemini_interactions_sse_cancelled_or_incomplete_follows_its_usage() {
     }
 }
 
-const DONE_IN_TEXT: &str = "The stream ends with data: [DONE]";
-
 #[test]
 fn anthropic_sse_text_quoting_done_waits_for_message_stop() {
     let start = format!(
@@ -307,16 +317,6 @@ fn anthropic_sse_without_message_stop_is_incomplete() {
     let info = Http11Parser.parse_response(&http11_sse(ANTHROPIC_SSE));
     assert_eq!(tokens(info), None);
 }
-
-fn cache(info: &UsageInfo) -> (Option<u64>, Option<u64>) {
-    (info.cache_read_tokens, info.cache_write_tokens)
-}
-
-const ANTHROPIC_SSE_CACHE_START: &str = concat!(
-    "event: message_start\n",
-    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"type\":\"message\",\"model\":\"claude-test\",",
-    "\"usage\":{\"input_tokens\":50,\"cache_creation_input_tokens\":2000,\"cache_read_input_tokens\":100000,\"output_tokens\":1}}}\n\n",
-);
 
 #[test]
 fn anthropic_sse_input_total_includes_cache() {
