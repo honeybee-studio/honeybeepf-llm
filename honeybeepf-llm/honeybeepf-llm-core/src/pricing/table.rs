@@ -76,7 +76,7 @@ impl Rates {
         ]
         .into_iter()
         .flatten()
-        .flat_map(|m| [m.input, m.output]);
+        .flat_map(|rate| [rate.input, rate.output]);
         let in_range = |p: f64| p.is_sign_positive() && p <= MAX_PRICE;
         if !base.into_iter().chain(modality).flatten().all(in_range) {
             return Err("prices must be between 0 and 1e6");

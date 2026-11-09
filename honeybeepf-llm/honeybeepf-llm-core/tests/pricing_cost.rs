@@ -77,19 +77,19 @@ fn test_calls_are_priced_or_counted_as_unpriced() {
 #[test]
 fn test_modality_prices_split_each_direction() {
     let table = PriceTable::from_json(TABLE).expect("test table loads");
-    let audio = |n| ModalityTokens {
-        audio: n,
+    let audio = |tokens| ModalityTokens {
+        audio: tokens,
         ..Default::default()
     };
-    let image = |n| ModalityTokens {
-        image: n,
+    let image = |tokens| ModalityTokens {
+        image: tokens,
         ..Default::default()
     };
-    let video = |n| ModalityTokens {
-        video: n,
+    let video = |tokens| ModalityTokens {
+        video: tokens,
         ..Default::default()
     };
-    let media = |p, c| call("gpt-media-test", p, c);
+    let media = |prompt, completion| call("gpt-media-test", prompt, completion);
     #[rustfmt::skip]
     let cases = [
         // input: 900 text ×$1 + 100 audio ×$40; output: 300 text ×$5 + 200 image ×$30.

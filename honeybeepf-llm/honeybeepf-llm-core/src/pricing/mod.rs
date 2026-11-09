@@ -11,7 +11,7 @@ use serde::de::Error as _;
 
 use crate::types::{ModalityTokens, UsageInfo};
 use model_name::without_date;
-use table::{Rates, RawTable};
+use table::{Modalities, ModalityRate, Rates, RawTable};
 
 struct ModelPrices {
     provider: String,
@@ -181,23 +181,17 @@ impl PriceTable {
         let write = usage.cache_write_tokens.unwrap_or(0);
         let long = usage.cache_write_long_ttl_tokens.unwrap_or(0).min(write);
         let uncached = uncached_input(usage)?;
-        let price = |tokens: u64, rate: Option<f64>| match (tokens, rate) {
-            (0, _) => Ok(0.0),
-            (_, Some(rate)) => Ok(tokens as f64 * rate * factor / 1_000_000.0),
-            (_, None) => Err(Unpriced::MissingPrice),
-        };
-        let m = &rates.modalities;
+        let price = |tokens: u64, rate: Option<f64>| token_cost(tokens, rate, factor);
         Ok(Cost {
             // Input and output are split by modality (text is the remainder); cache reads and writes
             // keep the base cache rates, so a modality above the uncached input bills there as text.
             input: direction_cost(
                 uncached,
                 usage.input_modalities,
-                factor,
                 rates.input,
-                m.audio.as_ref().and_then(|r| r.input),
-                m.image.as_ref().and_then(|r| r.input),
-                m.video.as_ref().and_then(|r| r.input),
+                &rates.modalities,
+                |rate| rate.input,
+                factor,
             )?,
             cache_read: price(read, rates.cache_read)?,
             cache_write: price(write - long, rates.cache_write)?
@@ -205,11 +199,10 @@ impl PriceTable {
             output: direction_cost(
                 usage.completion_tokens,
                 usage.output_modalities,
-                factor,
                 rates.output,
-                m.audio.as_ref().and_then(|r| r.output),
-                m.image.as_ref().and_then(|r| r.output),
-                m.video.as_ref().and_then(|r| r.output),
+                &rates.modalities,
+                |rate| rate.output,
+                factor,
             )?,
         })
     }
@@ -270,33 +263,41 @@ impl PriceTable {
     }
 }
 
-/// One direction's cost: each non-text modality takes from the total at its own rate (or the base)
-/// and the rest is text; modalities above the total are the cached part, billed in the cache bucket.
+/// One direction's cost: each non-text modality takes its tokens from the total at its own rate (or the
+/// base rate) and the rest is text; modality tokens above the total are the cached part, billed in the
+/// cache bucket.
 fn direction_cost(
     total: u64,
-    m: ModalityTokens,
+    split: ModalityTokens,
+    base_rate: Option<f64>,
+    modality_rates: &Modalities,
+    rate_of: fn(&ModalityRate) -> Option<f64>,
     factor: f64,
-    base: Option<f64>,
-    audio: Option<f64>,
-    image: Option<f64>,
-    video: Option<f64>,
 ) -> Result<f64, Unpriced> {
-    let price = |tokens: u64, rate: Option<f64>| match (tokens, rate) {
+    let rate_for = |rate: &Option<ModalityRate>| rate.as_ref().and_then(rate_of).or(base_rate);
+    let mut remaining = total;
+    let mut take = |tokens: u64| {
+        let taken = tokens.min(remaining);
+        remaining -= taken;
+        taken
+    };
+    let audio_tokens = take(split.audio);
+    let image_tokens = take(split.image);
+    let video_tokens = take(split.video);
+    let text_tokens = remaining;
+    Ok(token_cost(text_tokens, base_rate, factor)?
+        + token_cost(audio_tokens, rate_for(&modality_rates.audio), factor)?
+        + token_cost(image_tokens, rate_for(&modality_rates.image), factor)?
+        + token_cost(video_tokens, rate_for(&modality_rates.video), factor)?)
+}
+
+/// USD for `tokens` at `rate` per million tokens times `factor`; zero tokens need no price.
+fn token_cost(tokens: u64, rate: Option<f64>, factor: f64) -> Result<f64, Unpriced> {
+    match (tokens, rate) {
         (0, _) => Ok(0.0),
         (_, Some(rate)) => Ok(tokens as f64 * rate * factor / 1_000_000.0),
         (_, None) => Err(Unpriced::MissingPrice),
-    };
-    let mut left = total;
-    let audio_n = m.audio.min(left);
-    left -= audio_n;
-    let image_n = m.image.min(left);
-    left -= image_n;
-    let video_n = m.video.min(left);
-    left -= video_n;
-    Ok(price(left, base)?
-        + price(audio_n, audio.or(base))?
-        + price(image_n, image.or(base))?
-        + price(video_n, video.or(base))?)
+    }
 }
 
 /// Prompt tokens billed at the input price: the prompt minus the cache reads and writes within it.
