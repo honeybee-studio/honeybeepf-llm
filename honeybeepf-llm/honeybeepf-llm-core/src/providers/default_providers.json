@@ -2,7 +2,7 @@
   "providers": [
     {
       "name": "openai",
-      "note": "Embeddings (#79), same hosts as Chat Completions. Input tokens only (no output field), so completion_optional. Listed first and guarded by root_object 'list' (the OpenAI embeddings response envelope): without the guard this permissive entry would claim a generation body that zeroes or omits its completion count, and placed after chat it would miss a proxy embeddings body that sends completion_tokens 0. operation=embeddings tags the metric rows. `/v1/embeddings$` also matches Azure Foundry /openai/v1/embeddings; /deployments/*/embeddings is the Azure OpenAI api-version route (with or without an /openai prefix).",
+      "note": "OpenAI-compatible embeddings: /v1/embeddings (also Azure Foundry /openai/v1/embeddings) and the Azure /deployments/* api-version route; input tokens only, so completion_optional. Listed before the chat and Responses entries and guarded by root_object 'list' (the embeddings envelope) so it does not claim a generation body that omits or zeroes its completion count.",
       "hosts": [
         "api.openai.com",
         "openai.azure.com",
@@ -24,7 +24,7 @@
     },
     {
       "name": "openai",
-      "note": "Chat Completions. Hosts: OpenAI API (regional us./eu. too), Azure OpenAI, Azure AI Foundry /openai/v1, Bedrock Mantle /v1 and /openai/v1, Bedrock Runtime /openai/v1. `$` keeps the stored-completion endpoints (/chat/completions/{id}) out; /deployments/*/completions is the Azure api-version route.",
+      "note": "OpenAI-compatible Chat Completions across OpenAI API (incl. regional us./eu.), Azure OpenAI, Azure AI Foundry /openai/v1, and Bedrock Mantle/Runtime /openai/v1. `$` keeps the stored-completion endpoints (/chat/completions/{id}) out; /deployments/*/completions is the Azure api-version route.",
       "hosts": [
         "api.openai.com",
         "openai.azure.com",
@@ -48,7 +48,7 @@
     },
     {
       "name": "openai",
-      "note": "Image generation and edits (gpt-image-1). Usage shares input_tokens/output_tokens with the Responses API, so this entry stays before Responses and requires output_tokens_details.image_tokens, which image responses carry and Responses does not. Hosts: OpenAI API only; Azure/Foundry (/openai/deployments/... paths) and Bedrock (/openai/v1) media share hosts with chat and are a follow-up. A streamed image (image_generation.completed, no [DONE]) is not an SSE end marker so its usage is not read yet. input_tokens_details/output_tokens_details carry the per-modality image and text token split.",
+      "note": "OpenAI image generation and edits (gpt-image-1), OpenAI API only. Usage shares input_tokens/output_tokens with the Responses API, so this entry is placed before Responses and requires output_tokens_details.image_tokens, which image responses carry and Responses does not.",
       "hosts": ["api.openai.com"],
       "paths": ["/v1/images/generations$", "/v1/images/edits$"],
       "response": {
@@ -64,7 +64,7 @@
     },
     {
       "name": "openai",
-      "note": "Responses API, same hosts as Chat Completions. Usage parsing tries providers in order without a host check and anthropic has the same input/output_tokens keys, so this entry stays before anthropic and requires input_tokens_details. `$` keeps GET /v1/responses/{id} and the unbilled /responses/input_tokens out; /compact is billed. Azure api-version clients post to /openai/responses, or under /deployments/{d}. cached_tokens leaves writes out and input_tokens counts both, so no adding back.",
+      "note": "OpenAI Responses API, same hosts as Chat Completions (incl. Azure /openai/responses and /deployments/*). Parsing is host-independent and anthropic shares the input/output_tokens keys, so this entry stays before anthropic and requires input_tokens_details; `$` keeps GET /v1/responses/{id} and the unbilled /responses/input_tokens out while /compact is billed.",
       "hosts": [
         "api.openai.com",
         "openai.azure.com",
@@ -96,7 +96,7 @@
     },
     {
       "name": "openai",
-      "note": "Audio transcription and translation (gpt-4o-transcribe). The token-usage variant reports usage.type with input_tokens/output_tokens; required_field type keeps it before and apart from anthropic, which has input_tokens/output_tokens but no usage.type. The duration variant (type=duration, seconds, no tokens) has no input_tokens and is skipped here, and a streamed transcription (transcript.text.done, no [DONE]) is not an SSE end marker so its usage is not read yet. Hosts: OpenAI API only; Azure audio (shared host, /openai/deployments/... path) and recording duration-billed or streamed transcription are follow-ups.",
+      "note": "OpenAI audio transcription and translation (gpt-4o-transcribe), OpenAI API only. required_field 'type' (usage.type) keeps it before and apart from anthropic, which shares input_tokens/output_tokens but has no usage.type; the duration variant (type=duration, no tokens) carries no input_tokens and is not recorded.",
       "hosts": ["api.openai.com"],
       "paths": ["/v1/audio/transcriptions$", "/v1/audio/translations$"],
       "response": {
@@ -111,7 +111,7 @@
     },
     {
       "name": "anthropic",
-      "note": "Messages. Hosts: Claude API, Claude Platform on AWS, Bedrock Mantle /anthropic/v1, Claude on Google Cloud (Anthropic managed), Claude in Microsoft Foundry /anthropic/v1. `$` keeps /v1/messages/count_tokens and /v1/messages/batches out. Streaming carries speed and inference_geo only in message_start. A server-side fallback response bills each attempt under its own model in usage.iterations; the last entry is the served attempt the top-level usage already counts. A declined attempt that stopped before output bills only when its content fallback block's trigger.category is in billed_categories; its tokens are recorded either way.",
+      "note": "Anthropic Messages across Claude API, Claude Platform on AWS, Bedrock Mantle /anthropic/v1, Claude on Google Cloud, and Claude in Microsoft Foundry /anthropic/v1. `$` keeps /v1/messages/count_tokens and /v1/messages/batches out.",
       "hosts": [
         "api.anthropic.com",
         "aws-external-anthropic.*.api.aws",
@@ -138,7 +138,7 @@
     },
     {
       "name": "gemini",
-      "note": "Embeddings (#79): Gemini API and Vertex :embedContent (same EmbedContentResponse), plus :batchEmbedContents. Input tokens only (no candidates field), so completion_optional. usageMetadata is often absent (gemini-embedding-001, and batch carries none); a framed response with no usage is counted as usage_absent, not recorded. Listed before the chat entry and guarded by required_root_field 'embedding' (the single-embedding envelope): the chat entry also reads usageMetadata.promptTokenCount with completion_optional, so without the guard it would claim an embeddings body. The response has no model field, so the model stays unknown (gemini embedding pricing is a follow-up). operation=embeddings tags the metric rows.",
+      "note": "Gemini API and Vertex embeddings (:embedContent, :batchEmbedContents); input tokens only, so completion_optional, and usageMetadata is often absent (then counted as usage_absent, not recorded). Listed before the chat entry and guarded by required_root_field 'embedding' (the single-embedding envelope) so it does not claim a chat body, which also reads usageMetadata.promptTokenCount with completion_optional; the response has no model field, so the model stays unknown.",
       "hosts": [
         "generativelanguage.googleapis.com",
         "aiplatform.googleapis.com",
@@ -158,7 +158,7 @@
     },
     {
       "name": "gemini",
-      "note": "Hosts: Gemini API, Vertex AI global and {region}-aiplatform, Vertex AI multi-region (us, eu). Path matching is case-sensitive: the streaming method is :streamGenerateContent. URL context and code execution results are billed as input outside promptTokenCount.",
+      "note": "Gemini generateContent and streamGenerateContent across Gemini API and Vertex AI (global, {region}-aiplatform, multi-region us/eu); path matching is case-sensitive (the streaming method is :streamGenerateContent).",
       "hosts": [
         "generativelanguage.googleapis.com",
         "aiplatform.googleapis.com",
@@ -182,7 +182,7 @@
     },
     {
       "name": "gemini",
-      "note": "Gemini Interactions API (POST /v1beta/interactions, also stable /v1); Deep Research runs only through it since 2026-10-08. Same hosts as generateContent. Vertex AI posts to /projects/{p}/locations/{l}/interactions (streaming via body `\"stream\":true`, no custom verb), covered by /locations/*/interactions$. Streaming nests the interaction (with its usage) under `interaction`, unwrapped in the SSE merge; non-streaming carries usage and model at the top level, so one usage_path fits both. total_output_tokens excludes thoughts (docs example 7+23+49=79=total_tokens), so completion is output + thoughts as in generateContent. total_cached_tokens is part of total_input_tokens. total_tool_use_tokens is tool-use prompt tokens counted outside total_input_tokens (like generateContent's toolUsePromptTokenCount), added to input. required_field keeps this entry off other providers' top-level usage. A failed/cancelled/incomplete interaction, or an `error` event, ends the stream (the SSE parser records a terminal call, zero tokens when no usage). background interactions polled by GET are a separate follow-up (as in #66).",
+      "note": "Gemini Interactions API: POST /v1beta/interactions and /v1/interactions, and Vertex /locations/*/interactions (streaming signalled by a body stream flag, no custom verb); same hosts as generateContent. required_field total_input_tokens keeps this entry off other providers' top-level usage.",
       "hosts": [
         "generativelanguage.googleapis.com",
         "aiplatform.googleapis.com",
@@ -229,7 +229,7 @@
     },
     {
       "name": "bedrock",
-      "note": "Bedrock Runtime Converse and InvokeModel. Converse inputTokens leaves out cache tokens; ConverseStream (binary eventstream) has the same usage in its last metadata event. InvokeModel returns the model's own body, so only Anthropic models (read by the anthropic entry) are matched.",
+      "note": "Bedrock Runtime Converse and ConverseStream (binary eventstream, same usage in the last metadata event); Converse inputTokens excludes cache tokens. InvokeModel returns the model's own body, so only Anthropic models (anthropic.*/invoke, read by the anthropic entry) are matched here.",
       "hosts": ["bedrock-runtime.*.amazonaws.com"],
       "paths": ["/converse$", "/converse-stream$", "anthropic.*/invoke$"],
       "response": {
@@ -245,7 +245,7 @@
     },
     {
       "name": "bedrock",
-      "note": "Bedrock Runtime InvokeModelWithResponseStream, every model: the last eventstream chunk carries amazon-bedrock-invocationMetrics. Anthropic models are read by the anthropic entry first, from the merged message_start and message_delta usage.",
+      "note": "Bedrock Runtime InvokeModelWithResponseStream, every model: usage is in the last eventstream chunk's amazon-bedrock-invocationMetrics. Anthropic models are read by the anthropic entry first (from the merged message_start and message_delta usage), so this covers the others.",
       "hosts": ["bedrock-runtime.*.amazonaws.com"],
       "paths": ["/invoke-with-response-stream$"],
       "response": {
@@ -261,7 +261,7 @@
     },
     {
       "name": "anthropic-agents",
-      "note": "Claude Managed Agents (beta managed-agents-2026-04-01): the pod POSTs these two paths while the model calls run inside Anthropic, so none match /v1/messages and the pod looks idle. record_only makes the processor count each call under the agent_session unparsed reason and never read the response, whose usage is a running session total. The entry is also inert in the shared usage parse, which ignores the host: the OpenAI-style token keys and required_field (list_cost sits inside a session usage, absent elsewhere) keep it from matching another provider's response.",
+      "note": "Claude Managed Agents session paths (/v1/sessions, /v1/sessions/*/events), api.anthropic.com only; record_only makes the processor count each call under the agent_session reason and never read the response, whose usage is a running session total. required_field list_cost keeps the entry from matching another provider's response in the host-independent usage parse.",
       "hosts": ["api.anthropic.com"],
       "paths": ["/v1/sessions$", "/v1/sessions/*/events$"],
       "record_only": true,
