@@ -9,7 +9,7 @@ const NOV_30: u32 = 20_787; // 2026-11-30
 #[test]
 fn test_builtin_prices_match_the_pricing_pages() {
     let table = PriceTable::builtin().expect("built-in table loads");
-    assert_eq!(table.version(), "2026-11-07");
+    assert_eq!(table.version(), "2026-11-09");
     let sources: Vec<_> = table
         .sources()
         .iter()
@@ -58,12 +58,13 @@ fn test_builtin_prices_match_the_pricing_pages() {
         (NOV_30, million("gpt-4o-2024-05-13").tier("priority"), Ok(8.75)),
         (NOV_30, million("gemini-4-argon"), Ok(2.0)),
         (NOV_30 + 1, million("gemini-4-argon"), Ok(4.0)),
-        // The gpt-5.6-sol promotion runs "at least through November 21" without naming a tier.
+        // The gpt-5.6-sol promotion, first "through November 21", was extended through the 30th.
         (NOV_21, sol(), Ok(0.4)),
-        (NOV_21, sol().tier("flex"), Ok(0.2)),
-        (NOV_21 + 1, sol(), MISSING),
-        (NOV_21 + 1, sol().tier("flex"), MISSING),
-        (NOV_21 + 1, sol().tier("priority"), MISSING),
+        (NOV_30, sol(), Ok(0.4)),
+        (NOV_30, sol().tier("flex"), Ok(0.2)),
+        (NOV_30 + 1, sol(), MISSING),
+        (NOV_30 + 1, sol().tier("flex"), MISSING),
+        (NOV_30 + 1, sol().tier("priority"), MISSING),
         // US inference is 1.1x from Claude 4.6 on; earlier models reject the setting.
         (NOV_30, million("claude-sonnet-4-6").geo("us"), Ok(3.3)),
         (NOV_30, million("claude-sonnet-4-5-20250929").geo("us"), UNSUPPORTED),
