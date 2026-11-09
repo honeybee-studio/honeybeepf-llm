@@ -91,6 +91,7 @@ the dashboards ship in [docs/grafana/](docs/grafana/).
 ## Documentation
 
 - [Install and build from source](docs/install.md)
+- [Security review](docs/security-review.md)
 - [Supported providers, runtimes, protocols and kernels](docs/providers.md)
 - [Metrics reference](docs/metrics.md)
 - [Overhead benchmark](docs/benchmark.md)
