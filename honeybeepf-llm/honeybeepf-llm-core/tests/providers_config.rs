@@ -22,13 +22,14 @@ struct ProviderUrls {
     anthropic_agents: Vec<UrlCase>,
     bedrock: Vec<UrlCase>,
     gemini: Vec<UrlCase>,
+    meta: Vec<UrlCase>,
     none: Vec<UrlCase>,
 }
 
 #[test]
 fn test_default_providers() {
     let registry = ProviderRegistry::with_defaults();
-    assert_eq!(registry.providers.len(), 13);
+    assert_eq!(registry.providers.len(), 16);
 }
 
 // `with_defaults` panics only on a parse error, and serde skips unknown keys, so a key typo would go unnoticed.
@@ -89,7 +90,9 @@ fn test_default_provider_hosts() {
     let gemini = ["generativelanguage.googleapis.com", vertex[0], vertex[1]];
     // Image and transcription entries are first-party OpenAI only; Azure/Bedrock media is a follow-up.
     let media = ["api.openai.com"];
-    let expected: [&[&str]; 13] = [
+    // Meta Model API: one host, three generation routes.
+    let meta = ["api.meta.ai"];
+    let expected: [&[&str]; 16] = [
         &openai,
         &openai,
         &media,
@@ -108,6 +111,9 @@ fn test_default_provider_hosts() {
         &vertex,
         &["bedrock-runtime.*.amazonaws.com"],
         &["bedrock-runtime.*.amazonaws.com"],
+        &meta,
+        &meta,
+        &meta,
         &["api.anthropic.com"],
     ];
     let registry = ProviderRegistry::with_defaults();
@@ -133,6 +139,7 @@ fn test_find_provider_url_fixtures() {
         ("anthropic-agents", &fixture.anthropic_agents),
         ("bedrock", &fixture.bedrock),
         ("gemini", &fixture.gemini),
+        ("meta", &fixture.meta),
         ("none", &fixture.none),
     ];
     let mut cases = 0;
@@ -320,6 +327,9 @@ fn test_user_providers_are_added_to_the_defaults() {
             "anthropic",
             "bedrock",
             "bedrock",
+            "meta",
+            "meta",
+            "meta",
             "anthropic-agents",
             "ollama",
             "vllm"
@@ -366,6 +376,9 @@ fn test_user_provider_replaces_defaults_with_its_name_in_their_place() {
             "gemini",
             "bedrock",
             "bedrock",
+            "meta",
+            "meta",
+            "meta",
             "anthropic-agents",
             "ollama"
         ]

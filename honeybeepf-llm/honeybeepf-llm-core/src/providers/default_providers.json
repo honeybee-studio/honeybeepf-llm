@@ -260,6 +260,59 @@
       "request_extractor": "messages"
     },
     {
+      "name": "meta",
+      "note": "Meta Model API chat completions (api.meta.ai, Muse Spark); OpenAI Chat-shaped body, so the same response block as the OpenAI chat entry. api.meta.ai is Meta's alone, so host+path detection is unambiguous; placed after the OpenAI chat entry, which catches the same body first in the host-independent usage parse.",
+      "hosts": ["api.meta.ai"],
+      "paths": ["/v1/chat/completions$"],
+      "response": {
+        "usage_path": "usage",
+        "prompt_tokens": "prompt_tokens",
+        "completion_tokens": "completion_tokens",
+        "thoughts_tokens": "completion_tokens_details.reasoning_tokens",
+        "cache_read_tokens": "prompt_tokens_details.cached_tokens",
+        "model_path": "model",
+        "service_tier_path": "service_tier",
+        "input_modality_details": "prompt_tokens_details",
+        "output_modality_details": "completion_tokens_details"
+      },
+      "request_extractor": "messages"
+    },
+    {
+      "name": "meta",
+      "note": "Meta Model API Responses (api.meta.ai, Muse Spark); OpenAI Responses-shaped body, so the same response block as the OpenAI Responses entry, required_field input_tokens_details included. api.meta.ai is Meta's alone; placed after the OpenAI Responses entry, which catches the same body first in the host-independent usage parse.",
+      "hosts": ["api.meta.ai"],
+      "paths": ["/v1/responses$"],
+      "response": {
+        "usage_path": "usage",
+        "prompt_tokens": "input_tokens",
+        "completion_tokens": "output_tokens",
+        "thoughts_tokens": "output_tokens_details.reasoning_tokens",
+        "cache_read_tokens": "input_tokens_details.cached_tokens",
+        "cache_write_tokens": "input_tokens_details.cache_write_tokens",
+        "cache_write_long_ttl_tokens": "input_tokens_details.cache_write_tokens_details.ttl_12h_tokens",
+        "required_field": "input_tokens_details",
+        "model_path": "model",
+        "service_tier_path": "service_tier"
+      },
+      "request_extractor": "input"
+    },
+    {
+      "name": "meta",
+      "note": "Meta Model API Messages (api.meta.ai, Muse Spark); Anthropic Messages-shaped body, so the anthropic entry's token and cache fields (not its Claude-only speed, geo and fallback fields). api.meta.ai is Meta's alone; placed after the anthropic entry so that guardless Anthropic shape catches such bodies first in the host-independent usage parse.",
+      "hosts": ["api.meta.ai"],
+      "paths": ["/v1/messages$"],
+      "response": {
+        "usage_path": "usage",
+        "prompt_tokens": "input_tokens",
+        "completion_tokens": "output_tokens",
+        "cache_read_tokens": "cache_read_input_tokens",
+        "cache_write_tokens": "cache_creation_input_tokens",
+        "prompt_excludes_cache": true,
+        "model_path": "model"
+      },
+      "request_extractor": "messages"
+    },
+    {
       "name": "anthropic-agents",
       "note": "Claude Managed Agents session paths (/v1/sessions, /v1/sessions/*/events), api.anthropic.com only; record_only makes the processor count each call under the agent_session reason and never read the response, whose usage is a running session total. required_field list_cost keeps the entry from matching another provider's response in the host-independent usage parse.",
       "hosts": ["api.anthropic.com"],
