@@ -57,8 +57,8 @@ pub struct BuiltinProbes {
     pub llm: Option<bool>,
     /// Probe executables with OpenSSL built in (Node.js); on unless set to false.
     pub llm_executables: Option<bool>,
-    /// Record LLM calls to hosts no provider lists, by request path + response usage shape;
-    /// off by default.
+    /// Experimental: record LLM calls to hosts no provider lists, by request path + response usage
+    /// shape; off by default.
     pub llm_detect_by_shape: Option<bool>,
     /// Pod labels copied onto LLM metrics (k8s feature); each adds series, so none by default.
     #[serde(skip)]

@@ -48,7 +48,10 @@ The agent resolves those Service endpoints and records matching calls with `tran
 grants read access to `services` and `endpointslices` only when a provider sets `plaintext`. OpenAI-compatible
 servers need no `response` block, and the request's `Host` header must match one of the provider's `hosts`. IPv4 only so far.
 
-### Detecting unlisted hosts by shape
+### Detecting unlisted hosts by shape (experimental)
+
+This mode is experimental: false positives on ordinary HTTPS traffic are not measured yet, and it may change or
+be removed.
 
 `builtinProbes.llm.detectByShape` (default `false`) records OpenAI/Anthropic/Gemini-compatible calls to hosts no
 entry lists — new providers, gateways, in-cluster model servers — by request path and response shape instead of

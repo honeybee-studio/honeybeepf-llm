@@ -43,7 +43,7 @@ builtinProbes:
     enabled: false
     # Also probe executables with OpenSSL built in (official Node.js builds, node: images).
     executables: true
-    # Record OpenAI/Anthropic/Gemini-compatible calls to hosts not listed below, by request path
+    # Experimental. Record OpenAI/Anthropic/Gemini-compatible calls to hosts not listed below, by request path
     # + response usage shape instead of host (new providers, gateways, in-cluster model servers).
     # A call is kept only when its path matches a built-in pattern (e.g. /chat/completions) and its
     # response carries that family's usage fields; off records listed hosts only (default). HTTP/1.1 only.
