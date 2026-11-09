@@ -118,7 +118,7 @@ impl Settings {
 
         honeybeepf_llm_common::CommonConfig {
             // LLM
-            probe_llm: probe_llm as u8,
+            probe_llm: u8::from(probe_llm),
             // Interval
             probe_interval,
             _pad: [0; 7],

@@ -299,7 +299,7 @@ impl PodResolver {
         let shutdown = crate::probes::shutdown_flag();
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            let mut interval = tokio::time::interval(Duration::from_mins(1));
             loop {
                 interval.tick().await;
                 if shutdown.load(Ordering::Relaxed) {
@@ -713,7 +713,7 @@ mod tests {
                     ..Default::default()
                 }]),
                 ..Default::default()
-            })
+            });
         };
         let stored = |r: &PodResolver| {
             r.stored_info(&pod_meta(vec![], None))

@@ -1093,7 +1093,7 @@ fn llm_cost_after_a_reload_has_the_new_price_and_version() -> Result<()> {
     let mut points: Vec<(f64, String)> = cost
         .data_points
         .iter()
-        .flat_map(|p| {
+        .filter_map(|p| {
             let version = p
                 .attributes
                 .iter()

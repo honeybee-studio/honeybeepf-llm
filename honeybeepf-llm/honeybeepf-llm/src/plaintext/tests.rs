@@ -113,7 +113,7 @@ fn classify_picks_service_vs_external() {
     for (host, ns, want) in cases {
         match (classify(&spec(host, ns)), want) {
             (Target::Service { name, namespace }, Some((n, s))) => {
-                assert_eq!((name.as_str(), namespace.as_str()), (n, s))
+                assert_eq!((name.as_str(), namespace.as_str()), (n, s));
             }
             (Target::External(_), None) => {}
             _ => panic!("classify({host}, {ns:?})"),
@@ -191,8 +191,8 @@ fn cap_truncates_to_the_map_bound() {
 #[test]
 fn endpoint_key_encodes_ipv4_and_skips_ipv6() {
     // 10.0.0.1:8000 → IP network-order bits in the high 32, htons(port) in the low 16.
-    let ip = u32::from(Ipv4Addr::new(10, 0, 0, 1)).to_be() as u64;
-    let want = (ip << 16) | (8000u16.to_be() as u64);
+    let ip = u64::from(u32::from(Ipv4Addr::new(10, 0, 0, 1)).to_be());
+    let want = (ip << 16) | u64::from(8000u16.to_be());
     assert_eq!(
         endpoint_key(&"10.0.0.1:8000".parse().expect("addr")),
         Some(want)
@@ -206,7 +206,7 @@ fn connect4_builds_the_same_endpoint_key_as_userspace() {
     // network-order (htons) port — unlike sock_ops, which packs the port into the high 16 bits.
     let addr: std::net::SocketAddr = "10.0.0.1:8000".parse().expect("addr");
     let user_ip4 = u32::from(Ipv4Addr::new(10, 0, 0, 1)).to_be();
-    let user_port: u32 = 8000u16.to_be() as u32;
+    let user_port: u32 = u32::from(8000u16.to_be());
     let connect4_key = honeybeepf_llm_common::plain_endpoint_key(user_ip4, user_port as u16);
     assert_eq!(Some(connect4_key), endpoint_key(&addr));
     // Applying the sock_ops high-bit recovery to user_port would build the wrong key.

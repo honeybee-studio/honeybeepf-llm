@@ -8,7 +8,7 @@ use std::{
 /// Calls kept at most; the one idle longest goes first.
 const MAX_CALLS: usize = 4096;
 /// A call not polled for this long is given up on.
-const IDLE_TTL: Duration = Duration::from_secs(3600);
+const IDLE_TTL: Duration = Duration::from_hours(1);
 
 /// The create request of a call still running, so its result is recorded against it.
 pub struct PendingCall {

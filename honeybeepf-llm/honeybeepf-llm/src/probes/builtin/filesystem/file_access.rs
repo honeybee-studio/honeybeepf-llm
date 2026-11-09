@@ -159,13 +159,13 @@ impl FileAccessProbe {
 
 /// FNV-1a hash - must match the eBPF implementation exactly
 fn simple_hash(data: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
     for &b in data {
         if b == 0 {
             break;
         }
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x100000001b3); // FNV prime
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0100_0000_01b3); // FNV prime
     }
     hash
 }

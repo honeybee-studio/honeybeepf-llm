@@ -48,7 +48,7 @@ pub struct HoneyBeeEngine {
 impl HoneyBeeEngine {
     pub fn new(settings: Settings, bytecode: &[u8]) -> Result<Self> {
         bump_memlock_rlimit()?;
-        let tail_call_ok = KernelVersion::current().is_ok_and(tail_call_allowed) as u8;
+        let tail_call_ok = u8::from(KernelVersion::current().is_ok_and(tail_call_allowed));
         info!(
             "LLM probes keep the task stack (empty tail call): {}",
             tail_call_ok == 1
@@ -194,7 +194,7 @@ impl HoneyBeeEngine {
         loop {
             tokio::select! {
                 _ = signal::ctrl_c() => break,
-                _ = lib_notify.notified() => {
+                () = lib_notify.notified() => {
                     let opens: Vec<LibOpen> = {
                         let mut q = lib_queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         q.drain(..).collect()
@@ -211,11 +211,11 @@ impl HoneyBeeEngine {
                         let _ = lib_seen.insert(open.seen_key, open.ts, 0);
                     }
                 }
-                _ = notify.notified(), if exec_due.is_none() => {
+                () = notify.notified(), if exec_due.is_none() => {
                     // Brief delay to batch rapid exec events
                     exec_due = Some(Instant::now() + Duration::from_millis(BATCH_WAIT_MS));
                 }
-                _ = tokio::time::sleep_until(exec_due.unwrap_or_else(Instant::now)), if exec_due.is_some() => {
+                () = tokio::time::sleep_until(exec_due.unwrap_or_else(Instant::now)), if exec_due.is_some() => {
                     exec_due = None;
                     let pids: Vec<u32> = {
                         let mut q = queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
