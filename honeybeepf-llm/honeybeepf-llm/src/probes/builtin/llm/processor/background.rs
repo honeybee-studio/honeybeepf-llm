@@ -1,8 +1,12 @@
 //! Background-poll settlement: a create request's usage is recorded once a later poll brings its result.
 
+use crate::probes::builtin::llm::background::PendingCall;
+use crate::probes::builtin::llm::http::BackgroundState;
+
 use super::*;
 
 impl StreamProcessor {
+    /// Record, defer or drop the call once its response parsed to `usage` and `state`; None keeps waiting.
     pub(super) fn settle(
         &mut self,
         usage: Option<UsageInfo>,
