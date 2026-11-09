@@ -51,7 +51,7 @@ Collector, which forwards them to Prometheus.
 | Metric | Type | Labels |
 |--------|------|--------|
 | `honeybeepf_llm_llm_requests_total` | Counter | `model`, `status`, `transport` (tls / plain), `target_namespace`, `target_pod_name` |
-| `honeybeepf_llm_llm_tokens_total` | Counter | `model`, `status`, `token_type` (prompt / completion), `transport` (tls / plain), `target_namespace`, `target_pod_name` |
+| `honeybeepf_llm_llm_tokens_total` | Counter | `model`, `status`, `token_type` (prompt / completion), `modality` (text / image / audio / video; text is the remainder), `transport` (tls / plain), `target_namespace`, `target_pod_name` |
 | `honeybeepf_llm_llm_cache_read_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
 | `honeybeepf_llm_llm_cache_write_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
 | `honeybeepf_llm_llm_reasoning_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of completion tokens) |

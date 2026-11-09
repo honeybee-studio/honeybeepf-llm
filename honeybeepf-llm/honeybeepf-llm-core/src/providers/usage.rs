@@ -5,7 +5,7 @@ use super::config::{
 };
 use super::request::{RequestExtractor, get_extractor};
 use crate::byte_utils::get_nested_value;
-use crate::types::UsageInfo;
+use crate::types::{ModalityTokens, UsageInfo};
 
 /// A provider instance created from configuration
 pub struct ConfigurableProvider {
@@ -119,9 +119,22 @@ impl ConfigurableProvider {
         };
         let pricing = &response.pricing;
 
+        let modalities = &response.modalities;
         Some(UsageInfo {
             prompt_tokens: prompt,
             completion_tokens: tokens.completion,
+            input_modalities: read_modalities(
+                usage,
+                &modalities.input_details,
+                &modalities.input_array,
+            )
+            .clamped_to(prompt),
+            output_modalities: read_modalities(
+                usage,
+                &modalities.output_details,
+                &modalities.output_array,
+            )
+            .clamped_to(tokens.completion),
             thoughts_tokens: tokens.thoughts,
             cache_read_tokens: cache.read,
             cache_write_tokens: cache.write,
@@ -222,6 +235,36 @@ fn read_cache(config: &CacheConfig, usage: &Value) -> Cache {
         write,
         write_long_ttl,
     }
+}
+
+/// Non-text modality tokens for one direction, from an OpenAI `*_tokens_details` object or a Gemini
+/// `{modality, tokenCount}` array; TEXT, DOCUMENT and unknown modalities fall into text (the remainder).
+fn read_modalities(
+    usage: &Value,
+    details: &Option<String>,
+    array: &Option<String>,
+) -> ModalityTokens {
+    let mut m = ModalityTokens::default();
+    if let Some(obj) = details.as_ref().and_then(|p| get_nested_value(usage, p)) {
+        m.audio = obj.get("audio_tokens").and_then(Value::as_u64).unwrap_or(0);
+        m.image = obj.get("image_tokens").and_then(Value::as_u64).unwrap_or(0);
+    }
+    if let Some(arr) = array
+        .as_ref()
+        .and_then(|p| get_nested_value(usage, p))
+        .and_then(Value::as_array)
+    {
+        for el in arr {
+            let count = el.get("tokenCount").and_then(Value::as_u64).unwrap_or(0);
+            match el.get("modality").and_then(Value::as_str) {
+                Some("AUDIO") => m.audio = m.audio.saturating_add(count),
+                Some("IMAGE") => m.image = m.image.saturating_add(count),
+                Some("VIDEO") => m.video = m.video.saturating_add(count),
+                _ => {}
+            }
+        }
+    }
+    m
 }
 
 fn optional_count(root: &Value, path: &Option<String>) -> Option<u64> {

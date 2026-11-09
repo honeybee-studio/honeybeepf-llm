@@ -25,6 +25,33 @@ impl Operation {
     }
 }
 
+/// Non-text modality token counts for one direction; text is the remainder of the direction's total.
+#[derive(Debug, Default, PartialEq, Clone, Copy)]
+pub struct ModalityTokens {
+    pub audio: u64,
+    pub image: u64,
+    pub video: u64,
+}
+
+impl ModalityTokens {
+    /// The non-text tokens, so text is the direction's total minus this.
+    pub fn non_text(self) -> u64 {
+        self.audio
+            .saturating_add(self.image)
+            .saturating_add(self.video)
+    }
+
+    /// Drop the split when the modalities exceed the direction's total (bad data), so text (the
+    /// remainder) is never negative and the modality counts always sum to the total.
+    pub fn clamped_to(self, total: u64) -> Self {
+        if self.non_text() > total {
+            Self::default()
+        } else {
+            self
+        }
+    }
+}
+
 /// Parsed usage info from an LLM response
 #[derive(Debug, Default, PartialEq)]
 pub struct UsageInfo {
@@ -32,6 +59,10 @@ pub struct UsageInfo {
     pub prompt_tokens: u64,
     /// All output tokens, reasoning included (OTel `gen_ai.usage.output_tokens`).
     pub completion_tokens: u64,
+    /// Non-text input modalities (audio/image/video); text is `prompt_tokens` minus these.
+    pub input_modalities: ModalityTokens,
+    /// Non-text output modalities (audio/image/video); text is `completion_tokens` minus these.
+    pub output_modalities: ModalityTokens,
     /// Reasoning tokens, a subset of `completion_tokens`.
     pub thoughts_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,

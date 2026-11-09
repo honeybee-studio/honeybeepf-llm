@@ -41,7 +41,8 @@ fn test_default_providers_json_parses_with_known_keys_only() {
         "name note hosts paths response request_extractor operation plaintext record_only";
     let response_keys = "usage_path prompt_tokens completion_tokens completion_optional extra_prompt_tokens thoughts_tokens \
         completion_excludes_thoughts cache_read_tokens cache_write_tokens cache_write_long_ttl_tokens \
-        speed inference_geo prompt_excludes_cache required_field model_path service_tier_path iterations_path billed_categories root_object required_root_field";
+        speed inference_geo prompt_excludes_cache required_field model_path service_tier_path iterations_path billed_categories root_object \
+        required_root_field input_modality_details output_modality_details input_modality_array output_modality_array";
     let file: serde_json::Value = serde_json::from_str(json).unwrap();
     for provider in file["providers"].as_array().unwrap() {
         let name = &provider["name"];

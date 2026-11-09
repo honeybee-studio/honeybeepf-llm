@@ -28,6 +28,20 @@ pub struct ResponseConfig {
     pub cache: CacheConfig,
     pub pricing: PricingConfig,
     pub identity: IdentityConfig,
+    pub modalities: ModalityConfig,
+}
+
+/// Where a response splits its input/output tokens by modality, for providers that report it.
+#[derive(Debug, Clone, Default)]
+pub struct ModalityConfig {
+    /// OpenAI: object holding input `audio_tokens`/`image_tokens` (e.g. `prompt_tokens_details`).
+    pub input_details: Option<String>,
+    /// OpenAI: object holding output `audio_tokens`/`image_tokens` (e.g. `completion_tokens_details`).
+    pub output_details: Option<String>,
+    /// Gemini: array of `{modality, tokenCount}` for input (e.g. `promptTokensDetails`).
+    pub input_array: Option<String>,
+    /// Gemini: array of `{modality, tokenCount}` for output (e.g. `candidatesTokensDetails`).
+    pub output_array: Option<String>,
 }
 
 /// Where the prompt, completion and reasoning counts are, and how they add up
@@ -144,6 +158,10 @@ struct FlatResponseConfig {
     iterations_path: Option<String>,
     billed_categories: Option<Vec<String>>,
     root_object: Option<String>,
+    input_modality_details: Option<String>,
+    output_modality_details: Option<String>,
+    input_modality_array: Option<String>,
+    output_modality_array: Option<String>,
     required_root_field: Option<String>,
 }
 
@@ -177,6 +195,12 @@ impl From<FlatResponseConfig> for ResponseConfig {
                 iterations_path: flat.iterations_path,
                 root_object: flat.root_object,
                 required_root_field: flat.required_root_field,
+            },
+            modalities: ModalityConfig {
+                input_details: flat.input_modality_details,
+                output_details: flat.output_modality_details,
+                input_array: flat.input_modality_array,
+                output_array: flat.output_modality_array,
             },
         }
     }
