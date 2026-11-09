@@ -629,8 +629,8 @@ pub fn init_metrics() -> Result<()> {
         .with_unit("events")
         .with_callback(|observer| {
             if let Some(totals) = crate::probes::builtin::llm::event_stats() {
-                for (name, v) in honeybeepf_llm_common::LLM_STAT_NAMES.iter().zip(totals) {
-                    observer.observe(v, &[KeyValue::new("stage", *name)]);
+                for (stat, v) in honeybeepf_llm_common::LlmStat::ALL.iter().zip(totals) {
+                    observer.observe(v, &[KeyValue::new("stage", stat.name())]);
                 }
             }
         })

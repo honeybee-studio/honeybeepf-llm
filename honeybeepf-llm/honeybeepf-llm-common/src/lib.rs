@@ -91,30 +91,65 @@ pub const fn plain_map_entries(configured: bool) -> PlainMapEntries {
     }
 }
 
-// Indices into the LLM_STATS per-CPU counter map (kernel increments, userspace sums).
-pub const LLM_STAT_ENTER: u32 = 0; // entry uprobe hits (SSL_read/write/_ex, SSL_do_handshake, SSL_free)
-pub const LLM_STAT_SUBMIT: u32 = 1; // events submitted to SSL_EVENTS (every fragment)
-pub const LLM_STAT_RESERVE_FAIL: u32 = 2; // SSL_EVENTS full at the first fragment, call lost
-pub const LLM_STAT_DISCARD: u32 = 3; // discarded (ret <= 0, no session, read failure)
-pub const LLM_STAT_EMPTY: u32 = 4; // submitted without payload (buf_filled = 0), SSL_free included
-pub const LLM_STAT_TRUNCATED: u32 = 5; // call sent with bytes missing (> capture_limit, or no room later)
-pub const LLM_STAT_HANDSHAKE: u32 = 6; // handshake events submitted
-pub const LLM_STAT_FRAGMENT: u32 = 7; // fragments after the first (offset > 0), subset of submit
-pub const LLM_STAT_FILTERED: u32 = 8; // calls dropped before reserving because SSL_CLASS skips them
-pub const LLM_STAT_PLAIN_RECV_TRUNCATED: u32 = 9; // plaintext receive skb past the 16 KB capture window (loopback/GRO)
-pub const LLM_STAT_COUNT: usize = 10;
-pub const LLM_STAT_NAMES: [&str; LLM_STAT_COUNT] = [
-    "enter",
-    "submit",
-    "reserve_fail",
-    "discard",
-    "empty",
-    "truncated",
-    "handshake",
-    "fragment",
-    "filtered",
-    "plain_recv_truncated",
-];
+/// A counter in the LLM_STATS per-CPU map (the kernel increments, user space sums). The discriminant is
+/// the map index and `name` is the `stage` label of `llm_events_total`.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LlmStat {
+    /// Entry uprobe hits (SSL_read/write/_ex, SSL_do_handshake, SSL_free).
+    Enter,
+    /// Events submitted to SSL_EVENTS (every fragment).
+    Submit,
+    /// SSL_EVENTS full at the first fragment, call lost.
+    ReserveFail,
+    /// Discarded (ret <= 0, no session, read failure).
+    Discard,
+    /// Submitted without payload (buf_filled = 0), SSL_free included.
+    Empty,
+    /// Call sent with bytes missing (> capture_limit, or no room later).
+    Truncated,
+    /// Handshake events submitted.
+    Handshake,
+    /// Fragments after the first (offset > 0), a subset of `Submit`.
+    Fragment,
+    /// Calls dropped before reserving because SSL_CLASS skips them.
+    Filtered,
+    /// Plaintext receive skb past the 16 KB capture window (loopback, GRO).
+    PlainRecvTruncated,
+}
+
+impl LlmStat {
+    /// Every counter, in map-index order.
+    pub const ALL: [Self; 10] = [
+        Self::Enter,
+        Self::Submit,
+        Self::ReserveFail,
+        Self::Discard,
+        Self::Empty,
+        Self::Truncated,
+        Self::Handshake,
+        Self::Fragment,
+        Self::Filtered,
+        Self::PlainRecvTruncated,
+    ];
+    pub const COUNT: usize = Self::ALL.len();
+
+    /// The `stage` label value.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Enter => "enter",
+            Self::Submit => "submit",
+            Self::ReserveFail => "reserve_fail",
+            Self::Discard => "discard",
+            Self::Empty => "empty",
+            Self::Truncated => "truncated",
+            Self::Handshake => "handshake",
+            Self::Fragment => "fragment",
+            Self::Filtered => "filtered",
+            Self::PlainRecvTruncated => "plain_recv_truncated",
+        }
+    }
+}
 
 pub mod ssl_class;
 
@@ -345,20 +380,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn llm_stat_names_cover_every_index_without_duplicates() {
-        // The plaintext-truncation counter is the last index, and the names array covers it.
-        assert_eq!(LLM_STAT_PLAIN_RECV_TRUNCATED as usize, LLM_STAT_COUNT - 1);
-        assert_eq!(
-            LLM_STAT_NAMES[LLM_STAT_PLAIN_RECV_TRUNCATED as usize],
-            "plain_recv_truncated"
-        );
-        assert_eq!(LLM_STAT_NAMES[LLM_STAT_FILTERED as usize], "filtered");
-        for (i, name) in LLM_STAT_NAMES.iter().enumerate() {
+    fn llm_stats_are_listed_in_map_index_order_with_unique_names() {
+        for (i, stat) in LlmStat::ALL.iter().enumerate() {
+            assert_eq!(
+                *stat as usize, i,
+                "{stat:?} is out of order in LlmStat::ALL"
+            );
+            let earlier = &LlmStat::ALL[..i];
             assert!(
-                !LLM_STAT_NAMES[..i].contains(name),
-                "duplicate stage name {name}"
+                earlier.iter().all(|s| s.name() != stat.name()),
+                "duplicate stage name {}",
+                stat.name()
             );
         }
+        assert_eq!(LlmStat::PlainRecvTruncated.name(), "plain_recv_truncated");
     }
 
     #[test]
