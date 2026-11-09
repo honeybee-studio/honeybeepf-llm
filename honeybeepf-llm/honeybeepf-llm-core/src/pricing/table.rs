@@ -22,10 +22,30 @@ pub(super) struct Rates {
     /// Prompts over this many tokens (cache included) pay `above` for every category.
     pub(super) above_tokens: Option<u64>,
     pub(super) above: Option<Box<Rates>>,
+    /// Per-modality input/output prices; a modality without its own price pays the base `input`/`output`.
+    #[serde(default)]
+    pub(super) modalities: Modalities,
     /// Last day (UTC) these prices apply; `then` holds the prices after it.
     #[serde(default, deserialize_with = "day")]
     until: Option<u32>,
     then: Option<Box<Rates>>,
+}
+
+/// Prices for the non-text modalities of a model that bills them apart from text.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Modalities {
+    pub(super) audio: Option<ModalityRate>,
+    pub(super) image: Option<ModalityRate>,
+    pub(super) video: Option<ModalityRate>,
+}
+
+/// One modality's input and output price in USD per million tokens.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ModalityRate {
+    pub(super) input: Option<f64>,
+    pub(super) output: Option<f64>,
 }
 
 impl Rates {
@@ -42,15 +62,23 @@ impl Rates {
 
     /// Why these prices cannot be applied as written.
     fn check(&self) -> Result<(), &'static str> {
-        let prices = [
+        let base = [
             self.input,
             self.output,
             self.cache_read,
             self.cache_write,
             self.cache_write_long,
         ];
-        let in_range = |p: &f64| p.is_sign_positive() && *p <= MAX_PRICE;
-        if !prices.iter().flatten().all(in_range) {
+        let modality = [
+            &self.modalities.audio,
+            &self.modalities.image,
+            &self.modalities.video,
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(|rate| [rate.input, rate.output]);
+        let in_range = |p: f64| p.is_sign_positive() && p <= MAX_PRICE;
+        if !base.into_iter().chain(modality).flatten().all(in_range) {
             return Err("prices must be between 0 and 1e6");
         }
         if let Some(above) = &self.above {

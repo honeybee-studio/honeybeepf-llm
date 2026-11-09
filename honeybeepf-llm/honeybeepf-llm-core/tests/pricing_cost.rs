@@ -2,7 +2,7 @@ mod common;
 
 use common::{CallExt, MISSING, UNKNOWN, UNSUPPORTED, call, total};
 use honeybeepf_llm_core::pricing::{PriceTable, Unpriced};
-use honeybeepf_llm_core::types::UsageInfo;
+use honeybeepf_llm_core::types::{ModalityTokens, UsageInfo};
 
 // Prices from the providers' pricing pages (2026-10-26), in USD per million tokens.
 const TABLE: &str = include_str!("fixtures/prices_test.json");
@@ -72,6 +72,44 @@ fn test_calls_are_priced_or_counted_as_unpriced() {
     }
     let huge = call("gpt-5", u64::MAX, u64::MAX).read(u64::MAX);
     assert!(table.cost(&huge).map(total).is_ok_and(f64::is_finite));
+}
+
+#[test]
+fn test_modality_prices_split_each_direction() {
+    let table = PriceTable::from_json(TABLE).expect("test table loads");
+    let audio = |tokens| ModalityTokens {
+        audio: tokens,
+        ..Default::default()
+    };
+    let image = |tokens| ModalityTokens {
+        image: tokens,
+        ..Default::default()
+    };
+    let video = |tokens| ModalityTokens {
+        video: tokens,
+        ..Default::default()
+    };
+    let media = |prompt, completion| call("gpt-media-test", prompt, completion);
+    #[rustfmt::skip]
+    let cases = [
+        // input: 900 text ×$1 + 100 audio ×$40; output: 300 text ×$5 + 200 image ×$30.
+        (media(1000, 500).in_modalities(audio(100)).out_modalities(image(200)), Ok(0.0124)),
+        // A modality without its own rate (image input) falls back to the base input price.
+        (media(1000, 0).in_modalities(image(100)), Ok(0.001)),
+        // Video output has its own rate; text output stays at the base.
+        (media(0, 1000).out_modalities(video(100)), Ok(0.0057)),
+        // The speed multiplier applies to the modality rates too: (900×$1 + 100×$40) × 2.
+        (media(1000, 0).in_modalities(audio(100)).speed("fast"), Ok(0.0098)),
+        // No modalities: the base rates, unchanged.
+        (media(1000, 500), Ok(0.0035)),
+        // Cache and a modality together: the modality takes from the uncached input, cache is separate.
+        (media(1000, 0).in_modalities(audio(300)).read(400), Ok(0.01234)),
+        // A modality above the uncached input is capped there (the rest is cached text), never rejected.
+        (media(100, 0).in_modalities(audio(80)).read(50), Ok(0.002005)),
+    ];
+    for (call, want) in cases {
+        assert_eq!(table.cost(&call).map(total), want, "{call:?}");
+    }
 }
 
 #[test]
