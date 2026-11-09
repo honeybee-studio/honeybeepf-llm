@@ -32,6 +32,26 @@ fn test_default_providers() {
     assert_eq!(registry.providers.len(), 16);
 }
 
+// Shape detection: the path-only fallback matches an LLM path on a host no entry lists.
+#[test]
+fn find_provider_by_path_ignores_host() {
+    let registry = ProviderRegistry::with_defaults();
+    // An OpenAI-compatible path on an unlisted host: no host+path match, but a path-only match.
+    assert!(
+        registry
+            .find_provider("api.unlisted.example", "/openai/v1/chat/completions")
+            .is_none()
+    );
+    assert_eq!(
+        registry
+            .find_provider_by_path("/openai/v1/chat/completions")
+            .map(|p| p.name.as_str()),
+        Some("openai")
+    );
+    // A non-LLM path matches no entry (entries without paths never match here either).
+    assert!(registry.find_provider_by_path("/healthz").is_none());
+}
+
 // `with_defaults` panics only on a parse error, and serde skips unknown keys, so a key typo would go unnoticed.
 #[test]
 fn test_default_providers_json_parses_with_known_keys_only() {

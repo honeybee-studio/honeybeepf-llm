@@ -48,6 +48,27 @@ The agent resolves those Service endpoints and records matching calls with `tran
 grants read access to `services` and `endpointslices` only when a provider sets `plaintext`. OpenAI-compatible
 servers need no `response` block, and the request's `Host` header must match one of the provider's `hosts`. IPv4 only so far.
 
+### Detecting unlisted hosts by shape
+
+`builtinProbes.llm.detectByShape` (default `false`) records OpenAI/Anthropic/Gemini-compatible calls to hosts no
+entry lists — new providers, gateways, in-cluster model servers — by request path and response shape instead of
+host:
+
+```yaml
+builtinProbes:
+  llm:
+    detectByShape: true
+```
+
+When on, an HTTP/1.1 request whose path matches a built-in pattern (`/chat/completions`, `/v1/responses`,
+`/v1/messages`, `generateContent`, …) is kept even if its `Host` is unlisted, and it is recorded **only** if the
+response carries that family's usage fields; a response without them is dropped, so a path match alone never
+records. When off (the default) only listed hosts are recorded, exactly as before. This covers the common
+OpenAI-compatible APIs (Groq, DeepSeek, Together, Fireworks, OpenRouter, Mistral, xAI, Perplexity, Cerebras, vLLM,
+LM Studio); it does not catch shapes with no `usage` object or a non-matching path (e.g. Ollama's native
+`/api/chat`, which needs an explicit `providers` entry). It applies to HTTP/1.1 only, and a gateway may record both
+the inbound and the outbound call.
+
 **Runtimes** (also checked in pods on k3s: `python:3.12-slim`, `python:3.13-alpine`, `node:24-slim`)
 
 | Runtime | TLS library | Status |

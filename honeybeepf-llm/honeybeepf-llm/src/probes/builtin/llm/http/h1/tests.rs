@@ -145,6 +145,49 @@ fn managed_agents_session_posts_are_detected_as_record_only() {
     assert!(!msg.record_only);
 }
 
+// Shape detection: the flag gates admission (has_foreign_host) and detection (detect_request)
+// of a call to a host no provider lists; recording still needs the usage shape.
+#[test]
+fn shape_detection_gates_unknown_host_by_path_then_usage() {
+    // Unlisted host, OpenAI-compatible path (a Groq-style /openai/v1 base).
+    let head = b"POST /openai/v1/chat/completions HTTP/1.1\r\nHost: api.unlisted.example\r\n\r\n{}";
+    let with_usage = {
+        let body = r#"{"model":"m","usage":{"prompt_tokens":5,"completion_tokens":7}}"#;
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    };
+    let no_usage = {
+        let body = r#"{"model":"m"}"#;
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    };
+
+    // Off (default): the unlisted-host connection is foreign (skipped) and the request is not detected.
+    super::super::set_detect_by_shape(false);
+    assert!(Http11Parser::has_foreign_host(head));
+    assert!(Http11Parser.detect_request(head).is_none());
+
+    // On: the connection is kept and the request is detected by path alone.
+    super::super::set_detect_by_shape(true);
+    assert!(!Http11Parser::has_foreign_host(head));
+    assert_eq!(
+        Http11Parser.detect_request(head).map(|d| d.path).as_deref(),
+        Some("/openai/v1/chat/completions")
+    );
+    // Recording still needs the usage fields: present -> read, absent -> nothing, even with the flag on.
+    assert_eq!(
+        tokens(Http11Parser.parse_response(with_usage.as_bytes())),
+        Some((5, 7))
+    );
+    assert!(Http11Parser.parse_response(no_usage.as_bytes()).is_none());
+
+    super::super::set_detect_by_shape(false);
+}
+
 #[test]
 fn request_head_needs_a_complete_http11_head() {
     assert!(Http11Parser::is_request_head(

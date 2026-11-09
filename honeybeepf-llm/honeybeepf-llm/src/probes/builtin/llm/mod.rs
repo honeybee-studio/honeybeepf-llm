@@ -197,7 +197,9 @@ pub struct LlmProbe {
 }
 
 impl LlmProbe {
-    pub fn new(executables: bool) -> Self {
+    pub fn new(executables: bool, detect_by_shape: bool) -> Self {
+        // Shape detection is read by the host-blind parser globals, so push it once here.
+        http::set_detect_by_shape(detect_by_shape);
         Self {
             known_targets: Arc::new(Mutex::new(HashSet::new())),
             executables,

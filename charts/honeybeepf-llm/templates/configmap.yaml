@@ -28,6 +28,9 @@ data:
   {{- if not (kindIs "invalid" .Values.builtinProbes.llm.executables) }}
   BUILTIN_PROBES__LLM_EXECUTABLES: {{ .Values.builtinProbes.llm.executables | quote }}
   {{- end }}
+  {{- if not (kindIs "invalid" .Values.builtinProbes.llm.detectByShape) }}
+  BUILTIN_PROBES__LLM_DETECT_BY_SHAPE: {{ .Values.builtinProbes.llm.detectByShape | quote }}
+  {{- end }}
   {{- if .Values.builtinProbes.llm.podLabels }}
   BUILTIN_PROBES__LLM_POD_LABELS: {{ .Values.builtinProbes.llm.podLabels | join "," | quote }}
   {{- end }}

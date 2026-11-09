@@ -23,6 +23,7 @@ pub use h2::Http2Parser;
 pub(crate) use h2::{H2Conn, H2Event, looks_like_http2, starts_preface};
 pub use json_ends::JsonEnds;
 pub use provider_report::report_provider_config;
+pub(crate) use registry::set_detect_by_shape;
 pub use sse_stream::SseStream;
 
 use honeybeepf_llm_core::types::UsageInfo;

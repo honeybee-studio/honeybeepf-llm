@@ -345,6 +345,15 @@ impl ProviderRegistry {
         })
     }
 
+    /// Find a provider by path alone, ignoring the host: the first entry whose non-empty path
+    /// patterns match. Shape detection uses it to pick a response parser for an LLM call to
+    /// a host no entry lists; an entry without paths never matches here.
+    pub fn find_provider_by_path(&self, path: &str) -> Option<&ProviderConfig> {
+        self.providers
+            .iter()
+            .find(|p| p.paths.iter().any(|pat| path_matches(path, pat)))
+    }
+
     /// Whether some provider can match `host`; a provider without hosts matches every host.
     pub fn may_serve_host(&self, host: &str) -> bool {
         self.providers
