@@ -3,6 +3,9 @@
 use super::*;
 use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
 
+const JSON: &[u8] =
+    b"{\"model\":\"gpt-4o\",\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}";
+
 /// A header field as a literal without indexing, new name, not Huffman-coded (names/values < 127 B).
 fn lit(name: &[u8], value: &[u8]) -> Vec<u8> {
     let mut out = vec![0x00, name.len() as u8];
@@ -61,9 +64,6 @@ fn match_request_detects_provider_posts_and_responses_polls() {
         .is_none()
     );
 }
-
-const JSON: &[u8] =
-    b"{\"model\":\"gpt-4o\",\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}";
 
 fn frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
     let len = (payload.len() as u32).to_be_bytes();
