@@ -536,6 +536,78 @@ fn an_error_stream_without_usage_is_not_usage_absent() {
     assert_eq!(unparsed, 0);
 }
 
+/// A 200 text/event-stream response that aborts with `event: error` instead of its final usage: counted
+/// once as stream_error, never recorded, and apart from the usage_absent 2xx end.
+#[test]
+fn an_sse_stream_ending_on_error_counts_stream_error() {
+    let sse_head = [
+        lit(b":status", b"200"),
+        lit(b"content-type", b"text/event-stream"),
+    ]
+    .concat();
+    let head = frame(1, 0x4, 1, &sse_head);
+    let body = frame(
+        0,
+        0x1,
+        1,
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+          event: error\ndata: {\"error\":{\"type\":\"overloaded_error\"}}\n\n",
+    );
+    let (mut rec, mut stream_error, mut usage_absent) = (0, 0, 0);
+    let mut conn = H2Conn::new();
+    {
+        let mut on = |e| match e {
+            H2Event::Recorded { .. } => rec += 1,
+            H2Event::Unparsed {
+                reason: UnparsedReason::StreamError,
+            } => stream_error += 1,
+            H2Event::Unparsed {
+                reason: UnparsedReason::UsageAbsent,
+            } => usage_absent += 1,
+            _ => {}
+        };
+        conn.feed(LlmDirection::Write, PREFACE, H2Gap::None, &mut on);
+        conn.feed(LlmDirection::Write, &req(1), H2Gap::None, &mut on);
+        conn.feed(LlmDirection::Read, &head, H2Gap::None, &mut on);
+        conn.feed(LlmDirection::Read, &body, H2Gap::None, &mut on);
+    }
+    assert_eq!((rec, stream_error, usage_absent), (0, 1, 0));
+}
+
+/// A streamed response that completes normally still records once and is never a stream error.
+#[test]
+fn an_sse_stream_completing_normally_is_recorded_not_a_stream_error() {
+    let sse_head = [
+        lit(b":status", b"200"),
+        lit(b"content-type", b"text/event-stream"),
+    ]
+    .concat();
+    let head = frame(1, 0x4, 1, &sse_head);
+    let body = frame(
+        0,
+        0x1,
+        1,
+        b"data: {\"model\":\"gpt-4o\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}\n\n\
+          data: [DONE]\n\n",
+    );
+    let (mut rec, mut stream_error) = (0, 0);
+    let mut conn = H2Conn::new();
+    {
+        let mut on = |e| match e {
+            H2Event::Recorded { .. } => rec += 1,
+            H2Event::Unparsed {
+                reason: UnparsedReason::StreamError,
+            } => stream_error += 1,
+            _ => {}
+        };
+        conn.feed(LlmDirection::Write, PREFACE, H2Gap::None, &mut on);
+        conn.feed(LlmDirection::Write, &req(1), H2Gap::None, &mut on);
+        conn.feed(LlmDirection::Read, &head, H2Gap::None, &mut on);
+        conn.feed(LlmDirection::Read, &body, H2Gap::None, &mut on);
+    }
+    assert_eq!((rec, stream_error), (1, 0));
+}
+
 /// A provider request with END_STREAM for `method path` on `stream` (no request body).
 fn req_full(method: &[u8], path: &[u8], stream: u32) -> Vec<u8> {
     let block = [

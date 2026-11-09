@@ -86,6 +86,7 @@ pub enum UnparsedReason {
     BackgroundUnfinished,
     HeadersLost,
     UsageAbsent,
+    StreamError,
     AgentSession,
 }
 
@@ -101,6 +102,7 @@ impl UnparsedReason {
             Self::BackgroundUnfinished => "background_unfinished",
             Self::HeadersLost => "headers_lost",
             Self::UsageAbsent => "usage_absent",
+            Self::StreamError => "stream_error",
             Self::AgentSession => "agent_session",
         }
     }
@@ -127,6 +129,7 @@ impl std::fmt::Display for UnparsedReason {
                 f.write_str("HTTP/2 request headers were lost, so the stream could not be matched")
             }
             Self::UsageAbsent => f.write_str("response completed with no usage to record"),
+            Self::StreamError => f.write_str("response stream ended on a provider error event"),
             Self::AgentSession => {
                 f.write_str("Managed Agents session call; its usage is a running total, not read")
             }
@@ -397,6 +400,13 @@ impl StreamProcessor {
         if self.continuation.take().is_some() {
             return Outcome::Pending;
         }
+        // A stream that ended on a provider error event is told apart from capture loss and the
+        // next-request close reasons it would otherwise fall under.
+        let reason = if self.read_progress.stream_errored() {
+            UnparsedReason::StreamError
+        } else {
+            reason
+        };
         Self::count_unparsed(reason, ctx)
     }
 

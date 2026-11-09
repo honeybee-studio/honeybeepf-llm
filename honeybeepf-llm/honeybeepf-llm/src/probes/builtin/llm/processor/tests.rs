@@ -579,6 +579,27 @@ fn test_unparsed_response_after_100_continue_frees_next_request() {
 }
 
 #[test]
+fn test_sse_stream_ending_on_error_counts_stream_error() {
+    // An OpenAI-style stream that aborts with `event: error` after a delta, carrying no usage; the
+    // connection then closes. The call is counted once as stream_error, not connection_closed, and
+    // never recorded.
+    let mut p = StreamProcessor::new();
+    let mut out = send(&mut p, LlmDirection::Write, REQUEST, None);
+    for r in [
+        &b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"[..],
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        b"event: error\ndata: {\"error\":{\"type\":\"overloaded_error\"}}\n\n",
+    ] {
+        out.extend(send(&mut p, LlmDirection::Read, r, None));
+    }
+    assert!(unparsed(&out).is_empty(), "{out:?}");
+    assert_eq!(
+        p.close(&ctx()),
+        Outcome::Unparsed(UnparsedReason::StreamError)
+    );
+}
+
+#[test]
 fn test_streamed_response_after_100_continue_is_recorded() {
     let mut p = StreamProcessor::new();
     let (head, body) = REQUEST.split_at(REQUEST.len() - 27);

@@ -304,7 +304,7 @@ fn end_stream(s: H2Stream, on: &mut impl FnMut(H2Event)) {
         return;
     }
     let (over, speculative, start) = (s.over_limit(), s.speculative(), s.start());
-    let success = s.is_success();
+    let (success, errored) = (s.is_success(), s.errored());
     let poll = s.poll().map(Box::<str>::from);
     let (usage, background) = s.finish();
     if speculative {
@@ -345,6 +345,12 @@ fn end_stream(s: H2Stream, on: &mut impl FnMut(H2Event)) {
         });
     } else if let Some(BackgroundState::Running(id)) = background {
         on(H2Event::Deferred { id, start });
+    } else if errored {
+        // The stream ended on a provider `event: error` frame (a 200 whose SSE aborted), told apart
+        // from a usage-absent completion and from capture loss.
+        on(H2Event::Unparsed {
+            reason: UnparsedReason::StreamError,
+        });
     } else if success {
         // A matched 2xx call whose completed stream carried no usage (an embedding with none, or a chunk
         // missed), apart from the capture-loss and too-large reasons; a non-2xx end records nothing.
