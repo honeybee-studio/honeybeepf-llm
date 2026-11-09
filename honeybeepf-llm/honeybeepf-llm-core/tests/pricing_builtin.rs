@@ -87,7 +87,7 @@ fn test_builtin_prices_match_the_pricing_pages() {
         (NOV_30, million("gpt-5.3-codex").tier("priority"), Ok(3.5)),
         (NOV_30, million("chat-latest"), Ok(5.0)),
         (NOV_30, million("gpt-5-search-api"), Ok(1.25)),
-        // Embeddings (#79): input tokens only, no output or cached-input price.
+        // Embeddings: input tokens only, no output or cached-input price.
         (NOV_30, million("text-embedding-3-small"), Ok(0.02)),
         (NOV_30, million("text-embedding-3-large"), Ok(0.13)),
         (NOV_30, million("text-embedding-ada-002"), Ok(0.1)),
