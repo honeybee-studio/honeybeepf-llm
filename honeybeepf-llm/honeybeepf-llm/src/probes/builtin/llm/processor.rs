@@ -771,14 +771,7 @@ impl StreamProcessor {
         state: Option<BackgroundState>,
         background: &mut BackgroundCalls,
     ) -> Option<Outcome> {
-        // A body past the buffer limit keeps no state; usage with tokens is still the call's result.
-        let state = state.or_else(|| {
-            usage
-                .as_ref()
-                .filter(|u| u.prompt_tokens > 0 || u.completion_tokens > 0)
-                .map(|_| BackgroundState::Ended)
-        });
-        let end = match state {
+        let end = match poll_end_state(&usage, state) {
             Some(BackgroundState::Running(_)) => {
                 background.touch(&id);
                 return Some(Outcome::Pending);
@@ -793,28 +786,58 @@ impl StreamProcessor {
                 return None;
             }
         };
-        let Some(call) = background.take(&id) else {
-            // Another poll recorded it already.
-            return Some(Outcome::Pending);
-        };
-        let usage = match (usage, end) {
-            (Some(usage), _) => usage,
-            // A cancel can come before any token was counted: one failed call.
-            (None, BackgroundState::Cancelled) => UsageInfo::default(),
-            (None, _) => return Some(give_up(call)),
-        };
-        record_usage(
-            &usage,
-            call.start_time,
+        Some(record_poll_result(
+            &id,
+            usage,
+            end,
             self.transport,
-            &CallContext {
-                pid: call.pid,
-                #[cfg(feature = "k8s")]
-                pod_info: call.pod_info,
-            },
-        );
-        Some(Outcome::Recorded)
+            background,
+        ))
     }
+}
+
+/// A poll result's end state: the body's own, or Ended when usage carried tokens past the buffer limit.
+fn poll_end_state(
+    usage: &Option<UsageInfo>,
+    state: Option<BackgroundState>,
+) -> Option<BackgroundState> {
+    state.or_else(|| {
+        usage
+            .as_ref()
+            .filter(|u| u.prompt_tokens > 0 || u.completion_tokens > 0)
+            .map(|_| BackgroundState::Ended)
+    })
+}
+
+/// Record a settled background call once: its create request's pid/pod, this poll's usage. A poll that no
+/// longer holds the call (another already recorded it, or this node never queued it) records nothing.
+fn record_poll_result(
+    id: &str,
+    usage: Option<UsageInfo>,
+    end: BackgroundState,
+    transport: Transport,
+    background: &mut BackgroundCalls,
+) -> Outcome {
+    let Some(call) = background.take(id) else {
+        return Outcome::Pending;
+    };
+    let usage = match (usage, end) {
+        (Some(usage), _) => usage,
+        // A cancel can come before any token was counted: one failed call.
+        (None, BackgroundState::Cancelled) => UsageInfo::default(),
+        (None, _) => return give_up(call),
+    };
+    record_usage(
+        &usage,
+        call.start_time,
+        transport,
+        &CallContext {
+            pid: call.pid,
+            #[cfg(feature = "k8s")]
+            pod_info: call.pod_info,
+        },
+    );
+    Outcome::Recorded
 }
 
 /// Any call but a poll: recorded with usage, deferred when it was queued in background mode.
@@ -853,46 +876,15 @@ fn settle_h2_poll(
     background: &mut BackgroundCalls,
     transport: Transport,
 ) -> Outcome {
-    // A body past the buffer limit keeps no state; usage with tokens is still the call's result.
-    let state = state.or_else(|| {
-        usage
-            .as_ref()
-            .filter(|u| u.prompt_tokens > 0 || u.completion_tokens > 0)
-            .map(|_| BackgroundState::Ended)
-    });
-    let end = match state {
-        Some(BackgroundState::Running(_)) => {
+    let end = match poll_end_state(&usage, state) {
+        // Still running, or a result still absent (error body, 0-token poll): wait for a later poll or the TTL.
+        Some(BackgroundState::Running(_)) | None => {
             background.touch(&id);
             return Outcome::Pending;
         }
         Some(end) => end,
-        // A result still absent (error body, or a 0-token poll): keep the call until a later poll or the TTL.
-        None => {
-            background.touch(&id);
-            return Outcome::Pending;
-        }
     };
-    let Some(call) = background.take(&id) else {
-        // A GET of a response this node never queued, or another poll already recorded it.
-        return Outcome::Pending;
-    };
-    let usage = match (usage, end) {
-        (Some(usage), _) => usage,
-        // A cancel can come before any token was counted: one failed call.
-        (None, BackgroundState::Cancelled) => UsageInfo::default(),
-        (None, _) => return give_up(call),
-    };
-    record_usage(
-        &usage,
-        call.start_time,
-        transport,
-        &CallContext {
-            pid: call.pid,
-            #[cfg(feature = "k8s")]
-            pod_info: call.pod_info,
-        },
-    );
-    Outcome::Recorded
+    record_poll_result(&id, usage, end, transport, background)
 }
 
 /// Keep a queued background call until a poll brings its result.
