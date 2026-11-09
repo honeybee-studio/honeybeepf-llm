@@ -544,15 +544,14 @@ impl StreamProcessor {
             self.read_buf = Vec::new();
             self.read_progress = http::ResponseProgress::default();
         }
-        match &mut self.past_limit {
-            Some(followed) => followed
+        if let Some(followed) = &mut self.past_limit {
+            followed
                 .feed(data)
                 .then_some(true)
-                .ok_or(UnparsedReason::ResponseTooLarge),
-            None => {
-                self.read_buf.extend_from_slice(data);
-                Ok(true)
-            }
+                .ok_or(UnparsedReason::ResponseTooLarge)
+        } else {
+            self.read_buf.extend_from_slice(data);
+            Ok(true)
         }
     }
 

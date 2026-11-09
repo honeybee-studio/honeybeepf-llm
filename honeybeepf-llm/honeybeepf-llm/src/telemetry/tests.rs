@@ -281,7 +281,7 @@ fn llm_tokens_split_by_modality_with_text_as_the_remainder() -> Result<()> {
             .flat_map(|s| &s.metrics)
             .find(|m| m.name == "llm_tokens_total")
             .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
-            .map(|sum| {
+            .map_or(0, |sum| {
                 sum.data_points
                     .iter()
                     .filter(|p| attr(&p.attributes, "token_type").as_deref() == Some(token_type))
@@ -289,7 +289,6 @@ fn llm_tokens_split_by_modality_with_text_as_the_remainder() -> Result<()> {
                     .map(|p| p.value)
                     .sum()
             })
-            .unwrap_or(0)
     };
     // text is the remainder, and the modality series sum back to each total.
     let prompt = (
@@ -443,7 +442,7 @@ fn llm_fallback_attempt_label_separates_declined_tokens_from_served() -> Result<
             .flat_map(|s| &s.metrics)
             .find(|m| m.name == "llm_tokens_total")
             .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
-            .map(|sum| {
+            .map_or(0, |sum| {
                 sum.data_points
                     .iter()
                     .filter(|p| get("token_type", &p.attributes).as_deref() == Some("prompt"))
@@ -451,7 +450,6 @@ fn llm_fallback_attempt_label_separates_declined_tokens_from_served() -> Result<
                     .map(|p| p.value)
                     .sum()
             })
-            .unwrap_or(0)
     };
     // Distinct series, so a dashboard can read a declined attempt's tokens on their own
     // rather than summed into the served call to the same model.
@@ -696,12 +694,11 @@ fn llm_operation_label_is_on_requests_tokens_latency_only() -> Result<()> {
         .flat_map(|s| &s.metrics)
         .find(|m| m.name == "llm_cost_usd_total")
         .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<f64>>())
-        .map(|sum| {
+        .is_some_and(|sum| {
             sum.data_points
                 .iter()
                 .any(|p| label(&p.attributes, "operation").is_some())
-        })
-        .unwrap_or(false);
+        });
     assert!(!cost_has_op, "cost must not carry operation");
     Ok(())
 }
@@ -1096,7 +1093,7 @@ fn llm_cost_after_a_reload_has_the_new_price_and_version() -> Result<()> {
     let mut points: Vec<(f64, String)> = cost
         .data_points
         .iter()
-        .flat_map(|p| {
+        .filter_map(|p| {
             let version = p
                 .attributes
                 .iter()

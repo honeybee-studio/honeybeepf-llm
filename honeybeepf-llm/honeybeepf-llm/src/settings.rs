@@ -21,7 +21,7 @@ where
                 .into_iter()
                 .map(|v| {
                     v.as_str()
-                        .map(|s| s.to_string())
+                        .map(std::string::ToString::to_string)
                         .ok_or_else(|| D::Error::custom("expected string in array"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -82,12 +82,12 @@ impl Settings {
         // Debug: print relevant environment variables
         for (key, value) in std::env::vars() {
             if key.starts_with("BUILTIN") || key.starts_with("RUST_LOG") {
-                eprintln!("ENV: {}={}", key, value);
+                eprintln!("ENV: {key}={value}");
             }
         }
 
         let settings = Self::from_vars(std::env::vars().collect())?;
-        eprintln!("Parsed settings: {:?}", settings);
+        eprintln!("Parsed settings: {settings:?}");
         Ok(settings)
     }
 
@@ -118,7 +118,7 @@ impl Settings {
 
         honeybeepf_llm_common::CommonConfig {
             // LLM
-            probe_llm: probe_llm as u8,
+            probe_llm: u8::from(probe_llm),
             // Interval
             probe_interval,
             _pad: [0; 7],

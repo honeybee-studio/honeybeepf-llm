@@ -31,7 +31,7 @@ fn frame_head(kind: u8, flags: u8, stream: u32, len: u32) -> Vec<u8> {
 fn push_ev(evs: &mut Vec<Ev>, f: Frame<'_>) {
     match (f, evs.last_mut()) {
         (Frame::Data { stream, data }, Some(Ev::Data(s, d))) if *s == stream => {
-            d.extend_from_slice(data)
+            d.extend_from_slice(data);
         }
         (Frame::Data { stream, data }, _) => evs.push(Ev::Data(stream, data.to_vec())),
         (Frame::Headers { stream, block }, _) => evs.push(Ev::Headers(stream, block.to_vec())),

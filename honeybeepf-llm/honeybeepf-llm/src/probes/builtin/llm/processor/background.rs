@@ -212,7 +212,7 @@ pub(super) fn record_usage(
     } else {
         let thoughts_str = usage
             .thoughts_tokens
-            .map(|t| format!(", Thoughts: {}", t))
+            .map(|t| format!(", Thoughts: {t}"))
             .unwrap_or_default();
         let cache_str = match (usage.cache_read_tokens, usage.cache_write_tokens) {
             (None, None) => String::new(),

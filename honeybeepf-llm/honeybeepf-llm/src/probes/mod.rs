@@ -236,8 +236,10 @@ fn parse_llm_record(item: &[u8]) -> Option<(&LlmEventHeader, &[u8])> {
     if item.len() < H {
         return None;
     }
-    // SAFETY: BPF ring-buffer records are 8-byte aligned and `LlmEventHeader: aya::Pod` (repr(C),
-    // every byte pattern valid); the length is checked, so the header is reborrowed in place.
+    #[allow(clippy::cast_ptr_alignment)] // record alignment (8) covers the header; see SAFETY
+    // SAFETY: BPF ring-buffer records are 8-byte aligned, which meets `align_of::<LlmEventHeader>()`
+    // (its widest field is u64); `LlmEventHeader: aya::Pod` (repr(C), every byte pattern valid) and the
+    // length is checked, so the header is reborrowed in place.
     let header: &LlmEventHeader = unsafe { &*(item.as_ptr() as *const LlmEventHeader) };
     let end = H + header.payload_len();
     item.get(H..end).map(|payload| (header, payload))
@@ -254,7 +256,7 @@ pub fn attach_uprobe(
 ) -> Result<UProbeLinkId> {
     let program: &mut UProbe = bpf
         .program_mut(prog_name)
-        .with_context(|| format!("Failed to find program {}", prog_name))?
+        .with_context(|| format!("Failed to find program {prog_name}"))?
         .try_into()?;
 
     // Check if loaded using fd()
@@ -265,21 +267,21 @@ pub fn attach_uprobe(
     // With a name, aya would read the whole file again for every program.
     program
         .attach(None, offset, path, None)
-        .with_context(|| format!("Failed to attach {} to {}", prog_name, func_name))
+        .with_context(|| format!("Failed to attach {prog_name} to {func_name}"))
 }
 
 /// Load (if needed) and attach a kprobe program to a kernel function.
 pub fn attach_kprobe(bpf: &mut Ebpf, prog_name: &str, func_name: &str) -> Result<()> {
     let program: &mut KProbe = bpf
         .program_mut(prog_name)
-        .with_context(|| format!("Failed to find program {}", prog_name))?
+        .with_context(|| format!("Failed to find program {prog_name}"))?
         .try_into()?;
     if program.fd().is_err() {
         program.load()?;
     }
     program
         .attach(func_name, 0)
-        .with_context(|| format!("Failed to attach {} to {}", prog_name, func_name))?;
+        .with_context(|| format!("Failed to attach {prog_name} to {func_name}"))?;
     Ok(())
 }
 
@@ -288,12 +290,12 @@ pub fn attach_fentry(bpf: &mut Ebpf, prog_name: &str, func_name: &str) -> Result
     let btf = Btf::from_sys_fs().context("kernel BTF not available")?;
     let program: &mut FEntry = bpf
         .program_mut(prog_name)
-        .with_context(|| format!("Failed to find program {}", prog_name))?
+        .with_context(|| format!("Failed to find program {prog_name}"))?
         .try_into()?;
     program.load(func_name, &btf)?;
     program
         .attach()
-        .with_context(|| format!("Failed to attach {} to {}", prog_name, func_name))?;
+        .with_context(|| format!("Failed to attach {prog_name} to {func_name}"))?;
     Ok(())
 }
 
@@ -301,11 +303,11 @@ pub fn attach_fentry(bpf: &mut Ebpf, prog_name: &str, func_name: &str) -> Result
 pub fn detach_uprobe(bpf: &mut Ebpf, prog_name: &str, link_id: UProbeLinkId) -> Result<()> {
     let program: &mut UProbe = bpf
         .program_mut(prog_name)
-        .with_context(|| format!("Failed to find program {}", prog_name))?
+        .with_context(|| format!("Failed to find program {prog_name}"))?
         .try_into()?;
     program
         .detach(link_id)
-        .with_context(|| format!("Failed to detach {}", prog_name))
+        .with_context(|| format!("Failed to detach {prog_name}"))
 }
 
 /// Set up the `sched_process_exec` tracepoint and return a queue that collects
@@ -327,7 +329,9 @@ pub fn setup_exec_watch(bpf: &mut Ebpf) -> Result<(ExecPidQueue, ExecNotify)> {
     let handler_notify = notify.clone();
 
     spawn_ringbuf_handler(bpf, "EXEC_EVENTS", move |event: &ExecEvent| {
-        let mut q = handler_queue.lock().unwrap_or_else(|e| e.into_inner());
+        let mut q = handler_queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Cap queue to avoid unbounded growth under extreme exec rates
         if q.len() < MAX_EXEC_QUEUE_SIZE {
             q.push_back(event.pid);
@@ -360,11 +364,8 @@ pub fn setup_lib_open_watch(bpf: &mut Ebpf) -> Result<(LibOpenQueue, ExecNotify,
     match attach_fentry(bpf, "probe_lib_open_fentry", "do_sys_openat2") {
         Ok(()) => info!("libssl open watch: fentry on do_sys_openat2"),
         Err(fentry_err) => match attach_kprobe(bpf, "probe_lib_open", "do_sys_openat2") {
-            Ok(()) => info!("libssl open watch: kprobe (fentry: {:#})", fentry_err),
-            Err(e) => warn!(
-                "libssl open watch not attached: {:#} (fentry: {:#})",
-                e, fentry_err
-            ),
+            Ok(()) => info!("libssl open watch: kprobe (fentry: {fentry_err:#})"),
+            Err(e) => warn!("libssl open watch not attached: {e:#} (fentry: {fentry_err:#})"),
         },
     }
     let seen = AyaHashMap::try_from(
@@ -390,7 +391,9 @@ pub fn setup_lib_open_watch(bpf: &mut Ebpf) -> Result<(LibOpenQueue, ExecNotify,
             seen_key: event.seen_key,
             ts: event.ts,
         };
-        let mut q = handler_queue.lock().unwrap_or_else(|e| e.into_inner());
+        let mut q = handler_queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if q.len() < MAX_EXEC_QUEUE_SIZE {
             q.push_back(open);
         } else {

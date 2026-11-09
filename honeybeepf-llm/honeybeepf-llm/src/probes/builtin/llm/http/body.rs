@@ -147,10 +147,10 @@ fn extract_json_string(s: &str) -> Option<String> {
     }
 
     // Truncated string - return what we have
-    if !result.is_empty() {
-        Some(result)
-    } else {
+    if result.is_empty() {
         None
+    } else {
+        Some(result)
     }
 }
 

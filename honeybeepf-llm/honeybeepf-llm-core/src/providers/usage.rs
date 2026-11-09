@@ -203,7 +203,8 @@ fn is_own_usage(config: &IdentityConfig, usage: &Value) -> bool {
 
 /// Prompt, completion and reasoning counts; `None` when a required count is missing.
 fn read_tokens(config: &TokenConfig, usage: &Value) -> Option<Tokens> {
-    let prompt = get_nested_value(usage, &config.prompt_tokens).and_then(|v| v.as_u64())?;
+    let prompt =
+        get_nested_value(usage, &config.prompt_tokens).and_then(serde_json::Value::as_u64)?;
     let completion = match get_nested_value(usage, &config.completion_tokens) {
         Some(v) => v.as_u64()?,
         None if config.completion_optional => 0,
@@ -270,13 +271,13 @@ fn read_modalities(
 fn optional_count(root: &Value, path: &Option<String>) -> Option<u64> {
     path.as_ref()
         .and_then(|path| get_nested_value(root, path))
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
 }
 
 fn text(root: &Value, path: &str) -> Option<String> {
     get_nested_value(root, path)
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
 }
 
 fn optional_text(root: &Value, path: &Option<String>) -> Option<String> {

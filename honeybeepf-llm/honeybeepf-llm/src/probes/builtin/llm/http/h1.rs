@@ -288,9 +288,7 @@ impl ProtocolParser for Http11Parser {
     }
 
     fn extract_request_text(&self, buffer: &[u8]) -> String {
-        let body_start = byte_utils::find_pattern(buffer, b"\r\n\r\n")
-            .map(|i| i + 4)
-            .unwrap_or(0);
+        let body_start = byte_utils::find_pattern(buffer, b"\r\n\r\n").map_or(0, |i| i + 4);
 
         let json_body = String::from_utf8_lossy(&buffer[body_start..]);
         extract_text_from_json(&json_body)

@@ -161,7 +161,7 @@ impl EventStreamCursor {
         if let Some(metrics) = metrics {
             let acc = self
                 .acc
-                .get_or_insert_with(|| Value::Object(Default::default()));
+                .get_or_insert_with(|| Value::Object(serde_json::Map::default()));
             if let Some(acc) = acc.as_object_mut() {
                 acc.insert(INVOCATION_METRICS.to_owned(), metrics);
             }

@@ -48,7 +48,7 @@ pub struct HoneyBeeEngine {
 impl HoneyBeeEngine {
     pub fn new(settings: Settings, bytecode: &[u8]) -> Result<Self> {
         bump_memlock_rlimit()?;
-        let tail_call_ok = KernelVersion::current().is_ok_and(tail_call_allowed) as u8;
+        let tail_call_ok = u8::from(KernelVersion::current().is_ok_and(tail_call_allowed));
         info!(
             "LLM probes keep the task stack (empty tail call): {}",
             tail_call_ok == 1
@@ -81,7 +81,7 @@ impl HoneyBeeEngine {
         // Initialize the eBPF Logger only in debug mode
         if settings.debug.unwrap_or(false) {
             if let Err(e) = EbpfLogger::init(&mut bpf) {
-                warn!("Failed to initialize eBPF logger: {}", e);
+                warn!("Failed to initialize eBPF logger: {e}");
             } else {
                 debug!("eBPF logger enabled (debug mode)");
             }
@@ -107,10 +107,7 @@ impl HoneyBeeEngine {
     pub async fn run(mut self) -> Result<()> {
         let _shutdown = ShutdownOnDrop;
         if let Err(e) = telemetry::init_metrics() {
-            warn!(
-                "Failed to initialize OpenTelemetry metrics: {}. Metrics will not be exported.",
-                e
-            );
+            warn!("Failed to initialize OpenTelemetry metrics: {e}. Metrics will not be exported.");
         }
 
         // Start K8s pod watcher if available
@@ -129,7 +126,7 @@ impl HoneyBeeEngine {
                 });
 
             if let Ok(node_name) = resolved_node_name {
-                info!("Starting K8s pod watcher for node: {}", node_name);
+                info!("Starting K8s pod watcher for node: {node_name}");
                 let pod_labels = self.settings.builtin_probes.llm_pod_labels.as_deref();
                 let pod_resolver = Arc::new(k8s::PodResolver::with_pod_labels(
                     pod_labels.unwrap_or_default(),
@@ -140,10 +137,7 @@ impl HoneyBeeEngine {
                         self.resolver = IdentityResolver::with_pod_resolver(pod_resolver);
                     }
                     Err(e) => {
-                        warn!(
-                            "K8s pod watcher failed to start: {}. Pod resolution disabled.",
-                            e
-                        );
+                        warn!("K8s pod watcher failed to start: {e}. Pod resolution disabled.");
                     }
                 }
             } else {
@@ -162,7 +156,7 @@ impl HoneyBeeEngine {
                 let resolver = self.resolver.clone();
                 match plaintext::start(&mut self.bpf, specs, resolver).await {
                     Ok(()) => info!("Plaintext capture enabled"),
-                    Err(e) => warn!("Plaintext capture disabled: {}", e),
+                    Err(e) => warn!("Plaintext capture disabled: {e}"),
                 }
             }
         }
@@ -170,13 +164,13 @@ impl HoneyBeeEngine {
         self.attach_probes()?;
 
         // Start dynamic probe discovery if any dynamic probes are enabled
-        if !self.dynamic_probes.is_empty() {
+        if self.dynamic_probes.is_empty() {
+            info!("Monitoring active. Press Ctrl-C to exit.");
+            signal::ctrl_c().await?;
+        } else {
             let exec_watch = setup_exec_watch(&mut self.bpf)?;
             let lib_watch = setup_lib_open_watch(&mut self.bpf)?;
             self.run_discovery(exec_watch, lib_watch).await?;
-        } else {
-            info!("Monitoring active. Press Ctrl-C to exit.");
-            signal::ctrl_c().await?;
         }
 
         info!("Exiting...");
@@ -200,9 +194,9 @@ impl HoneyBeeEngine {
         loop {
             tokio::select! {
                 _ = signal::ctrl_c() => break,
-                _ = lib_notify.notified() => {
+                () = lib_notify.notified() => {
                     let opens: Vec<LibOpen> = {
-                        let mut q = lib_queue.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut q = lib_queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         q.drain(..).collect()
                     };
                     for open in opens {
@@ -217,14 +211,14 @@ impl HoneyBeeEngine {
                         let _ = lib_seen.insert(open.seen_key, open.ts, 0);
                     }
                 }
-                _ = notify.notified(), if exec_due.is_none() => {
+                () = notify.notified(), if exec_due.is_none() => {
                     // Brief delay to batch rapid exec events
                     exec_due = Some(Instant::now() + Duration::from_millis(BATCH_WAIT_MS));
                 }
-                _ = tokio::time::sleep_until(exec_due.unwrap_or_else(Instant::now)), if exec_due.is_some() => {
+                () = tokio::time::sleep_until(exec_due.unwrap_or_else(Instant::now)), if exec_due.is_some() => {
                     exec_due = None;
                     let pids: Vec<u32> = {
-                        let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut q = queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         q.drain(..).collect()
                     };
 
@@ -235,7 +229,7 @@ impl HoneyBeeEngine {
                                 Ok(l) => l,
                                 Err(e) => {
                                     // Debug level because this can happen for short-lived processes
-                                    log::debug!("Failed to get libraries for PID {}: {}", pid, e);
+                                    log::debug!("Failed to get libraries for PID {pid}: {e}");
                                     continue;
                                 }
                             };
@@ -266,7 +260,7 @@ impl HoneyBeeEngine {
     fn notify_probes(&mut self, process_info: &ProcessInfo) {
         for probe in &self.dynamic_probes {
             if let Err(e) = probe.on_exec(&mut self.bpf, process_info) {
-                warn!("Probe on_exec error: {}", e);
+                warn!("Probe on_exec error: {e}");
             }
         }
     }
