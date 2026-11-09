@@ -21,13 +21,11 @@ use aya_ebpf::{
     programs::{ProbeContext, RetProbeContext, TracePointContext},
 };
 use honeybeepf_llm_common::{
-    LLM_STAT_DISCARD, LLM_STAT_EMPTY, LLM_STAT_ENTER, LLM_STAT_FILTERED, LLM_STAT_FRAGMENT,
-    LLM_STAT_HANDSHAKE, LLM_STAT_RESERVE_FAIL, LLM_STAT_SUBMIT, LLM_STAT_TRUNCATED, LlmDirection,
-    LlmEventHeader, MAX_SSL_BUF_SIZE, MAX_SSL_FRAGMENTS, capture_limit,
+    LlmDirection, LlmEventHeader, LlmStat, MAX_SSL_BUF_SIZE, MAX_SSL_FRAGMENTS, capture_limit,
 };
 
 mod filter;
-mod helpers;
+pub(crate) mod helpers;
 pub mod maps;
 
 use helpers::{Session, SslCall, count, fill_header, get_current_tid};
@@ -37,7 +35,7 @@ use maps::*;
 /// Session::start overwrites any existing entry, so no clear() needed.
 #[uprobe]
 pub fn probe_ssl_rw_enter(ctx: ProbeContext) -> u32 {
-    count(LLM_STAT_ENTER);
+    count(LlmStat::Enter);
     let tid = get_current_tid();
     Session::start(tid, ctx.arg(0).unwrap_or(0), ctx.arg(1).unwrap_or(0), None);
     keep_task_stack(&ctx);
@@ -60,7 +58,7 @@ pub fn probe_ssl_write_exit(ctx: RetProbeContext) -> u32 {
 /// that points to the actual bytes read/written (instead of return value).
 #[uprobe]
 pub fn probe_ssl_rw_ex_enter(ctx: ProbeContext) -> u32 {
-    count(LLM_STAT_ENTER);
+    count(LlmStat::Enter);
     let tid = get_current_tid();
     Session::start(
         tid,
@@ -87,7 +85,7 @@ pub fn probe_ssl_write_ex_exit(ctx: RetProbeContext) -> u32 {
 /// Entry probe for SSL_do_handshake - captures start time for latency.
 #[uprobe]
 pub fn probe_ssl_do_handshake_enter(ctx: ProbeContext) -> u32 {
-    count(LLM_STAT_ENTER);
+    count(LlmStat::Enter);
     let tid = get_current_tid();
     let ssl = ctx.arg(0).unwrap_or(0);
     filter::forget(ssl);
@@ -106,13 +104,13 @@ pub fn probe_ssl_do_handshake_exit(ctx: RetProbeContext) -> u32 {
 /// address can be reused by the next connection.
 #[uprobe]
 pub fn probe_ssl_free(ctx: ProbeContext) -> u32 {
-    count(LLM_STAT_ENTER);
+    count(LlmStat::Enter);
     match ctx.arg::<u64>(0) {
         Some(ssl) if ssl != 0 => {
             filter::forget(ssl);
             emit_fragments(&SslCall::free(ssl), LlmDirection::Unknown as u8, false)
         }
-        _ => count(LLM_STAT_DISCARD),
+        _ => count(LlmStat::Discard),
     }
     keep_task_stack(&ctx);
     0
@@ -131,9 +129,9 @@ pub fn probe_ssl_task_exit(_ctx: TracePointContext) -> u32 {
 fn emit_llm_event(ctx: &RetProbeContext, rw: u8, is_handshake: bool) -> u32 {
     let tid = get_current_tid();
     match SslCall::capture(ctx, is_handshake) {
-        Ok(call) if !is_handshake && filter::drops(&call, rw) => count(LLM_STAT_FILTERED),
+        Ok(call) if !is_handshake && filter::drops(&call, rw) => count(LlmStat::Filtered),
         Ok(call) => emit_fragments(&call, rw, is_handshake),
-        Err(_) => count(LLM_STAT_DISCARD),
+        Err(_) => count(LlmStat::Discard),
     }
     // Always clear session state - handles success, failure, and reserve failure cases
     Session::clear(tid);
@@ -247,7 +245,7 @@ fn emit_fragments(call: &SslCall, rw: u8, is_handshake: bool) {
     // Calls over the limit were counted as truncated at fragment 0.
     let tail_lost = |i: usize| {
         if i > 0 && call.len as usize <= limit {
-            count(LLM_STAT_TRUNCATED);
+            count(LlmStat::Truncated);
         }
     };
     for i in 0..MAX_SSL_FRAGMENTS {
@@ -259,29 +257,29 @@ fn emit_fragments(call: &SslCall, rw: u8, is_handshake: bool) {
         match emit_one(call, rw, is_handshake, truncated, offset) {
             Emitted::NoRoom => {
                 if i == 0 {
-                    count(LLM_STAT_RESERVE_FAIL);
+                    count(LlmStat::ReserveFail);
                 }
                 tail_lost(i);
                 return;
             }
             Emitted::ReadFail => {
                 if i == 0 {
-                    count(LLM_STAT_DISCARD);
+                    count(LlmStat::Discard);
                 }
                 tail_lost(i);
                 return;
             }
             outcome => {
                 if i > 0 {
-                    count(LLM_STAT_FRAGMENT);
+                    count(LlmStat::Fragment);
                 } else if is_handshake {
-                    count(LLM_STAT_HANDSHAKE);
+                    count(LlmStat::Handshake);
                 } else if matches!(outcome, Emitted::Empty) {
-                    count(LLM_STAT_EMPTY);
+                    count(LlmStat::Empty);
                 } else if truncated != 0 {
-                    count(LLM_STAT_TRUNCATED);
+                    count(LlmStat::Truncated);
                 }
-                count(LLM_STAT_SUBMIT);
+                count(LlmStat::Submit);
             }
         }
     }

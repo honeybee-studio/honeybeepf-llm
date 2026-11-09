@@ -31,6 +31,10 @@ can be told apart from a drop in traffic. `reason` is one of:
 Not counted here: a read lost whole because the ring buffer was full (see `llm_events_total{stage="reserve_fail"}`),
 and a connection left idle for 300 s without being closed (for example a killed process).
 
+A plain-HTTP receive larger than the 16 KB capture window (one skb over 16 KB on loopback or from GRO) is counted
+under `llm_events_total{stage="plain_recv_truncated"}`, whether or not the call is still recorded; its usage is read
+only when it falls in the first 16 KB.
+
 Unparsed calls per minute by reason, for an alert on `> 0` (excluding `agent_session`, which is counted on
 purpose, not a drop, and `usage_absent`, which some providers cause on every call):
 

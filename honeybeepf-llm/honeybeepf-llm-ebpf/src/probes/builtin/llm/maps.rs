@@ -2,7 +2,7 @@ use aya_ebpf::{
     macros::map,
     maps::{HashMap, LruHashMap, PerCpuArray, ProgramArray, RingBuf},
 };
-use honeybeepf_llm_common::LLM_STAT_COUNT;
+use honeybeepf_llm_common::LlmStat;
 
 pub const MAX_ENTRIES: u32 = 10240;
 /// Open TLS connections tracked per node; an evicted one is sent in full again.
@@ -28,9 +28,9 @@ pub static READBYTES_PTRS: HashMap<u32, u64> = HashMap::with_max_entries(MAX_ENT
 pub static SSL_CLASS: LruHashMap<[u64; 2], u64> =
     LruHashMap::with_max_entries(SSL_CLASS_ENTRIES, 0);
 
-/// Event pipeline counters, indexed by `honeybeepf_llm_common::LLM_STAT_*`.
+/// Event pipeline counters, indexed by `honeybeepf_llm_common::LlmStat`.
 #[map]
-pub static LLM_STATS: PerCpuArray<u64> = PerCpuArray::with_max_entries(LLM_STAT_COUNT as u32, 0);
+pub static LLM_STATS: PerCpuArray<u64> = PerCpuArray::with_max_entries(LlmStat::COUNT as u32, 0);
 
 /// Always empty; a program with a tail call gets no per-CPU private stack from the verifier (6.13+).
 #[map]

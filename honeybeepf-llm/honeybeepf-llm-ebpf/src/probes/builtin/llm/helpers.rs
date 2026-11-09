@@ -4,7 +4,7 @@ use aya_ebpf::{
     },
     programs::RetProbeContext,
 };
-use honeybeepf_llm_common::{EventMetadata, LlmEventHeader};
+use honeybeepf_llm_common::{EventMetadata, LlmEventHeader, LlmStat};
 
 use crate::probes::builtin::llm::maps::{BUFS, LLM_STATS, READBYTES_PTRS, START_NS};
 
@@ -13,10 +13,10 @@ pub fn get_current_tid() -> u32 {
     bpf_get_current_pid_tgid() as u32
 }
 
-/// Increment one `LLM_STAT_*` counter for the current CPU (approximate: not atomic).
+/// Increment one `LlmStat` counter for the current CPU (approximate: not atomic).
 #[inline(never)]
-pub fn count(stat: u32) {
-    if let Some(p) = LLM_STATS.get_ptr_mut(stat) {
+pub fn count(stat: LlmStat) {
+    if let Some(p) = LLM_STATS.get_ptr_mut(stat as u32) {
         // SAFETY: `p` is this CPU's slot of the per-CPU value, valid while the program runs.
         unsafe { *p += 1 };
     }

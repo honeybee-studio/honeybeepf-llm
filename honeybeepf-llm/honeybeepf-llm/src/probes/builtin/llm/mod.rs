@@ -16,7 +16,7 @@ use aya::{
 };
 use background::BackgroundCalls;
 use conn_filter::ConnFilter;
-use honeybeepf_llm_common::{LLM_STAT_COUNT, LLM_STAT_NAMES, LlmEventHeader};
+use honeybeepf_llm_common::{LlmEventHeader, LlmStat};
 use honeybeepf_llm_core::types::LlmDirection;
 #[cfg(feature = "k8s")]
 use log::debug;
@@ -47,10 +47,10 @@ const STATS_LOG_INTERVAL_SECS: u64 = 10; // How often to log event counters (onl
 /// Kernel-side event pipeline counters (LLM_STATS map), set once when the probe attaches.
 static EVENT_STATS: OnceLock<PerCpuArray<MapData, u64>> = OnceLock::new();
 
-/// Totals of the kernel event counters, summed over CPUs, in `LLM_STAT_NAMES` order.
-pub fn event_stats() -> Option<[u64; LLM_STAT_COUNT]> {
+/// Totals of the kernel event counters, summed over CPUs, in `LlmStat::ALL` order.
+pub fn event_stats() -> Option<[u64; LlmStat::COUNT]> {
     let map = EVENT_STATS.get()?;
-    let mut totals = [0u64; LLM_STAT_COUNT];
+    let mut totals = [0u64; LlmStat::COUNT];
     for (i, total) in totals.iter_mut().enumerate() {
         let values = map.get(&(i as u32), 0).ok()?;
         *total = values.iter().sum();
@@ -61,10 +61,10 @@ pub fn event_stats() -> Option<[u64; LLM_STAT_COUNT]> {
 /// Log the kernel event counters as one line.
 pub fn log_event_stats() {
     if let Some(totals) = event_stats() {
-        let line = LLM_STAT_NAMES
+        let line = LlmStat::ALL
             .iter()
             .zip(totals.iter())
-            .map(|(name, v)| format!("{name}={v}"))
+            .map(|(stat, v)| format!("{}={v}", stat.name()))
             .collect::<Vec<_>>()
             .join(" ");
         info!("[LLM stats] {line}");
