@@ -159,7 +159,7 @@ impl PodResolver {
         // Therefore, we use Api::all() to get cluster-wide visibility.
         let api: Api<Pod> = Api::all(client);
         let watcher_config = watcher::Config {
-            field_selector: Some(format!("spec.nodeName={}", node_name)),
+            field_selector: Some(format!("spec.nodeName={node_name}")),
             ..Default::default()
         };
 
@@ -182,7 +182,7 @@ impl PodResolver {
                     Ok(watcher::Event::Init | watcher::Event::InitDone) => {}
                     Err(e) => {
                         // One line per backoff step, not per request.
-                        warn!("K8s pod watcher error: {}. Will retry.", e);
+                        warn!("K8s pod watcher error: {e}. Will retry.");
                     }
                 }
             }
@@ -256,11 +256,7 @@ impl PodResolver {
             }
             // Clean cgroup_cache entries that pointed to deleted containers
             if let Ok(mut cache) = self.cgroup_cache.write() {
-                cache.retain(|_, v| {
-                    v.as_ref()
-                        .map(|id| !container_ids.contains(id))
-                        .unwrap_or(true)
-                });
+                cache.retain(|_, v| v.as_ref().is_none_or(|id| !container_ids.contains(id)));
             }
         } else {
             // Pre-warm cgroup_id cache: resolve cgroup_id from cgroup path on disk
@@ -303,7 +299,7 @@ impl PodResolver {
         let shutdown = crate::probes::shutdown_flag();
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            let mut interval = tokio::time::interval(Duration::from_mins(1));
             loop {
                 interval.tick().await;
                 if shutdown.load(Ordering::Relaxed) {
@@ -321,11 +317,7 @@ impl PodResolver {
         if let (Ok(mut cgroup_cache), Ok(pod_store)) =
             (self.cgroup_cache.write(), self.pod_store.read())
         {
-            cgroup_cache.retain(|_, v| {
-                v.as_ref()
-                    .map(|cid| pod_store.contains_key(cid))
-                    .unwrap_or(true)
-            });
+            cgroup_cache.retain(|_, v| v.as_ref().is_none_or(|cid| pod_store.contains_key(cid)));
         }
     }
 }
@@ -458,7 +450,7 @@ fn extract_container_ids_from_pod(pod: &Pod) -> Vec<String> {
 /// - v1: `12:memory:/kubepods/besteffort/pod<uid>/<64-hex-container-id>`
 /// - systemd scope: `cri-containerd-<64hex>.scope` or `docker-<64hex>.scope`
 fn extract_container_id(pid: u32) -> Option<String> {
-    let path = format!("/proc/{}/cgroup", pid);
+    let path = format!("/proc/{pid}/cgroup");
     let content = std::fs::read_to_string(&path).ok()?;
 
     for line in content.lines() {
@@ -721,7 +713,7 @@ mod tests {
                     ..Default::default()
                 }]),
                 ..Default::default()
-            })
+            });
         };
         let stored = |r: &PodResolver| {
             r.stored_info(&pod_meta(vec![], None))

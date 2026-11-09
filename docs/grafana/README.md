@@ -7,12 +7,12 @@ HoneybeePF eBPF agent via OpenTelemetry → Prometheus.
 
 | File | Title | Panels | Focus |
 |------|-------|:------:|-------|
-| [`honeybeepf-cost.json`](./honeybeepf-cost.json) | HoneybeePF — LLM Cost Observability | 15 | LLM API traffic, token usage, latency, cost attribution by team / pod / model |
+| [`honeybeepf-cost.json`](./honeybeepf-cost.json) | HoneybeePF — LLM Cost Observability | 24 | LLM API traffic, token usage, latency, cost attribution by team / pod / model |
 | [`honeybeepf-security.json`](./honeybeepf-security.json) | HoneybeePF — Security & Compliance | 11 | File access monitoring, LLM ↔ file-access correlation, per-process auditing |
 
 ### Cost Observability (`honeybeepf-cost.json`)
 
-Four sections — **External LLM API**, **On-Premise LLM**, **Cost-Waste Signals**, and **Cost (estimate)** — with:
+Five sections — **External LLM API**, **On-Premise LLM**, **Cost-Waste Signals**, **Cost (estimate)**, and **LLM Usage Detail & Data Quality** — with:
 
 - Requests / minute (by team, by model)
 - Token usage / minute (prompt vs completion, by team, by model)
@@ -23,6 +23,10 @@ Four sections — **External LLM API**, **On-Premise LLM**, **Cost-Waste Signals
 - Top 10 pods by token usage
 - Fallback refusal cost per workload (`attempt="declined"`, **measured**), prompt cache hit rate per pod / model, and an **upper-bound** estimate of the input cost caching could save
 - Estimated spend per workload and per model, and a total, in USD from the price table (`llm_cost_usd_total` summed over all `cost_type` and all `attempt`)
+- Token usage / minute by `modality` (text / image / audio / video)
+- Requests and token usage / minute by `operation` (`chat` / `embeddings`)
+- Unpriced tokens / minute by `reason` — tokens the price table could not price, the spend the cost panels miss
+- Unparsed responses / minute by `reason`, with `agent_session` and `usage_absent` shown muted (counted on purpose, not dropped calls)
 
 The **Cost-Waste Signals** section mixes one measured panel and two estimates, labelled as such. The refusal-cost panel is a real billed amount (`attempt="declined"`). The two cache panels are leads for human review, not measured losses: they are computed only from counters, so a low cache hit rate flags waste only where the prompt prefix actually repeats, which the agent cannot see, and the savings figure assumes every input token is a repeated cacheable prefix, priced at each model's own cache-read rate, so it is a ceiling. Each panel says so in its description.
 
@@ -50,15 +54,15 @@ Collector, which forwards them to Prometheus.
 
 | Metric | Type | Labels |
 |--------|------|--------|
-| `honeybeepf_llm_llm_requests_total` | Counter | `model`, `status`, `transport` (tls / plain), `target_namespace`, `target_pod_name` |
-| `honeybeepf_llm_llm_tokens_total` | Counter | `model`, `status`, `token_type` (prompt / completion), `modality` (text / image / audio / video; text is the remainder), `transport` (tls / plain), `target_namespace`, `target_pod_name` |
+| `honeybeepf_llm_llm_requests_total` | Counter | `model`, `status`, `operation` (chat / embeddings), `transport` (tls / plain), `target_namespace`, `target_pod_name` |
+| `honeybeepf_llm_llm_tokens_total` | Counter | `model`, `status`, `token_type` (prompt / completion), `modality` (text / image / audio / video; text is the remainder), `operation` (chat / embeddings), `transport` (tls / plain), `target_namespace`, `target_pod_name` |
 | `honeybeepf_llm_llm_cache_read_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
 | `honeybeepf_llm_llm_cache_write_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
 | `honeybeepf_llm_llm_reasoning_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of completion tokens) |
 | `honeybeepf_llm_llm_cost_usd_total` | Counter (USD) | `model`, `status`, `cost_type` (input / cache_read / cache_write / output), `price_table_version`, `target_namespace`, `target_pod_name` |
 | `honeybeepf_llm_llm_cache_savings_ceiling_usd_total` | Counter (USD) | `model`, `status`, `cache_price` (known / assumed_free), `price_table_version`, `target_namespace`, `target_pod_name` — upper bound on what caching the uncached input could save (estimate) |
 | `honeybeepf_llm_llm_unpriced_tokens_total` | Counter | `model`, `status`, `reason` (unknown_model / missing_price / unsupported_modifier / inconsistent_usage), `price_table_version`, `target_namespace`, `target_pod_name` |
-| `honeybeepf_llm_llm_latency_seconds_bucket` | Histogram | `model`, `status`, `transport` (tls / plain), `target_namespace`, `target_pod_name` |
+| `honeybeepf_llm_llm_latency_seconds_bucket` | Histogram | `model`, `status`, `operation` (chat / embeddings), `transport` (tls / plain), `target_namespace`, `target_pod_name` |
 
 Every per-call LLM metric (`llm_requests_total`, `llm_tokens_total`, the cache/reasoning subsets, `llm_cost_usd_total`, `llm_cache_savings_ceiling_usd_total`, `llm_unpriced_tokens_total`, `llm_latency_seconds`) also carries `attempt` (`served` / `declined`). It is `served` for the call the provider returned; `declined` marks an earlier server-side fallback attempt that the provider billed but routed away from (Anthropic fallback, #152/#154). A declined attempt adds its billed tokens and cost but no request count, so `sum(...)` over a metric is unchanged, while `attempt="declined"` isolates the cost of refused attempts per pod. Every series now carries the label; `declined` series appear only for models that show up in a fallback, so for non-fallback traffic the label is a constant `served` and adds no series.
 

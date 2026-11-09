@@ -55,10 +55,10 @@ pub(super) fn configured_from(
             .build()
             && let Ok(reg) = settings.try_deserialize::<ProviderRegistry>()
         {
-            log::info!("Loaded LLM providers from: {}", path);
+            log::info!("Loaded LLM providers from: {path}");
             return Some(reg);
         }
-        log::warn!("Failed to load or parse config file: {}", path);
+        log::warn!("Failed to load or parse config file: {path}");
     }
 
     // 2. Try inline JSON (for Kubernetes ConfigMap)
@@ -149,7 +149,7 @@ mod tests {
         let registry = config::Config::builder()
             .add_source(config::File::from_str(yaml, config::FileFormat::Yaml))
             .build()
-            .and_then(|c| c.try_deserialize::<ProviderRegistry>())?;
+            .and_then(config::Config::try_deserialize::<ProviderRegistry>)?;
         let provider = ConfigurableProvider::new(registry.providers[0].clone());
         let body = serde_json::json!({"served": {"model": "m-1"},
             "meta": {"usage": {"in": 10, "hit": 3, "mode": "fast"}}});

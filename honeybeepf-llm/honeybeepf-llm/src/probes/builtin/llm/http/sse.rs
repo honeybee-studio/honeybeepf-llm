@@ -183,7 +183,7 @@ fn merge_sse_event(acc: &mut Value, update: Value) {
         match (acc.get_mut(&key), value) {
             // A null count in a later event (e.g. Anthropic message_delta) must not erase an earlier one.
             (Some(Value::Object(prev)), Value::Object(next)) => {
-                prev.extend(next.into_iter().filter(|(_, v)| !v.is_null()))
+                prev.extend(next.into_iter().filter(|(_, v)| !v.is_null()));
             }
             (Some(slot), value) => *slot = value,
             (None, value) => {

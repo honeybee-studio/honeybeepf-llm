@@ -84,7 +84,7 @@ pub fn classify(spec: &EndpointSpec) -> Target {
     let namespace = spec
         .namespace
         .clone()
-        .or_else(|| labels.get(1).map(|s| s.to_string()))
+        .or_else(|| labels.get(1).map(std::string::ToString::to_string))
         .unwrap_or_else(|| "default".to_string());
     Target::Service { name, namespace }
 }

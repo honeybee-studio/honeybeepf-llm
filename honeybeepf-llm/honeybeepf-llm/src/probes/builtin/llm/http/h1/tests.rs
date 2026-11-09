@@ -415,7 +415,7 @@ fn dechunker_passes_on_what_decode_chunked_body_returns() {
                 std::borrow::Cow::Owned(want) => assert_eq!(got, want, "{prefix:?}"),
                 // Unchanged: no CRLF yet, nothing decoded yet, or read as is.
                 std::borrow::Cow::Borrowed(_) => {
-                    assert!(got.is_empty() || got == prefix, "{prefix:?}: {got:?}")
+                    assert!(got.is_empty() || got == prefix, "{prefix:?}: {got:?}");
                 }
             }
         }

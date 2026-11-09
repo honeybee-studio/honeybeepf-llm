@@ -21,7 +21,7 @@ const CONN_BUFFER_CAP: usize = 32 * 1024 * 1024;
 /// A stream whose response began but then saw no frame for this long on a still-live connection is dropped
 /// and counted, so a stalled response frees its buffered bytes instead of being held forever. A stream still
 /// awaiting its first response byte is left alone (a slow time-to-first-byte is not an abandoned stream).
-const STREAM_IDLE: Duration = Duration::from_secs(300);
+const STREAM_IDLE: Duration = Duration::from_mins(5);
 /// A mid-join connection's streams are guesses (no request matched them), so its total buffering is held far
 /// below `CONN_BUFFER_CAP`; a non-LLM join (internal gRPC, …) must not be able to pile up per connection.
 const MIDJOIN_CONN_CAP: usize = 1024 * 1024;
@@ -155,7 +155,7 @@ impl H2Conn {
         reader.read(data, |frame| {
             on_frame(
                 frame, request, midjoin, cap, decoder, streams, buffered, &mut on,
-            )
+            );
         });
         // A live connection's traffic is the only clock here, so drop idle streams as it flows.
         if !streams.is_empty() {

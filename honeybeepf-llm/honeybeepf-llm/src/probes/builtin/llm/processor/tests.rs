@@ -3,6 +3,14 @@ use honeybeepf_llm_common::{MAX_SSL_BUF_SIZE, MAX_SSL_FRAGMENTS};
 
 const REQUEST: &[u8] = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\nContent-Length: 27\r\n\r\n{\"model\":\"t\",\"messages\":[]}";
 
+fn ctx() -> CallContext {
+    CallContext {
+        pid: 1,
+        #[cfg(feature = "k8s")]
+        pod_info: None,
+    }
+}
+
 /// Sends one SSL call the way the kernel does, leaving out the fragment at `skip`.
 fn send(
     p: &mut StreamProcessor,
@@ -39,9 +47,7 @@ fn send_with(
             call.len() as u32,
             truncated,
             bg,
-            1,
-            #[cfg(feature = "k8s")]
-            None,
+            &ctx(),
         ));
     }
     out
@@ -135,9 +141,7 @@ fn plain_recv_one_bucket(p: &mut StreamProcessor, bg: &mut BackgroundCalls, skb:
         skb.len() as u32,
         skb.len() > MAX_SSL_BUF_SIZE,
         bg,
-        1,
-        #[cfg(feature = "k8s")]
-        None,
+        &ctx(),
     )
 }
 
@@ -160,9 +164,7 @@ fn plain_recv_skb(p: &mut StreamProcessor, bg: &mut BackgroundCalls, skb: &[u8])
             skb.len() as u32,
             truncated,
             bg,
-            1,
-            #[cfg(feature = "k8s")]
-            None,
+            &ctx(),
         ));
     }
     out
@@ -1331,7 +1333,7 @@ fn test_credentials_stay_out_of_logs() {
     for request in &requests {
         LOGS.with(|logs| logs.borrow_mut().clear());
         let out = exchange(&mut StreamProcessor::new(), request.as_bytes(), &response);
-        let logs = LOGS.with(|logs| logs.take());
+        let logs = LOGS.with(std::cell::RefCell::take);
         assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
         assert!(logs.contains("[LLM] Detected"), "{logs}");
         assert!(!logs.contains("HBTEST"), "{logs}");
@@ -1440,11 +1442,7 @@ fn test_resumed_stream_records_the_background_call() {
         in_progress.as_bytes(),
         None,
     ));
-    out.push(cut.close(
-        1,
-        #[cfg(feature = "k8s")]
-        None,
-    ));
+    out.push(cut.close(&ctx()));
     assert!(
         bg.contains("resp_bg1") && unparsed(&out).is_empty(),
         "{out:?}"

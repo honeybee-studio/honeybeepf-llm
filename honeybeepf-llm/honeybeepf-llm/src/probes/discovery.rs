@@ -18,7 +18,7 @@ pub fn resolve_host_path(pid: i32, container_path: &std::path::Path) -> PathBuf 
     }
 
     // /proc/<PID>/root/<CONTAINER_PATH>
-    let mut root_path = PathBuf::from(format!("/proc/{}/root", pid));
+    let mut root_path = PathBuf::from(format!("/proc/{pid}/root"));
     let relative_path = container_path.strip_prefix("/").unwrap_or(container_path);
     root_path.push(relative_path);
 
@@ -146,10 +146,7 @@ pub fn find_libraries_all(
 
     // Include system libraries via ldconfig if a substring is provided
     if let Some(substring) = ldconfig_substring {
-        debug!(
-            "Finding system libraries via ldconfig for '{}'...",
-            substring
-        );
+        debug!("Finding system libraries via ldconfig for '{substring}'...");
         if let Ok(system_libs) = find_system_libraries(substring) {
             for path in system_libs {
                 paths.insert(path);
@@ -161,14 +158,12 @@ pub fn find_libraries_all(
     debug!("Scanning processes for libraries matching pattern...");
     if let Ok(procs) = procfs::process::all_processes() {
         for p in procs {
-            let process = match p {
-                Ok(proc) => proc,
-                Err(_) => continue,
+            let Ok(process) = p else {
+                continue;
             };
 
-            let maps = match process.maps() {
-                Ok(m) => m,
-                Err(_) => continue,
+            let Ok(maps) = process.maps() else {
+                continue;
             };
 
             for map in maps {
@@ -209,7 +204,7 @@ pub fn find_system_libraries(substring: &str) -> Result<Vec<String>> {
                     if parts.len() > 1 {
                         let path = parts[1].trim().to_string();
                         if !paths.contains(&path) {
-                            debug!("Found system library via ldconfig: {}", path);
+                            debug!("Found system library via ldconfig: {path}");
                             paths.push(path);
                         }
                     }
@@ -217,7 +212,7 @@ pub fn find_system_libraries(substring: &str) -> Result<Vec<String>> {
             }
         }
         Err(e) => {
-            warn!("Failed to execute ldconfig: {}", e);
+            warn!("Failed to execute ldconfig: {e}");
         }
     }
 
@@ -276,7 +271,7 @@ pub fn find_executables_all() -> HashSet<String> {
         return HashSet::new();
     };
     procs
-        .filter_map(|p| p.ok())
+        .filter_map(std::result::Result::ok)
         .filter_map(|p| get_process_exe(p.pid as u32))
         .collect()
 }
@@ -289,7 +284,7 @@ pub fn get_process_libraries(pid: u32) -> Result<HashSet<String>> {
     let process = match procfs::process::Process::new(pid as i32) {
         Ok(p) => p,
         Err(e) => {
-            debug!("Failed to open process {}: {}", pid, e);
+            debug!("Failed to open process {pid}: {e}");
             return Ok(paths);
         }
     };
@@ -297,7 +292,7 @@ pub fn get_process_libraries(pid: u32) -> Result<HashSet<String>> {
     let maps = match process.maps() {
         Ok(m) => m,
         Err(e) => {
-            debug!("Failed to read maps for process {}: {}", pid, e);
+            debug!("Failed to read maps for process {pid}: {e}");
             return Ok(paths);
         }
     };

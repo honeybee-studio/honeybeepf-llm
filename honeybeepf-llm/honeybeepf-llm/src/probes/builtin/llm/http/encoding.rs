@@ -227,13 +227,10 @@ fn pump_zstd(
     let mut target = [0u8; STREAM_CHUNK];
     let mut consumed = 0;
     loop {
-        let (read, written) = match decoder.decode_from_to(&holdback[consumed..], &mut target) {
-            Ok(pair) => pair,
-            // A split header or block: keep the bytes unless the holdback already exceeds a block.
-            Err(_) => {
-                holdback.drain(..consumed);
-                return holdback.len() <= ZSTD_HOLDBACK_MAX;
-            }
+        // A split header or block: keep the bytes unless the holdback already exceeds a block.
+        let Ok((read, written)) = decoder.decode_from_to(&holdback[consumed..], &mut target) else {
+            holdback.drain(..consumed);
+            return holdback.len() <= ZSTD_HOLDBACK_MAX;
         };
         consumed += read;
         if written > 0 && !out(&target[..written]) {
