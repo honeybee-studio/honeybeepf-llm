@@ -9,7 +9,7 @@ use honeybeepf_llm_core::h2::hpack::{Decoder, Text};
 use honeybeepf_llm_core::types::{LlmDirection, UsageInfo};
 
 use super::super::body::{BackgroundState, is_response_id};
-use super::super::registry::PROVIDER_REGISTRY;
+use super::super::registry::{PROVIDER_REGISTRY, detect_by_shape};
 use super::stream::H2Stream;
 use crate::probes::builtin::llm::processor::{H2Gap, UnparsedReason};
 
@@ -431,14 +431,18 @@ fn match_request(decoder: &mut Decoder, block: &[u8]) -> Option<Matched> {
     let path = std::str::from_utf8(path.as_deref()?).ok()?;
     let base = path.split_once('?').map_or(path, |(p, _)| p);
     match method.as_deref() {
-        Some(b"POST") => {
-            PROVIDER_REGISTRY
-                .find_provider(authority, path)
-                .map(|p| Matched::Create {
-                    path: base.to_string(),
-                    record_only: p.record_only,
-                })
-        }
+        // With shape detection on, a POST to a host no entry lists is still matched by its path alone.
+        Some(b"POST") => PROVIDER_REGISTRY
+            .find_provider(authority, path)
+            .or_else(|| {
+                detect_by_shape()
+                    .then(|| PROVIDER_REGISTRY.find_provider_by_path(path))
+                    .flatten()
+            })
+            .map(|p| Matched::Create {
+                path: base.to_string(),
+                record_only: p.record_only,
+            }),
         Some(b"GET") => responses_poll_id(authority, base).map(|id| Matched::Poll {
             path: base.to_string(),
             id,

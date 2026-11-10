@@ -46,7 +46,7 @@ builtinProbes:
     # Experimental. Record OpenAI/Anthropic/Gemini-compatible calls to hosts not listed below, by request path
     # + response usage shape instead of host (new providers, gateways, in-cluster model servers).
     # A call is kept only when its path matches a built-in pattern (e.g. /chat/completions) and its
-    # response carries that family's usage fields; off records listed hosts only (default). HTTP/1.1 only.
+    # response carries that family's usage fields; off records listed hosts only (default).
     detectByShape: false
     # Pod labels copied onto LLM metrics as target_pod_label_<name> ("." "/" "-" become "_"), e.g. for A/B variants.
     # Each label multiplies the series by its distinct values: list only low-cardinality labels.

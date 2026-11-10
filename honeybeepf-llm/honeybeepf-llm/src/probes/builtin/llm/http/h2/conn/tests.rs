@@ -1,5 +1,7 @@
 #![cfg(test)]
 
+use super::super::super::set_detect_by_shape;
+use super::super::super::test_support::SHAPE_FLAG;
 use super::*;
 use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
 
@@ -63,6 +65,37 @@ fn match_request_detects_provider_posts_and_responses_polls() {
         ))
         .is_none()
     );
+}
+
+/// Shape detection: a POST to a host no provider lists is matched by its LLM path only when the flag is on.
+#[test]
+fn shape_detection_matches_an_unlisted_host_by_path() {
+    let _flag = SHAPE_FLAG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let post = |path: &[u8]| {
+        [
+            lit(b":method", b"POST"),
+            lit(b":authority", b"llm.internal:8443"),
+            lit(b":path", path),
+        ]
+        .concat()
+    };
+    let m = |b: &[u8]| match_request(&mut Decoder::new(), b);
+    let chat = post(b"/openai/v1/chat/completions");
+
+    set_detect_by_shape(false);
+    assert!(m(&chat).is_none());
+
+    set_detect_by_shape(true);
+    assert!(matches!(
+        m(&chat),
+        Some(Matched::Create { path, record_only: false }) if path == "/openai/v1/chat/completions"
+    ));
+    // A path that is not an LLM pattern stays unmatched even with the flag on.
+    assert!(m(&post(b"/api/data")).is_none());
+
+    set_detect_by_shape(false);
 }
 
 fn frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
