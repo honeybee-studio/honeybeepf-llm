@@ -384,9 +384,13 @@ impl ProtocolParser for Http11Parser {
 
         let trimmed = byte_utils::trim_trailing_whitespace(&decompressed);
 
-        // Streamed JSON arrays (Gemini streamGenerateContent without alt=sse): the first element is not the final usage.
+        // Streamed JSON arrays (Gemini streamGenerateContent without alt=sse): usage is in the last
+        // element, read the same way as past the buffer limit.
         let is_json_array = trimmed.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'[');
-        if is_json_array || !trimmed.ends_with(b"}") {
+        if is_json_array {
+            return super::json_ends::array_tail_usage(trimmed);
+        }
+        if !trimmed.ends_with(b"}") {
             return None;
         }
 

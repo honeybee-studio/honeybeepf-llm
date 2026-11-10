@@ -496,3 +496,22 @@ fn json_array_stream_is_not_parsed_from_first_element() {
     let info = Http11Parser.parse_response(resp.as_bytes());
     assert_eq!(tokens(info), None);
 }
+
+#[test]
+fn json_array_uses_the_last_elements_usage() {
+    // Gemini streamGenerateContent without alt=sse: a closed array whose last element is the final usage.
+    let body = concat!(
+        "[{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"a\"}]}}],",
+        "\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1}},",
+        "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"b\"}]},\"finishReason\":\"STOP\"}],",
+        "\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":4}}]",
+    );
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    assert_eq!(
+        tokens(Http11Parser.parse_response(resp.as_bytes())),
+        Some((11, 4))
+    );
+}
