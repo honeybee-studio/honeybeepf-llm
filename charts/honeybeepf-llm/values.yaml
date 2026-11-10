@@ -114,6 +114,8 @@ securityContext:
   capabilities:
     drop:
       - ALL
+    # NET_ADMIN and SYS_RESOURCE are only needed on older kernels: drop NET_ADMIN if every node runs 6.9 or
+    # later, and SYS_RESOURCE if every node runs 5.11 or later (set this list in your values; see docs/install.md).
     add:
       - BPF         # load eBPF programs and maps
       - PERFMON     # uprobe/tracepoint/fentry attach and bpf_probe_read_user
