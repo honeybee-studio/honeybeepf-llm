@@ -74,7 +74,7 @@ echo "agent capabilities: ${CHART_CAPS//$'\n'/ }"
 cat > /tmp/capexec.py <<'PY'
 import ctypes, os, sys
 # Capability numbers from linux/capability.h; a name the chart adds must be listed here.
-NUMBERS = {"NET_ADMIN": 12, "SYS_PTRACE": 19, "SYS_ADMIN": 21, "PERFMON": 38, "BPF": 39}
+NUMBERS = {"NET_ADMIN": 12, "SYS_PTRACE": 19, "SYS_ADMIN": 21, "SYS_RESOURCE": 24, "PERFMON": 38, "BPF": 39}
 PR_CAPBSET_DROP = 24
 split = sys.argv.index("--")
 keep = {NUMBERS[name] for name in sys.argv[1:split]}
