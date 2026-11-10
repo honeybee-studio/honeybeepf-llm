@@ -56,7 +56,7 @@ commands, required capabilities, resources and uninstall are in [docs/install.md
 
 | Dimension | Covered |
 |---|---|
-| Providers | 11 built-in APIs: OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI, Meta — JSON, streaming (SSE), cache tokens |
+| Providers | 11 built-in APIs: OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI, Meta — JSON, streaming (SSE), cache tokens; other OpenAI/Anthropic/Gemini-compatible hosts by request shape (experimental, off by default) |
 | Runtimes | Python, Node.js, curl, anything linked to OpenSSL `libssl` — not Go `crypto/tls`, rustls, JSSE, GnuTLS, NSS |
 | Protocols | HTTP/1.1 and HTTP/2 — not WebSocket, not HTTP/3 (QUIC) |
 | Transport | HTTPS through OpenSSL; in-cluster plain HTTP (Ollama, vLLM) on opt-in |
