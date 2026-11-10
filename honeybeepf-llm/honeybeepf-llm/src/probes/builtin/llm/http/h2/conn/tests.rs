@@ -434,7 +434,7 @@ fn non_llm_midjoin_connections_stay_within_a_small_buffer() {
         assert_eq!((conn.open_streams(), conn.buffered), (0, 0));
     }
     // A JSON-looking (non-usage) body well over the per-connection mid-join cap is held to it, not to the
-    // 32 MiB connection budget: the over-cap stream drops its buffer, so little stays buffered.
+    // 32 MiB connection budget: the over-cap stream keeps only its ends, so little stays buffered.
     let chunk = vec![b' '; 16_000];
     let mut body = {
         let mut head = vec![b'{'];
