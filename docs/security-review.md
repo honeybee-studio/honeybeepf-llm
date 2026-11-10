@@ -199,7 +199,8 @@ either: the uprobes run synchronously in the calling thread on every `SSL_read`/
 whatever state the agent is in (section 4 has the measured cost). If the agent cannot keep up, the kernel drops events
 at the ring buffer (`reserve_fail`) rather than slowing the application, and those calls go unrecorded. With plaintext
 capture on, `connect4` also runs on every IPv4 connect on the node and `sock_ops` on every TCP connection setup,
-returning at once for destinations that are not watched.
+returning at once for destinations that are not watched. On kernel 7.0 that measured about 60 ns per run of each, about
+0.6 µs for a loopback connection, and no change in connection throughput under a connect/close load.
 
 - **Crash or OOM-kill:** the kubelet restarts the container; metrics stop until it is back. Nothing is pinned, so the
   programs detach when the process exits.
