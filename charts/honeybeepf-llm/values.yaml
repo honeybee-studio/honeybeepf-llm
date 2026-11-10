@@ -108,6 +108,11 @@ customProbes:
   tracepoints: []
 
 securityContext:
+  # The agent opens other containers' libssl through /proc/<pid>/root. The containerd AppArmor profile on Ubuntu
+  # nodes denies that, and then only pods sharing the agent image's libssl are recorded. Kubernetes before 1.30 gets
+  # the same setting as the pod annotation.
+  appArmorProfile:
+    type: Unconfined
   readOnlyRootFilesystem: true
   seccompProfile:
     type: RuntimeDefault
