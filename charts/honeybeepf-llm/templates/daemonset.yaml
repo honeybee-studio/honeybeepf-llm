@@ -71,6 +71,19 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 15
           env:
+            {{- with .Values.output.otlp.headersSecret }}
+            {{- if .name }}
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .name }}
+                  key: {{ .key }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.output.otlp.caSecret }}
+            - name: OTEL_EXPORTER_OTLP_CERTIFICATE
+              value: /etc/honeybeepf-llm/otlp-ca/ca.crt
+            {{- end }}
             - name: K8S_NODE_NAME
               valueFrom:
                 fieldRef:
@@ -94,6 +107,11 @@ spec:
 
           volumeMounts:
             # tracefs for the exec-watch tracepoint; with neither tracefs path the agent records nothing
+            {{- if .Values.output.otlp.caSecret }}
+            - mountPath: /etc/honeybeepf-llm/otlp-ca
+              name: otlp-ca
+              readOnly: true
+            {{- end }}
             - mountPath: /sys/kernel/tracing
               name: tracefs
               readOnly: true
@@ -115,6 +133,14 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
       volumes:
+        {{- if .Values.output.otlp.caSecret }}
+        - name: otlp-ca
+          secret:
+            secretName: {{ .Values.output.otlp.caSecret }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
         - name: tracefs
           hostPath:
             path: /sys/kernel/tracing
