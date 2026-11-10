@@ -1,13 +1,17 @@
 {
-  "version": "2026-11-09",
+  "version": "2026-11-10",
   "providers": [
     {
       "name": "anthropic",
       "source": "https://platform.claude.com/docs/en/about-claude/pricing",
-      "checked": "2026-10-26",
+      "checked": "2026-11-10",
       "models": {
+        "claude-fable-5-2": {"input": 8, "output": 40, "cache_read": 0.2, "cache_write": 10, "cache_write_long": 16},
+        "claude-mythos-5-2": {"input": 8, "output": 40, "cache_read": 0.2, "cache_write": 10, "cache_write_long": 16},
         "claude-fable-5-1": {"input": 10, "output": 50, "cache_read": 0.25, "cache_write": 12.5, "cache_write_long": 20},
+        "claude-mythos-5-1": {"input": 10, "output": 50, "cache_read": 0.25, "cache_write": 12.5, "cache_write_long": 20},
         "claude-fable-5": {"input": 10, "output": 50, "cache_read": 1, "cache_write": 12.5, "cache_write_long": 20},
+        "claude-mythos-5": {"input": 10, "output": 50, "cache_read": 1, "cache_write": 12.5, "cache_write_long": 20},
         "claude-opus-5-5": {"input": 4, "output": 20, "cache_read": 0.2, "cache_write": 5, "cache_write_long": 8},
         "claude-opus-5": {"input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25, "cache_write_long": 10},
         "claude-opus-4-8": {"input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25, "cache_write_long": 10},
@@ -23,13 +27,19 @@
         "claude-haiku-4-5": {"input": 1, "output": 5, "cache_read": 0.1, "cache_write": 1.25, "cache_write_long": 2}
       },
       "speed": {
+        "claude-fable-5-2": {"fast": 2},
+        "claude-mythos-5-2": {"fast": 2},
         "claude-opus-5-5": {"fast": 2},
         "claude-opus-5": {"fast": 2},
         "claude-opus-4-8": {"fast": 2}
       },
       "geo": {
+        "claude-fable-5-2": {"us": 1.1},
+        "claude-mythos-5-2": {"us": 1.1},
         "claude-fable-5-1": {"us": 1.1},
+        "claude-mythos-5-1": {"us": 1.1},
         "claude-fable-5": {"us": 1.1},
+        "claude-mythos-5": {"us": 1.1},
         "claude-opus-5-5": {"us": 1.1},
         "claude-opus-5": {"us": 1.1},
         "claude-opus-4-8": {"us": 1.1},
