@@ -135,6 +135,24 @@ pub(crate) mod test_support {
         out
     }
 
+    /// A Gemini streamGenerateContent array (no alt=sse) of about `size` bytes: filler elements with
+    /// no usage, then a last element carrying the final usageMetadata (prompt 11, candidates 4).
+    pub(super) fn gemini_array(size: usize) -> String {
+        let filler = format!(
+            r#"{{"candidates":[{{"content":{{"parts":[{{"text":"{}"}}]}}}}]}}"#,
+            "x".repeat(2048)
+        );
+        let last = r#"{"candidates":[{"content":{"parts":[{"text":"done"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":4,"thoughtsTokenCount":0},"modelVersion":"gemini-test"}"#;
+        let mut body = String::from("[");
+        while body.len() + last.len() + 2 < size {
+            body.push_str(&filler);
+            body.push(',');
+        }
+        body.push_str(last);
+        body.push(']');
+        body
+    }
+
     /// Usage Gemini sends when nothing was generated: no `candidatesTokenCount`.
     pub(super) const GEMINI_ZERO_USAGE: &str = "\"usageMetadata\":{\"promptTokenCount\":1,\"totalTokenCount\":1,\
         \"promptTokensDetails\":[{\"modality\":\"TEXT\",\"tokenCount\":1}],\"serviceTier\":\"standard\"}";

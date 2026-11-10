@@ -17,11 +17,7 @@ const MAX_LINE: usize = 4096;
 /// A JSON response too large to buffer, with its first and last body bytes and where its body ends.
 pub struct JsonEnds {
     walk: BodyWalk,
-    head: Vec<u8>,
-    tail: Vec<u8>,
-    /// The body is a JSON array (Gemini streamed without alt=sse): usage is in its last element, read
-    /// from the tail alone, not from root members at both ends.
-    array: bool,
+    ends: Ends,
     /// Read once when the body ends; boxed so `PastLimit::Json` stays small (clippy large_enum_variant).
     pub usage: Option<Box<UsageInfo>>,
 }
@@ -37,49 +33,77 @@ impl JsonEnds {
         };
         let mut ends = Self {
             walk: BodyWalk::new(length),
-            head: Vec::with_capacity(HEAD_KEEP),
-            tail: Vec::with_capacity(2 * TAIL_KEEP),
-            array: false,
+            ends: Ends::new(),
             usage: None,
         };
         // Only ever started past the 16 MB buffer, so the body never ends in this first feed; the
         // dechunked head then tells a JSON array (Gemini streamed without alt=sse) from an object.
         let followed = ends.feed(body);
-        ends.array = match ends.head.trim_ascii_start().first() {
-            Some(b'[') => true,
-            Some(b'{') => false,
-            _ => return None,
-        };
-        followed.then_some(ends)
+        (followed && ends.ends.read_kind()).then_some(ends)
     }
 
     /// Follows more body bytes; false once the framing broke or the body ended without usage at its ends.
     pub fn feed(&mut self, data: &[u8]) -> bool {
-        let Self {
-            walk, head, tail, ..
-        } = self;
-        let followed = walk.feed(data, &mut |data| {
-            let room = HEAD_KEEP.saturating_sub(head.len());
-            head.extend_from_slice(&data[..room.min(data.len())]);
-            // Old bytes go whenever new ones are cut, so the tail stays one piece of the body.
-            let cut = data.len().saturating_sub(TAIL_KEEP);
-            if cut > 0 {
-                tail.clear();
-            } else if tail.len() + data.len() > 2 * TAIL_KEEP {
-                tail.drain(..tail.len() - TAIL_KEEP);
-            }
-            tail.extend_from_slice(&data[cut..]);
-        });
+        let Self { walk, ends, .. } = self;
+        let followed = walk.feed(data, &mut |data| ends.keep(data));
         if self.walk.ended() && self.usage.is_none() {
-            self.usage = self.read_usage().map(Box::new);
+            self.usage = self.ends.usage().map(Box::new);
             return self.usage.is_some();
         }
         followed
     }
+}
+
+/// The first and last bytes of a JSON body too large to buffer, enough to read its usage at the end.
+pub(super) struct Ends {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    /// The body is a JSON array (Gemini streamed without alt=sse): usage is in its last element, read
+    /// from the tail alone, not from root members at both ends.
+    array: bool,
+}
+
+impl Ends {
+    pub(super) fn new() -> Self {
+        Self {
+            head: Vec::with_capacity(HEAD_KEEP),
+            tail: Vec::with_capacity(2 * TAIL_KEEP),
+            array: false,
+        }
+    }
+
+    /// Keeps the next body bytes: the first `HEAD_KEEP` and the last `TAIL_KEEP` of all fed so far.
+    pub(super) fn keep(&mut self, data: &[u8]) {
+        let room = HEAD_KEEP.saturating_sub(self.head.len());
+        self.head.extend_from_slice(&data[..room.min(data.len())]);
+        // Old bytes go whenever new ones are cut, so the tail stays one piece of the body.
+        let cut = data.len().saturating_sub(TAIL_KEEP);
+        if cut > 0 {
+            self.tail.clear();
+        } else if self.tail.len() + data.len() > 2 * TAIL_KEEP {
+            self.tail.drain(..self.tail.len() - TAIL_KEEP);
+        }
+        self.tail.extend_from_slice(&data[cut..]);
+    }
+
+    /// Reads from the kept head whether the body is a JSON object or array; false for anything else.
+    pub(super) fn read_kind(&mut self) -> bool {
+        self.array = match self.head.trim_ascii_start().first() {
+            Some(b'[') => true,
+            Some(b'{') => false,
+            _ => return false,
+        };
+        true
+    }
+
+    /// Bytes kept, at most `HEAD_KEEP + 2 * TAIL_KEEP` however long the body.
+    pub(super) fn held(&self) -> usize {
+        self.head.len() + self.tail.len()
+    }
 
     /// Usage from the root members whole in the kept ends; the end wins a key both have. A JSON array
     /// instead carries usage in its last element, read from the tail alone.
-    fn read_usage(&self) -> Option<UsageInfo> {
+    pub(super) fn usage(&self) -> Option<UsageInfo> {
         let tail = &self.tail[self.tail.len().saturating_sub(TAIL_KEEP)..];
         if self.array {
             return array_tail_usage(tail);
@@ -266,6 +290,7 @@ fn trailing_members(tail: &[u8]) -> Option<Map<String, Value>> {
 mod tests {
     use super::super::body::parse_response_json;
     use super::super::chunk_cases::{Walked, chunk_cases};
+    use super::super::test_support::gemini_array;
     use super::*;
 
     #[test]
@@ -318,7 +343,7 @@ mod tests {
         );
         (
             ends.usage.map(|u| *u),
-            ends.head.capacity() + ends.tail.capacity(),
+            ends.ends.head.capacity() + ends.ends.tail.capacity(),
         )
     }
 
@@ -349,7 +374,7 @@ mod tests {
             let first = [head.as_bytes(), &body[..short]].concat();
             let mut ends = JsonEnds::start(&first).expect("JSON object");
             assert!(ends.feed(&body[short..]), "{short}");
-            assert!(body.ends_with(&ends.tail), "{short}");
+            assert!(body.ends_with(&ends.ends.tail), "{short}");
         }
     }
 
@@ -391,24 +416,6 @@ mod tests {
         }
     }
 
-    /// A Gemini streamGenerateContent array (no alt=sse) of about `size` bytes: filler elements with
-    /// no usage, then a last element carrying the final usageMetadata (prompt 11, candidates 4).
-    fn gemini_array(size: usize) -> String {
-        let filler = format!(
-            r#"{{"candidates":[{{"content":{{"parts":[{{"text":"{}"}}]}}}}]}}"#,
-            "x".repeat(2048)
-        );
-        let last = r#"{"candidates":[{"content":{"parts":[{"text":"done"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":4,"thoughtsTokenCount":0},"modelVersion":"gemini-test"}"#;
-        let mut body = String::from("[");
-        while body.len() + last.len() + 2 < size {
-            body.push_str(&filler);
-            body.push(',');
-        }
-        body.push_str(last);
-        body.push(']');
-        body
-    }
-
     #[test]
     fn a_json_array_past_the_limit_records_its_last_element() {
         for size in [20 << 20, 40 << 20] {
@@ -433,7 +440,7 @@ mod tests {
             );
             // Only the two ends are kept, whatever the body size.
             assert_eq!(
-                ends.head.capacity() + ends.tail.capacity(),
+                ends.ends.head.capacity() + ends.ends.tail.capacity(),
                 HEAD_KEEP + 2 * TAIL_KEEP
             );
         }
