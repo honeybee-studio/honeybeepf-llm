@@ -80,6 +80,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Keyless cosign signing: the job's OIDC token is the signing identity.
+      id-token: write
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
@@ -111,6 +113,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
@@ -120,7 +123,16 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: ${{ env.BUILD_CACHE }}
-          provenance: false
+          provenance: mode=max
+          sbom: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE@$DIGEST"
 
   chart:
     name: Push chart
@@ -129,6 +141,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
@@ -141,10 +154,16 @@ jobs:
           GHCR_USER: ${{ github.actor }}
         run: printf '%s' "$GHCR_TOKEN" | helm registry login ghcr.io -u "$GHCR_USER" --password-stdin
 
-      - name: Package and push chart
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Package, push and sign chart
         run: |
           helm package charts/honeybeepf-llm --version "$VERSION" --app-version "$VERSION"
-          helm push "honeybeepf-llm-$VERSION.tgz" "$CHART_REPO"
+          helm push "honeybeepf-llm-$VERSION.tgz" "$CHART_REPO" 2>&1 | tee push.log
+          digest=$(sed -n 's/^Digest: //p' push.log)
+          test -n "$digest"
+          cosign sign --yes "${CHART_REPO#oci://}/honeybeepf-llm@$digest"
 
   release:
     name: GitHub release
@@ -161,6 +180,8 @@ jobs:
           printf '%s\n' \
             "Image: \`$IMAGE:$VERSION\` (also \`${VERSION%.*}\`), linux/amd64 and linux/arm64" \
             "" \
-            "Chart: \`helm install honeybeepf-llm $CHART_REPO/honeybeepf-llm --version $VERSION\`" >notes.md
+            "Chart: \`helm install honeybeepf-llm $CHART_REPO/honeybeepf-llm --version $VERSION\`" \
+            "" \
+            "The image and the chart are signed with keyless cosign; see docs/install.md to verify them." >notes.md
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "honeybeepf-llm $VERSION" --notes-file notes.md --generate-notes

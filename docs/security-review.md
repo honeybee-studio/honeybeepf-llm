@@ -21,7 +21,7 @@ private vulnerability reporting).
 | What leaves the node? | OTLP metrics over plaintext gRPC, and the container's log lines; never request or response bodies (section 3). |
 | Listening ports? | None. |
 | In the request path? | No proxy, but the uprobes run in the application's own thread on every `SSL_read`/`SSL_write` (section 5). |
-| Signed images? | No. No signing, no SBOM and no build provenance (section 7). |
+| Signed images? | Yes, from the first build after signing started: keyless cosign signatures, an SBOM and build provenance on the images, and a signed release chart (section 7). |
 
 ## 1. Kernel hooks
 
@@ -269,9 +269,13 @@ returning at once for destinations that are not watched. On kernel 7.0 that meas
   the crate and chart (`release.yml`). The same public repository also holds the `pr-<number>` images and the
   `buildcache` tag, so deploy a release tag or a digest. The chart is published to
   `oci://ghcr.io/honeybee-studio/charts`.
-- **No signing, SBOM or provenance.** Build provenance is disabled (`provenance: false` in both workflows), and neither
-  the images nor the Helm chart are signed; no workflow produces an SBOM. A deployer who needs a signed, attested image
-  should build and sign it from the source.
+- **Signing, SBOM and provenance.** The image jobs in `docker-publish.yml` and `release.yml` attach an SBOM and build
+  provenance (`sbom: true`, `provenance: mode=max`) to every image they push and sign it by digest with keyless cosign,
+  using the job's GitHub OIDC token (`id-token: write`, granted only to those jobs and the chart job); `release.yml`
+  signs the chart it pushes the same way. The signing identity is the workflow file on this repository, so `cosign
+  verify --certificate-identity-regexp '^https://github.com/honeybee-studio/honeybeepf-llm/\.github/workflows/'
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com` checks an image (`docs/install.md` has the
+  commands). Images and charts published before this was added are not signed.
 - **Binary fixture provenance.** `ci/check-binary-provenance.sh`, run from `docker-publish.yml`, checks that every
   binary test fixture in the repository carries a documented sha256 and regeneration command. This is a check on the
   source tree, not on the image.
@@ -292,4 +296,5 @@ These are open and listed here so a reviewer does not have to find them:
 - Userspace memory has no node-wide cap, so heavy concurrent traffic can OOM-kill the agent (section 4).
 - OTLP is sent as plaintext gRPC, without TLS or authentication (section 3).
 - `customProbes` in `values.yaml` is accepted but does nothing (section 1).
-- Images and the chart are not signed, there is no SBOM, and CI does not scan the image (section 7).
+- CI does not scan the published image for vulnerabilities, and images published before signing started are unsigned
+  (section 7).
