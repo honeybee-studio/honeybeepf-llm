@@ -119,6 +119,7 @@ securityContext:
       - PERFMON     # uprobe/tracepoint/fentry attach and bpf_probe_read_user
       - SYS_ADMIN   # uprobe perf_event_open: Ubuntu 7.0 denies it with PERFMON alone (EACCES at paranoid 2-4; https://bugs.launchpad.net/ubuntu/+source/linux/+bug/2131046)
       - SYS_PTRACE  # cross-pod /proc access for libssl discovery (blocked by container LSM profiles + yama on all major K8s distros)
+      - NET_ADMIN   # create the plaintext sockhash map, made at load even with plaintext off (kernels before 6.9 refuse it without NET_ADMIN)
 
 resources:
   limits:
