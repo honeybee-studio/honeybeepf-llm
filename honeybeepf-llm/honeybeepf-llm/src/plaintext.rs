@@ -15,7 +15,7 @@ use honeybeepf_llm_core::providers::ProviderRegistry;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{Api, Client, api::ListParams};
-use log::{debug, warn};
+use log::{debug, info, warn};
 
 use crate::probes::{IdentityResolver, shutdown_flag};
 
@@ -28,6 +28,16 @@ const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 
 /// Upper bound for the fixed-size BPF map; beyond it extra endpoints are dropped with a warning.
 pub const MAX_ENDPOINTS: usize = 8192;
+/// Where the cgroup v2 root may be mounted, in order of preference. The host's tree under `/host` (the chart
+/// mounts the host root there) comes first: a pod has its own cgroup namespace, so its own `/sys/fs/cgroup`
+/// is only the agent pod's cgroup and a program attached there sees no other pod's sockets. Unified before
+/// hybrid's `unified` subdirectory.
+const CGROUP_V2_ROOTS: [&str; 4] = [
+    "/host/sys/fs/cgroup",
+    "/host/sys/fs/cgroup/unified",
+    "/sys/fs/cgroup",
+    "/sys/fs/cgroup/unified",
+];
 
 /// One plaintext target from a source: a host and the plain-HTTP port it serves.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,24 +279,20 @@ impl EndpointSink for MapEndpointSink {
     }
 }
 
-/// The cgroup v2 hierarchy root: unified (`/sys/fs/cgroup`), else hybrid's (`/sys/fs/cgroup/unified`).
+/// The cgroup v2 hierarchy root to attach at: the first of `CGROUP_V2_ROOTS` mounted as cgroup2.
 fn cgroup_v2_root_from(mounts: &str) -> Option<PathBuf> {
-    let mut hybrid = None;
-    for line in mounts.lines() {
-        let mut f = line.split_whitespace();
-        let (Some(_src), Some(mount), Some(fstype)) = (f.next(), f.next(), f.next()) else {
-            continue;
-        };
-        if fstype == "cgroup2" {
-            if mount == "/sys/fs/cgroup" {
-                return Some(PathBuf::from(mount));
-            }
-            if mount == "/sys/fs/cgroup/unified" {
-                hybrid = Some(PathBuf::from(mount));
-            }
-        }
-    }
-    hybrid
+    let v2: Vec<&str> = mounts
+        .lines()
+        .filter_map(|line| {
+            let mut f = line.split_whitespace();
+            let (_src, mount, fstype) = (f.next()?, f.next()?, f.next()?);
+            (fstype == "cgroup2").then_some(mount)
+        })
+        .collect();
+    CGROUP_V2_ROOTS
+        .iter()
+        .find(|root| v2.contains(root))
+        .map(PathBuf::from)
 }
 
 fn cgroup_v2_root() -> Option<PathBuf> {
@@ -321,6 +327,7 @@ pub async fn start(
     }
     let cgroup = cgroup_v2_root().context("no cgroup v2 hierarchy (pure cgroup v1 node)")?;
     let cgroup_fd = std::fs::File::open(&cgroup)?;
+    info!("Plaintext programs attach at cgroup {}", cgroup.display());
 
     // Verify every program before attaching any: a verifier rejection then leaves nothing attached.
     {

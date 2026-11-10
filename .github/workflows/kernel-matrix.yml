@@ -7,12 +7,16 @@ on:
       - '.github/workflows/kernel-matrix.yml'
       - 'ci/**'
       - 'honeybeepf-llm/**'
+      # smoke.sh runs the agent with the chart's capabilities
+      - 'charts/honeybeepf-llm/values.yaml'
   push:
     branches: [main]
     paths:
       - '.github/workflows/kernel-matrix.yml'
       - 'ci/**'
       - 'honeybeepf-llm/**'
+      # smoke.sh runs the agent with the chart's capabilities
+      - 'charts/honeybeepf-llm/values.yaml'
   workflow_dispatch:
 
 permissions:
