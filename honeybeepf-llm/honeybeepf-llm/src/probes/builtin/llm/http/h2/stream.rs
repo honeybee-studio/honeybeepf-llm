@@ -133,6 +133,13 @@ impl H2Stream {
         matches!(self.status, Some(s) if (200..300).contains(&s))
     }
 
+    /// Whether the response SSE stream ended on a provider error event, so its end counts as a stream
+    /// error rather than a usage-absent 2xx. Only the unencoded streaming cursor sees it live; an
+    /// encoded SSE body is parsed whole at the end, where its usage is read instead.
+    pub(super) fn errored(&self) -> bool {
+        matches!(&self.body, Body::Streaming(cursor) if cursor.errored())
+    }
+
     /// Whether the body passed a memory cap, so an end with no usage counts as a too-large response.
     pub(super) fn over_limit(&self) -> bool {
         matches!(

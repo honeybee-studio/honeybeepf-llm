@@ -26,6 +26,12 @@ impl ResponseProgress {
     pub fn take_background(&mut self) -> Option<BackgroundState> {
         self.background.take()
     }
+
+    /// The response's SSE stream ended on a provider error event, so a call left unrecorded is a
+    /// stream error rather than a generic no-usage end.
+    pub fn stream_errored(&self) -> bool {
+        self.sse.errored()
+    }
 }
 
 #[cfg(test)]

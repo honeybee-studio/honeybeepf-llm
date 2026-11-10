@@ -38,8 +38,9 @@ fn read_lines(cursor: &mut SseCursor, bytes: &[u8]) {
             cursor.ended = true;
             cursor.done = true;
         } else if line == "event: error" {
-            // A Gemini Interactions error event aborts the call with no usage; later events on the
-            // stream are no longer trusted, so nothing is recorded (the call is counted unparsed).
+            // Gemini Interactions, Anthropic Messages and OpenAI Responses all end a failed stream with
+            // an `event: error` frame on an otherwise 200 response; later events are no longer trusted,
+            // so nothing is recorded and the call is counted as a stream error.
             cursor.aborted = true;
         } else if !cursor.ended && SSE_END_MARKERS.iter().any(|m| line.contains(m)) {
             cursor.ended = true;
@@ -150,6 +151,12 @@ impl SseCursor {
     /// Bytes held of a line that has not ended yet.
     pub(super) fn partial_len(&self) -> usize {
         self.partial.len()
+    }
+
+    /// The stream ended on a provider `event: error` frame, so the call is counted as a stream error
+    /// rather than a generic no-usage end.
+    pub(super) fn errored(&self) -> bool {
+        self.aborted
     }
 
     /// The merged usage once an end marker or `[DONE]` has been read.
