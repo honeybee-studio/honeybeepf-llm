@@ -19,12 +19,15 @@ pub struct JsonEnds {
     walk: BodyWalk,
     head: Vec<u8>,
     tail: Vec<u8>,
+    /// The body is a JSON array (Gemini streamed without alt=sse): usage is in its last element, read
+    /// from the tail alone, not from root members at both ends.
+    array: bool,
     /// Read once when the body ends; boxed so `PastLimit::Json` stays small (clippy large_enum_variant).
     pub usage: Option<Box<UsageInfo>>,
 }
 
 impl JsonEnds {
-    /// Takes over a buffered HTTP/1.1 response whose body is a JSON object with a framed end.
+    /// Takes over a buffered HTTP/1.1 response whose body is a JSON object or array with a framed end.
     pub fn start(buffer: &[u8]) -> Option<Self> {
         let (framing, body) = h1::plain_body(buffer)?;
         let length = match framing {
@@ -36,11 +39,18 @@ impl JsonEnds {
             walk: BodyWalk::new(length),
             head: Vec::with_capacity(HEAD_KEEP),
             tail: Vec::with_capacity(2 * TAIL_KEEP),
+            array: false,
             usage: None,
         };
-        // A JSON array (Gemini streamed without alt=sse) has no single usage at its end.
-        let object = ends.feed(body) && ends.head.trim_ascii_start().first() == Some(&b'{');
-        object.then_some(ends)
+        // Only ever started past the 16 MB buffer, so the body never ends in this first feed; the
+        // dechunked head then tells a JSON array (Gemini streamed without alt=sse) from an object.
+        let followed = ends.feed(body);
+        ends.array = match ends.head.trim_ascii_start().first() {
+            Some(b'[') => true,
+            Some(b'{') => false,
+            _ => return None,
+        };
+        followed.then_some(ends)
     }
 
     /// Follows more body bytes; false once the framing broke or the body ended without usage at its ends.
@@ -67,15 +77,61 @@ impl JsonEnds {
         followed
     }
 
-    /// Usage from the root members whole in the kept ends; the end wins a key both have.
+    /// Usage from the root members whole in the kept ends; the end wins a key both have. A JSON array
+    /// instead carries usage in its last element, read from the tail alone.
     fn read_usage(&self) -> Option<UsageInfo> {
         let tail = &self.tail[self.tail.len().saturating_sub(TAIL_KEEP)..];
+        if self.array {
+            return array_tail_usage(tail);
+        }
         let mut root = trailing_members(tail).unwrap_or_default();
         for (key, value) in leading_members(&self.head).unwrap_or_default() {
             root.entry(key).or_insert(value);
         }
         parse_response_json_value(&Value::Object(root))
     }
+}
+
+/// Usage from the last complete object of a JSON array body (Gemini streamed without alt=sse): the
+/// final element carries the authoritative usage. `bytes` must end at the array's close.
+pub(super) fn array_tail_usage(bytes: &[u8]) -> Option<UsageInfo> {
+    let object = last_array_object(bytes)?;
+    parse_response_json_value(&Value::Object(object))
+}
+
+/// The last `{...}` element of a JSON array, read back from its close brace to its matching open; None
+/// if the array is not closed (truncated) or that open is not within `bytes` (the last element
+/// outgrew the kept tail). Only a closed array's last element is the final, authoritative usage.
+fn last_array_object(bytes: &[u8]) -> Option<Map<String, Value>> {
+    let close = bytes.iter().rposition(|b| !b.is_ascii_whitespace())?;
+    if bytes[close] != b']' {
+        return None;
+    }
+    let end = bytes[..close].iter().rposition(|&b| b == b'}')?;
+    let (mut depth, mut in_str, mut start) = (0usize, false, None);
+    for i in (0..=end).rev() {
+        match bytes[i] {
+            b'"' => {
+                // Read back from a known end, a quote is escaped iff an odd run of backslashes precedes it.
+                let slashes = bytes[..i].iter().rev().take_while(|&&c| c == b'\\').count();
+                if slashes == i {
+                    return None; // the run may go on before the kept bytes
+                }
+                in_str ^= slashes % 2 == 0;
+            }
+            _ if in_str => {}
+            b'}' | b']' => depth += 1,
+            b'{' | b'[' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    start = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    object_lossy(&bytes[start?..=end])
 }
 
 /// Chunk rules for a body followed past the buffer: strict, so any framing doubt breaks the walk.
@@ -333,5 +389,62 @@ mod tests {
         for bytes in broken {
             assert!(!BodyWalk::new(None).feed(bytes, &mut |_| {}), "{bytes:?}");
         }
+    }
+
+    /// A Gemini streamGenerateContent array (no alt=sse) of about `size` bytes: filler elements with
+    /// no usage, then a last element carrying the final usageMetadata (prompt 11, candidates 4).
+    fn gemini_array(size: usize) -> String {
+        let filler = format!(
+            r#"{{"candidates":[{{"content":{{"parts":[{{"text":"{}"}}]}}}}]}}"#,
+            "x".repeat(2048)
+        );
+        let last = r#"{"candidates":[{"content":{"parts":[{"text":"done"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":4,"thoughtsTokenCount":0},"modelVersion":"gemini-test"}"#;
+        let mut body = String::from("[");
+        while body.len() + last.len() + 2 < size {
+            body.push_str(&filler);
+            body.push(',');
+        }
+        body.push_str(last);
+        body.push(']');
+        body
+    }
+
+    #[test]
+    fn a_json_array_past_the_limit_records_its_last_element() {
+        for size in [20 << 20, 40 << 20] {
+            let body = gemini_array(size);
+            assert!(body.len() > 16 << 20, "{}", body.len());
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let (first, rest) = resp.as_bytes().split_at(resp.len() / 10);
+            let mut ends = JsonEnds::start(first).expect("JSON array");
+            let reads = rest.chunks(16384).collect::<Vec<_>>();
+            let (last, most) = reads.split_last().expect("reads");
+            assert!(most.iter().all(|read| ends.feed(read)));
+            assert_eq!(ends.feed(last), ends.usage.is_some());
+            // The last element's usage (not any filler's: they carry none).
+            assert_eq!(
+                ends.usage
+                    .as_deref()
+                    .map(|u| (u.prompt_tokens, u.completion_tokens)),
+                Some((11, 4))
+            );
+            // Only the two ends are kept, whatever the body size.
+            assert_eq!(
+                ends.head.capacity() + ends.tail.capacity(),
+                HEAD_KEEP + 2 * TAIL_KEEP
+            );
+        }
+    }
+
+    #[test]
+    fn last_array_object_needs_a_closed_array() {
+        // A truncated array (no closing `]`) is never parsed: its last-seen element may not be final.
+        assert!(last_array_object(br#"[{"usageMetadata":{"promptTokenCount":9}}"#).is_none());
+        // A closed array yields its last element's object.
+        let obj = last_array_object(br#"[{"a":1},{"usageMetadata":{"promptTokenCount":9}}]"#);
+        assert!(obj.is_some_and(|o| o.contains_key("usageMetadata")));
     }
 }
