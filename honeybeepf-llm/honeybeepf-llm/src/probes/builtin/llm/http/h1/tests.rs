@@ -1,5 +1,5 @@
 use super::super::chunk_cases;
-use super::super::test_support::tokens;
+use super::super::test_support::{SHAPE_FLAG, tokens};
 use super::*;
 
 #[test]
@@ -166,6 +166,9 @@ fn shape_detection_gates_unknown_host_by_path_then_usage() {
         )
     };
 
+    let _flag = SHAPE_FLAG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Off (default): the unlisted-host connection is foreign (skipped) and the request is not detected.
     super::super::set_detect_by_shape(false);
     assert!(Http11Parser::has_foreign_host(head));

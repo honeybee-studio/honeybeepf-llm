@@ -64,7 +64,12 @@ pub trait ProtocolParser: Send + Sync {
 
 #[cfg(test)]
 pub(crate) mod test_support {
+    use std::sync::Mutex;
+
     use super::*;
+
+    /// Held by tests that flip the process-wide shape-detection flag, so they do not race each other.
+    pub(super) static SHAPE_FLAG: Mutex<()> = Mutex::new(());
 
     pub(super) fn tokens(info: Option<UsageInfo>) -> Option<(u64, u64)> {
         info.map(|u| (u.prompt_tokens, u.completion_tokens))

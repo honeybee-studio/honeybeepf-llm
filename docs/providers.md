@@ -63,14 +63,14 @@ builtinProbes:
     detectByShape: true
 ```
 
-When on, an HTTP/1.1 request whose path matches a built-in pattern (`/chat/completions`, `/v1/responses`,
+When on, an HTTP/1.1 or HTTP/2 request whose path matches a built-in pattern (`/chat/completions`, `/v1/responses`,
 `/v1/messages`, `generateContent`, …) is kept even if its `Host` is unlisted, and it is recorded **only** if the
 response carries that family's usage fields; a response without them is dropped, so a path match alone never
 records. When off (the default) only listed hosts are recorded, exactly as before. This covers the common
 OpenAI-compatible APIs (Groq, DeepSeek, Together, Fireworks, OpenRouter, Mistral, xAI, Perplexity, Cerebras, vLLM,
 LM Studio); it does not catch shapes with no `usage` object or a non-matching path (e.g. Ollama's native
-`/api/chat`, which needs an explicit `providers` entry). It applies to HTTP/1.1 only, and a gateway may record both
-the inbound and the outbound call.
+`/api/chat`, which needs an explicit `providers` entry). A gateway may record both the inbound and the
+outbound call.
 
 **Runtimes** (also checked in pods on k3s: `python:3.12-slim`, `python:3.13-alpine`, `node:24-slim`)
 
