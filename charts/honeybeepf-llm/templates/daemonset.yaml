@@ -111,9 +111,10 @@ spec:
             - mountPath: /sys/kernel/debug
               name: debugfs
               readOnly: true
-            # Host filesystem for uprobe targets (SSL libraries)
-            - mountPath: /host
-              name: host-root
+            # The host's cgroup tree, for pod attribution and the plaintext attach point. A pod sees only its
+            # own cgroup at /sys/fs/cgroup; the rest of the host filesystem is not mounted
+            - mountPath: /host/sys/fs/cgroup
+              name: host-cgroup
               readOnly: true
             {{- if .Values.builtinProbes.llm.prices }}
             - mountPath: /etc/honeybeepf-llm/prices
@@ -137,9 +138,9 @@ spec:
           hostPath:
             path: /sys/kernel/debug
             type: Directory
-        - name: host-root
+        - name: host-cgroup
           hostPath:
-            path: /
+            path: /sys/fs/cgroup
             type: Directory
         {{- if .Values.builtinProbes.llm.prices }}
         - name: prices
