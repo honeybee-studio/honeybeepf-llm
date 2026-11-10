@@ -14,7 +14,7 @@ private vulnerability reporting).
 
 | Question | Answer |
 |---|---|
-| Privileged container? | Not `privileged: true`: `capabilities.drop: [ALL]`, then `BPF`, `PERFMON`, `SYS_ADMIN`, `SYS_PTRACE`, `NET_ADMIN` and `SYS_RESOURCE` are added back. With uid 0 and `hostPID`, a compromised agent has root-level access to the node (section 2). |
+| Privileged container? | Not `privileged: true`: `capabilities.drop: [ALL]`, then `BPF`, `PERFMON`, `SYS_ADMIN`, `SYS_PTRACE`, `NET_ADMIN` and `SYS_RESOURCE` are added back, and AppArmor is unconfined for the agent container. With uid 0 and `hostPID`, a compromised agent has root-level access to the node (section 2). |
 | Runs as root? | Yes, uid 0 in the container, with `hostPID: true`. |
 | Host filesystem? | Only the host's cgroup tree is mounted (read-only, at `/host/sys/fs/cgroup`). Through `hostPID`, `/proc/<pid>/root` still reaches other processes' filesystems, including the host's (section 2). |
 | Reads plaintext? | Yes, in memory only: the decrypted bytes of TLS connections in processes that use the probed OpenSSL, until a connection is known not to be an LLM call (section 3). |
@@ -101,8 +101,11 @@ but the boundary is the agent binary and image, not the kernel.
 
 The agent runs as uid 0: the image sets no `USER` and the chart sets no `runAsUser` or `runAsNonRoot`. Kubernetes treats
 `allowPrivilegeEscalation` as true when `SYS_ADMIN` is added. The service account token is mounted (no
-`automountServiceAccountToken: false`). No AppArmor profile is set, so the runtime default applies. With `debug: true`
-the chart also sets `seLinuxOptions.type: spc_t`, an unconfined SELinux type; it is off by default.
+`automountServiceAccountToken: false`). AppArmor is set to `Unconfined` for the agent container
+(`securityContext.appArmorProfile`, or the pod annotation on Kubernetes before 1.30): the agent opens other containers'
+libssl through `/proc/<pid>/root`, and the containerd profile on Ubuntu nodes denies that, so with the runtime default
+only pods that share the agent image's libssl are recorded. With `debug: true` the chart also sets `seLinuxOptions.type:
+spc_t`, an unconfined SELinux type; it is off by default.
 
 Host access, from `charts/honeybeepf-llm/templates/daemonset.yaml`:
 
@@ -285,6 +288,8 @@ These are open and listed here so a reviewer does not have to find them:
 - The agent runs as root, and through `hostPID` and `SYS_PTRACE` a compromised agent can read host files via
   `/proc/<pid>/root` (section 2).
 - The service account can read every pod spec in the cluster, not only those on its node (section 2).
+- The agent container runs AppArmor-unconfined; a narrower profile that allows only what discovery needs is not provided
+  (section 2).
 - Userspace memory has no node-wide cap, so heavy concurrent traffic can OOM-kill the agent (section 4).
 - OTLP is sent as plaintext gRPC, without TLS or authentication (section 3).
 - `customProbes` in `values.yaml` is accepted but does nothing (section 1).
