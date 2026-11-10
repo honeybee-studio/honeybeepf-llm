@@ -9,7 +9,7 @@ const NOV_30: u32 = 20_787; // 2026-11-30
 #[test]
 fn test_builtin_prices_match_the_pricing_pages() {
     let table = PriceTable::builtin().expect("built-in table loads");
-    assert_eq!(table.version(), "2026-11-09");
+    assert_eq!(table.version(), "2026-11-10");
     let sources: Vec<_> = table
         .sources()
         .iter()
@@ -18,13 +18,20 @@ fn test_builtin_prices_match_the_pricing_pages() {
     assert_eq!(
         sources,
         [
-            ("anthropic", "2026-10-26"),
+            ("anthropic", "2026-11-10"),
             ("openai", "2026-11-07"),
             ("gemini", "2026-10-26")
         ]
     );
     // Opus 5.5 fast in the US: (10000×$4 + 500×$5 + 1500×$8 + 2000×$20) × 2 × 1.1.
     let opus = call("claude-opus-5-5", 12000, 2000).write(2000).long(1500);
+    // Fable 5.2: 4000×$8 + 4000×$0.20 + 1000×$10 + 1000×$16 + 2000×$40.
+    let fable = || {
+        call("claude-fable-5-2", 10000, 2000)
+            .read(4000)
+            .write(2000)
+            .long(1000)
+    };
     let million = |model: &str| call(model, 1_000_000, 0);
     let sol = || call("gpt-5.6-sol", 100_000, 0);
     let terra = || call("gpt-6.1-terra", 10000, 2000);
@@ -37,6 +44,11 @@ fn test_builtin_prices_match_the_pricing_pages() {
     #[rustfmt::skip]
     let cases = [
         (NOV_30, opus.speed("fast").geo("us"), Ok(0.2079)),
+        (NOV_30, fable(), Ok(0.1388)),
+        (NOV_30, fable().speed("fast").geo("us"), Ok(0.30536)),
+        (NOV_30, million("claude-mythos-5-2").speed("fast"), Ok(16.0)),
+        (NOV_30, million("claude-mythos-5-1").geo("us"), Ok(11.0)),
+        (NOV_30, call("claude-mythos-5", 0, 1_000_000), Ok(50.0)),
         // OpenAI prompt caching guide: 1000 plain, 4000 read, 3000 30m and 4000 12h writes.
         (NOV_30, call("gpt-6.1-sol", 12000, 500).read(4000).write(7000).long(4000), Ok(0.0349)),
         // Fast tier long context: 300000×$8 + 1000×$30.

@@ -8,6 +8,7 @@ use honeybeepf_llm_core::types::UsageInfo;
 
 use super::super::body::{BackgroundState, parse_response_json};
 use super::super::encoding;
+use super::super::json_ends::{Ends, array_tail_usage};
 use super::super::sse::{SseCursor, parse_sse_body};
 use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
 
@@ -23,6 +24,8 @@ enum Body {
         buf: Vec<u8>,
         too_large: bool,
     },
+    /// Unencoded JSON past the buffer limit: only its first and last bytes kept, usage read at the end.
+    Ends(Ends),
 }
 
 impl Body {
@@ -137,14 +140,14 @@ impl H2Stream {
         matches!(&self.body, Body::Streaming(cursor) if cursor.errored())
     }
 
-    /// Whether the body was given up for a memory cap, so its end counts as a too-large response.
+    /// Whether the body passed a memory cap, so an end with no usage counts as a too-large response.
     pub(super) fn over_limit(&self) -> bool {
         matches!(
             &self.body,
             Body::Buffered {
                 too_large: true,
                 ..
-            }
+            } | Body::Ends(_)
         )
     }
 
@@ -152,6 +155,7 @@ impl H2Stream {
     pub(super) fn held(&self) -> usize {
         match &self.body {
             Body::Buffered { buf, .. } => buf.len(),
+            Body::Ends(ends) => ends.held(),
             Body::Streaming(_) => 0,
         }
     }
@@ -185,7 +189,8 @@ impl H2Stream {
     }
 
     /// Takes response DATA. `room` is the connection's remaining buffered-byte budget; the returned change
-    /// in held bytes keeps that budget. SSE is read as it streams and never counts against the budget.
+    /// in held bytes keeps that budget. SSE is read as it streams and never counts against the budget; plain
+    /// JSON past the budget or the buffer limit keeps only its ends.
     pub(super) fn data(&mut self, bytes: &[u8], room: usize) -> isize {
         self.last = Instant::now();
         self.got_data = true;
@@ -196,12 +201,36 @@ impl H2Stream {
                     return 0;
                 }
             }
-            Body::Buffered { buf, too_large, .. } => {
+            Body::Ends(ends) => {
+                let before = ends.held();
+                ends.keep(bytes);
+                if ends.held().saturating_sub(before) <= room {
+                    return ends.held() as isize - before as isize;
+                }
+                self.body = Body::dropped();
+                return -(before as isize);
+            }
+            Body::Buffered {
+                coding,
+                sse,
+                buf,
+                too_large,
+            } => {
                 if *too_large {
                     return 0;
                 }
                 if bytes.len() > room || buf.len() + bytes.len() > MAX_RESPONSE_BUFFER_SIZE {
                     let freed = buf.len() as isize;
+                    if coding.is_empty() && !*sse {
+                        let mut ends = Ends::new();
+                        ends.keep(buf);
+                        ends.keep(bytes);
+                        if ends.read_kind() && ends.held() <= room.saturating_add(buf.len()) {
+                            let held = ends.held() as isize;
+                            self.body = Body::Ends(ends);
+                            return held - freed;
+                        }
+                    }
                     (*too_large, *buf) = (true, Vec::new());
                     return -freed;
                 }
@@ -215,11 +244,12 @@ impl H2Stream {
     }
 
     /// The usage once the response has ended, with where a background Responses call stands (a create's
-    /// `queued`, or `Ended` once a result arrives). A body that is not a JSON object (bad coding, a JSON
-    /// array, a body given up for a cap) records nothing.
+    /// `queued`, or `Ended` once a result arrives). A JSON array carries usage in its last element; any other
+    /// body that is not a JSON object (bad coding, a body given up for a cap) records nothing.
     pub(super) fn finish(&self) -> (Option<UsageInfo>, Option<BackgroundState>) {
         match &self.body {
             Body::Streaming(cursor) => sse_result(cursor.usage()),
+            Body::Ends(ends) => (ends.usage(), None),
             Body::Buffered {
                 coding,
                 sse,
@@ -246,6 +276,9 @@ impl H2Stream {
                 }
                 let text = String::from_utf8_lossy(&body);
                 let json = text.trim_start();
+                if json.starts_with('[') {
+                    return (array_tail_usage(json.as_bytes()), None);
+                }
                 if !json.starts_with('{') {
                     return (None, None);
                 }
@@ -268,6 +301,7 @@ fn sse_result(usage: Option<UsageInfo>) -> (Option<UsageInfo>, Option<Background
 mod tests {
     use std::io::Write;
 
+    use super::super::super::test_support::gemini_array;
     use super::*;
 
     const SSE: &[u8] = b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
@@ -275,12 +309,38 @@ mod tests {
         data: [DONE]\n\n";
     const JSON: &[u8] =
         b"{\"model\":\"gpt-4o\",\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4}}";
+    /// Most bytes a body past the buffer limit keeps: 64 KB of head and up to twice 64 KB of tail.
+    const ENDS_MAX: usize = 3 * 64 * 1024;
 
     fn usage(content_type: Option<&[u8]>, coding: &[u8], body: &[u8]) -> Option<(u64, u64)> {
         let mut s = H2Stream::open(Instant::now(), false);
         s.response_headers(Some(200), content_type, coding);
         s.data(body, usize::MAX);
         s.finish().0.map(|u| (u.prompt_tokens, u.completion_tokens))
+    }
+
+    /// A plain JSON object of about `size` bytes: `model` first, a long text, then usage last.
+    fn big_json(size: usize) -> Vec<u8> {
+        format!(
+            r#"{{"model":"gpt-4o","output":"{}","usage":{{"prompt_tokens":11,"completion_tokens":4}}}}"#,
+            "x".repeat(size)
+        )
+        .into_bytes()
+    }
+
+    /// Feeds `body` in 16 KB DATA frames under a connection budget of `cap`, as the connection does.
+    /// Returns the usage, whether the body passed a cap, and the bytes held once the body ended.
+    fn follow(coding: &[u8], body: &[u8], cap: usize) -> (Option<(u64, u64)>, bool, usize) {
+        let mut s = H2Stream::open(Instant::now(), false);
+        s.response_headers(Some(200), Some(b"application/json"), coding);
+        let mut buffered = 0usize;
+        for frame in body.chunks(16 * 1024) {
+            buffered = buffered.saturating_add_signed(s.data(frame, cap - buffered));
+            assert!(buffered <= cap);
+            assert_eq!(buffered, s.held());
+        }
+        let usage = s.finish().0.map(|u| (u.prompt_tokens, u.completion_tokens));
+        (usage, s.over_limit(), s.held())
     }
 
     #[test]
@@ -350,5 +410,37 @@ mod tests {
         let (usage, bg) = s.finish();
         assert!(usage.is_none());
         assert!(matches!(bg, Some(BackgroundState::Running(id)) if &*id == "resp_bg1"));
+    }
+
+    #[test]
+    fn plain_json_past_the_buffer_limit_keeps_only_its_ends() {
+        let cap = 32 << 20;
+        for body in [big_json(20 << 20), gemini_array(20 << 20).into_bytes()] {
+            let (usage, over, held) = follow(b"", &body, cap);
+            assert_eq!(usage, Some((11, 4)));
+            assert!(over);
+            assert!(held <= ENDS_MAX, "{held}");
+        }
+    }
+
+    #[test]
+    fn a_json_array_under_the_limit_records_its_last_element() {
+        let (usage, over, _) = follow(b"", gemini_array(64 * 1024).as_bytes(), 32 << 20);
+        assert_eq!((usage, over), (Some((11, 4)), false));
+    }
+
+    #[test]
+    fn ends_stay_within_the_connection_budget() {
+        // A mid-join connection's 1 MB budget has room for the ends, so a 2 MB body is still read.
+        assert_eq!(follow(b"", &big_json(2 << 20), 1 << 20).0, Some((11, 4)));
+        // A budget too small for the ends gives the body up, as before.
+        assert_eq!(follow(b"", &big_json(2 << 20), 100 * 1024), (None, true, 0));
+    }
+
+    #[test]
+    fn an_encoded_body_past_the_limit_is_still_given_up() {
+        // A coded body is decoded only whole, so its ends alone cannot be read.
+        let body = vec![b'a'; MAX_RESPONSE_BUFFER_SIZE + 1];
+        assert_eq!(follow(b"gzip", &body, 32 << 20), (None, true, 0));
     }
 }

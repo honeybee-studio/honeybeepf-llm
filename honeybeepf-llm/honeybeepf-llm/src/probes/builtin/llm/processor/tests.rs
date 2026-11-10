@@ -796,6 +796,45 @@ fn test_json_response_over_buffer_limit_is_recorded() {
     }
 }
 
+/// A Gemini streamGenerateContent array (no alt=sse) of about `size` bytes: filler elements with no
+/// usage, then a last element carrying the final usageMetadata.
+fn gemini_array(size: usize) -> Vec<u8> {
+    let filler = format!(
+        r#"{{"candidates":[{{"content":{{"parts":[{{"text":"{}"}}]}}}}]}}"#,
+        "x".repeat(2048)
+    );
+    let last = r#"{"candidates":[{"content":{"parts":[{"text":"done"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":4}}"#;
+    let mut body = String::from("[");
+    while body.len() + last.len() + 2 < size {
+        body.push_str(&filler);
+        body.push(',');
+    }
+    body.push_str(last);
+    body.push(']');
+    body.into_bytes()
+}
+
+#[test]
+fn test_json_array_response_is_recorded_at_any_size() {
+    // Small arrays go through the normal parser; an array past 16 MB is followed by keeping only its
+    // ends. Either way the last element's usage is recorded once.
+    for size in [4096, MAX_RESPONSE_BUFFER_SIZE + 1, 20 << 20] {
+        for headers in ["Content-Length: {len}", "Transfer-Encoding: chunked"] {
+            let reads = h1_reads(headers, &gemini_array(size));
+            let total: usize = reads.iter().map(Vec::len).sum();
+            let mut p = StreamProcessor::new();
+            let out = outcomes(&mut p, &reads, None);
+            assert!(unparsed(&out).is_empty(), "{size} {total}: {out:?}");
+            assert_eq!(count(&out, Outcome::Recorded), 1, "{size} {total}");
+            // Past the limit only the two ends are kept, whatever the size.
+            assert!(
+                total <= MAX_RESPONSE_BUFFER_SIZE || p.read_buf.capacity() == 0,
+                "{total}"
+            );
+        }
+    }
+}
+
 #[test]
 fn test_json_response_over_buffer_limit_missing_a_read_ends_at_the_next_request() {
     // A whole read lost before the ringbuf (no gap seen): the length walk never reaches 0 on its own.

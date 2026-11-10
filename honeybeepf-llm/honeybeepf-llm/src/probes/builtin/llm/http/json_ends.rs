@@ -17,14 +17,13 @@ const MAX_LINE: usize = 4096;
 /// A JSON response too large to buffer, with its first and last body bytes and where its body ends.
 pub struct JsonEnds {
     walk: BodyWalk,
-    head: Vec<u8>,
-    tail: Vec<u8>,
+    ends: Ends,
     /// Read once when the body ends; boxed so `PastLimit::Json` stays small (clippy large_enum_variant).
     pub usage: Option<Box<UsageInfo>>,
 }
 
 impl JsonEnds {
-    /// Takes over a buffered HTTP/1.1 response whose body is a JSON object with a framed end.
+    /// Takes over a buffered HTTP/1.1 response whose body is a JSON object or array with a framed end.
     pub fn start(buffer: &[u8]) -> Option<Self> {
         let (framing, body) = h1::plain_body(buffer)?;
         let length = match framing {
@@ -34,48 +33,129 @@ impl JsonEnds {
         };
         let mut ends = Self {
             walk: BodyWalk::new(length),
-            head: Vec::with_capacity(HEAD_KEEP),
-            tail: Vec::with_capacity(2 * TAIL_KEEP),
+            ends: Ends::new(),
             usage: None,
         };
-        // A JSON array (Gemini streamed without alt=sse) has no single usage at its end.
-        let object = ends.feed(body) && ends.head.trim_ascii_start().first() == Some(&b'{');
-        object.then_some(ends)
+        // Only ever started past the 16 MB buffer, so the body never ends in this first feed; the
+        // dechunked head then tells a JSON array (Gemini streamed without alt=sse) from an object.
+        let followed = ends.feed(body);
+        (followed && ends.ends.read_kind()).then_some(ends)
     }
 
     /// Follows more body bytes; false once the framing broke or the body ended without usage at its ends.
     pub fn feed(&mut self, data: &[u8]) -> bool {
-        let Self {
-            walk, head, tail, ..
-        } = self;
-        let followed = walk.feed(data, &mut |data| {
-            let room = HEAD_KEEP.saturating_sub(head.len());
-            head.extend_from_slice(&data[..room.min(data.len())]);
-            // Old bytes go whenever new ones are cut, so the tail stays one piece of the body.
-            let cut = data.len().saturating_sub(TAIL_KEEP);
-            if cut > 0 {
-                tail.clear();
-            } else if tail.len() + data.len() > 2 * TAIL_KEEP {
-                tail.drain(..tail.len() - TAIL_KEEP);
-            }
-            tail.extend_from_slice(&data[cut..]);
-        });
+        let Self { walk, ends, .. } = self;
+        let followed = walk.feed(data, &mut |data| ends.keep(data));
         if self.walk.ended() && self.usage.is_none() {
-            self.usage = self.read_usage().map(Box::new);
+            self.usage = self.ends.usage().map(Box::new);
             return self.usage.is_some();
         }
         followed
     }
+}
 
-    /// Usage from the root members whole in the kept ends; the end wins a key both have.
-    fn read_usage(&self) -> Option<UsageInfo> {
+/// The first and last bytes of a JSON body too large to buffer, enough to read its usage at the end.
+pub(super) struct Ends {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    /// The body is a JSON array (Gemini streamed without alt=sse): usage is in its last element, read
+    /// from the tail alone, not from root members at both ends.
+    array: bool,
+}
+
+impl Ends {
+    pub(super) fn new() -> Self {
+        Self {
+            head: Vec::with_capacity(HEAD_KEEP),
+            tail: Vec::with_capacity(2 * TAIL_KEEP),
+            array: false,
+        }
+    }
+
+    /// Keeps the next body bytes: the first `HEAD_KEEP` and the last `TAIL_KEEP` of all fed so far.
+    pub(super) fn keep(&mut self, data: &[u8]) {
+        let room = HEAD_KEEP.saturating_sub(self.head.len());
+        self.head.extend_from_slice(&data[..room.min(data.len())]);
+        // Old bytes go whenever new ones are cut, so the tail stays one piece of the body.
+        let cut = data.len().saturating_sub(TAIL_KEEP);
+        if cut > 0 {
+            self.tail.clear();
+        } else if self.tail.len() + data.len() > 2 * TAIL_KEEP {
+            self.tail.drain(..self.tail.len() - TAIL_KEEP);
+        }
+        self.tail.extend_from_slice(&data[cut..]);
+    }
+
+    /// Reads from the kept head whether the body is a JSON object or array; false for anything else.
+    pub(super) fn read_kind(&mut self) -> bool {
+        self.array = match self.head.trim_ascii_start().first() {
+            Some(b'[') => true,
+            Some(b'{') => false,
+            _ => return false,
+        };
+        true
+    }
+
+    /// Bytes kept, at most `HEAD_KEEP + 2 * TAIL_KEEP` however long the body.
+    pub(super) fn held(&self) -> usize {
+        self.head.len() + self.tail.len()
+    }
+
+    /// Usage from the root members whole in the kept ends; the end wins a key both have. A JSON array
+    /// instead carries usage in its last element, read from the tail alone.
+    pub(super) fn usage(&self) -> Option<UsageInfo> {
         let tail = &self.tail[self.tail.len().saturating_sub(TAIL_KEEP)..];
+        if self.array {
+            return array_tail_usage(tail);
+        }
         let mut root = trailing_members(tail).unwrap_or_default();
         for (key, value) in leading_members(&self.head).unwrap_or_default() {
             root.entry(key).or_insert(value);
         }
         parse_response_json_value(&Value::Object(root))
     }
+}
+
+/// Usage from the last complete object of a JSON array body (Gemini streamed without alt=sse): the
+/// final element carries the authoritative usage. `bytes` must end at the array's close.
+pub(super) fn array_tail_usage(bytes: &[u8]) -> Option<UsageInfo> {
+    let object = last_array_object(bytes)?;
+    parse_response_json_value(&Value::Object(object))
+}
+
+/// The last `{...}` element of a JSON array, read back from its close brace to its matching open; None
+/// if the array is not closed (truncated) or that open is not within `bytes` (the last element
+/// outgrew the kept tail). Only a closed array's last element is the final, authoritative usage.
+fn last_array_object(bytes: &[u8]) -> Option<Map<String, Value>> {
+    let close = bytes.iter().rposition(|b| !b.is_ascii_whitespace())?;
+    if bytes[close] != b']' {
+        return None;
+    }
+    let end = bytes[..close].iter().rposition(|&b| b == b'}')?;
+    let (mut depth, mut in_str, mut start) = (0usize, false, None);
+    for i in (0..=end).rev() {
+        match bytes[i] {
+            b'"' => {
+                // Read back from a known end, a quote is escaped iff an odd run of backslashes precedes it.
+                let slashes = bytes[..i].iter().rev().take_while(|&&c| c == b'\\').count();
+                if slashes == i {
+                    return None; // the run may go on before the kept bytes
+                }
+                in_str ^= slashes % 2 == 0;
+            }
+            _ if in_str => {}
+            b'}' | b']' => depth += 1,
+            b'{' | b'[' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    start = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    object_lossy(&bytes[start?..=end])
 }
 
 /// Chunk rules for a body followed past the buffer: strict, so any framing doubt breaks the walk.
@@ -210,6 +290,7 @@ fn trailing_members(tail: &[u8]) -> Option<Map<String, Value>> {
 mod tests {
     use super::super::body::parse_response_json;
     use super::super::chunk_cases::{Walked, chunk_cases};
+    use super::super::test_support::gemini_array;
     use super::*;
 
     #[test]
@@ -262,7 +343,7 @@ mod tests {
         );
         (
             ends.usage.map(|u| *u),
-            ends.head.capacity() + ends.tail.capacity(),
+            ends.ends.head.capacity() + ends.ends.tail.capacity(),
         )
     }
 
@@ -293,7 +374,7 @@ mod tests {
             let first = [head.as_bytes(), &body[..short]].concat();
             let mut ends = JsonEnds::start(&first).expect("JSON object");
             assert!(ends.feed(&body[short..]), "{short}");
-            assert!(body.ends_with(&ends.tail), "{short}");
+            assert!(body.ends_with(&ends.ends.tail), "{short}");
         }
     }
 
@@ -333,5 +414,44 @@ mod tests {
         for bytes in broken {
             assert!(!BodyWalk::new(None).feed(bytes, &mut |_| {}), "{bytes:?}");
         }
+    }
+
+    #[test]
+    fn a_json_array_past_the_limit_records_its_last_element() {
+        for size in [20 << 20, 40 << 20] {
+            let body = gemini_array(size);
+            assert!(body.len() > 16 << 20, "{}", body.len());
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let (first, rest) = resp.as_bytes().split_at(resp.len() / 10);
+            let mut ends = JsonEnds::start(first).expect("JSON array");
+            let reads = rest.chunks(16384).collect::<Vec<_>>();
+            let (last, most) = reads.split_last().expect("reads");
+            assert!(most.iter().all(|read| ends.feed(read)));
+            assert_eq!(ends.feed(last), ends.usage.is_some());
+            // The last element's usage (not any filler's: they carry none).
+            assert_eq!(
+                ends.usage
+                    .as_deref()
+                    .map(|u| (u.prompt_tokens, u.completion_tokens)),
+                Some((11, 4))
+            );
+            // Only the two ends are kept, whatever the body size.
+            assert_eq!(
+                ends.ends.head.capacity() + ends.ends.tail.capacity(),
+                HEAD_KEEP + 2 * TAIL_KEEP
+            );
+        }
+    }
+
+    #[test]
+    fn last_array_object_needs_a_closed_array() {
+        // A truncated array (no closing `]`) is never parsed: its last-seen element may not be final.
+        assert!(last_array_object(br#"[{"usageMetadata":{"promptTokenCount":9}}"#).is_none());
+        // A closed array yields its last element's object.
+        let obj = last_array_object(br#"[{"a":1},{"usageMetadata":{"promptTokenCount":9}}]"#);
+        assert!(obj.is_some_and(|o| o.contains_key("usageMetadata")));
     }
 }

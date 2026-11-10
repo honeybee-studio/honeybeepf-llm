@@ -66,7 +66,27 @@ EOF
 export KUBECONFIG=/tmp/kubeconfig.yaml
 export LLM_PROVIDERS_CONFIG='{"providers":[{"name":"vllm","hosts":["127.0.0.1"],"plaintext":{"port":18080}}]}'
 
-./bin/honeybeepf-llm --verbose > /tmp/boot.log 2>&1 &
+# Run the agent with only the chart's capabilities in its bounding set, as the DaemonSet does, so a capability the
+# agent needs but the chart does not grant fails here instead of on a user's node (CI itself runs as root).
+CHART_CAPS=$(sed -n '/^securityContext:/,/^resources:/p' charts/honeybeepf-llm/values.yaml | tr -d '\r' \
+  | sed -n 's/^ *- \([A-Z_]*\).*/\1/p' | grep -vx ALL)
+echo "agent capabilities: ${CHART_CAPS//$'\n'/ }"
+cat > /tmp/capexec.py <<'PY'
+import ctypes, os, sys
+# Capability numbers from linux/capability.h; a name the chart adds must be listed here.
+NUMBERS = {"NET_ADMIN": 12, "SYS_PTRACE": 19, "SYS_ADMIN": 21, "SYS_RESOURCE": 24, "PERFMON": 38, "BPF": 39}
+PR_CAPBSET_DROP = 24
+split = sys.argv.index("--")
+keep = {NUMBERS[name] for name in sys.argv[1:split]}
+last = int(open("/proc/sys/kernel/cap_last_cap").read())
+prctl = ctypes.CDLL(None, use_errno=True).prctl
+for cap in range(last + 1):
+    if cap not in keep and prctl(PR_CAPBSET_DROP, cap, 0, 0, 0) != 0:
+        sys.exit(f"drop capability {cap}: {os.strerror(ctypes.get_errno())}")
+os.execv(sys.argv[split + 1], sys.argv[split + 1:])
+PY
+# shellcheck disable=SC2086 # one argument per capability
+python3 /tmp/capexec.py $CHART_CAPS -- ./bin/honeybeepf-llm --verbose > /tmp/boot.log 2>&1 &
 AGENT_PID=$!
 # ~5s for BPF program load + verifier, ~3s for libssl scan / uprobe attach
 sleep 8
@@ -98,7 +118,7 @@ kill "$MOCK_PID" 2>/dev/null || true
 cat /tmp/boot.log
 
 # A working kprobe fallback logs the fentry error it replaced; that line is not a failure.
-if grep -v 'libssl open watch: kprobe' /tmp/boot.log | grep -qiE 'panicked|FATAL|verifier|failed to attach|failed to load'; then
+if grep -v 'libssl open watch: kprobe' /tmp/boot.log | grep -qiE 'panicked|FATAL|verifier|failed to attach|failed to load|failed to create map|drop capability'; then
   echo "::error::BPF load/attach failure on $(uname -r)"
   exit 1
 fi

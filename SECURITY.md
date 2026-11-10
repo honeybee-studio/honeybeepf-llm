@@ -22,7 +22,7 @@ We will acknowledge the report, work with you on a fix, and keep you updated. Wh
 
 ## Supported versions
 
-There is no tagged release yet. Security fixes go to `main` and to the images built from it (`latest` and `sha-<commit>` tags). Once tagged releases start, fixes go to the latest release.
+Security fixes go to `main` and to the images built from it (`latest` and `sha-<commit>` tags), and to the latest release (`X.Y.Z` and `X.Y` tags).
 
 ## Scope
 

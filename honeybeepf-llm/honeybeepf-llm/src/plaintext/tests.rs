@@ -235,3 +235,21 @@ fn cgroup_gate_picks_unified_then_hybrid_else_none() {
               cgroup /sys/fs/cgroup/memory cgroup rw,memory 0 0";
     assert_eq!(cgroup_v2_root_from(v1), None);
 }
+
+#[test]
+fn cgroup_gate_prefers_the_host_tree_over_the_pods_own() {
+    // In a pod the container's /sys/fs/cgroup is its own cgroup namespace; the host's root is under /host.
+    let pod = "cgroup2 /sys/fs/cgroup cgroup2 ro 0 0\n\
+               cgroup2 /host/sys/fs/cgroup cgroup2 ro 0 0";
+    assert_eq!(
+        cgroup_v2_root_from(pod),
+        Some(PathBuf::from("/host/sys/fs/cgroup"))
+    );
+    let hybrid_host = "cgroup2 /sys/fs/cgroup cgroup2 ro 0 0\n\
+                       tmpfs /host/sys/fs/cgroup tmpfs ro 0 0\n\
+                       cgroup2 /host/sys/fs/cgroup/unified cgroup2 ro 0 0";
+    assert_eq!(
+        cgroup_v2_root_from(hybrid_host),
+        Some(PathBuf::from("/host/sys/fs/cgroup/unified"))
+    );
+}

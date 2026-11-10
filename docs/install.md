@@ -33,8 +33,27 @@ agent pod.
 2026-10-26T08:43:35.510264Z  INFO honeybeepf_llm::probes::builtin::llm::processor: LLM SUCCESS | PID: 1686847 | Model: claude-test | Latency: 0.00s | Tokens: 140 (Prompt: 125, Compl: 15, Cache read: 100, Cache write: 0) | Pod: team-b/support-bot-589db898dd-rv9ts
 ```
 
-The agent needs `hostPID` and the `BPF`, `PERFMON`, `SYS_ADMIN` and `SYS_PTRACE` capabilities, and requests 200m CPU / 512Mi per node (limits 1 CPU / 1Gi); see
+The agent needs `hostPID` and the `BPF`, `PERFMON`, `SYS_ADMIN`, `SYS_PTRACE`, `NET_ADMIN` and `SYS_RESOURCE` capabilities, and requests 200m CPU / 512Mi per node (limits 1 CPU / 1Gi); see
 [`values.yaml`](../charts/honeybeepf-llm/values.yaml).
+
+Two of those capabilities are only needed on older kernels. The chart grants them so one install works on every node;
+if all your nodes run a newer kernel, you can remove them:
+
+| Capability | Needed when a node runs | Why | Can be removed when every node runs |
+|---|---|---|---|
+| `NET_ADMIN` | a kernel before 6.9 | the agent creates a socket map at startup, even with plaintext capture off, and those kernels require `NET_ADMIN` for it | 6.9 or later |
+| `SYS_RESOURCE` | a kernel before 5.11 | those kernels count BPF map memory against the memlock limit, which the agent raises at startup | 5.11 or later |
+
+Setting the list replaces it, so keep the other four, for example on nodes that all run 6.9 or later:
+
+```yaml
+securityContext:
+  capabilities:
+    add: [BPF, PERFMON, SYS_ADMIN, SYS_PTRACE]
+```
+
+If a capability the node's kernel needs is missing, the agent exits at startup with `Operation not permitted` while
+creating a map.
 
 Uninstall:
 
