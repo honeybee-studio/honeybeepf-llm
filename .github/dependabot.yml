@@ -22,3 +22,13 @@ updates:
     labels:
       - dependencies
       - ci
+  # Keeps the digest-pinned base images in Dockerfile current; the nightly toolchain image moves daily, so weekly.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+      - ci

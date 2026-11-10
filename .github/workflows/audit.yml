@@ -1,0 +1,39 @@
+name: Dependency audit
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'honeybeepf-llm/Cargo.lock'
+      - 'honeybeepf-llm/**/Cargo.toml'
+      - '.github/workflows/audit.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'honeybeepf-llm/Cargo.lock'
+      - 'honeybeepf-llm/**/Cargo.toml'
+      - '.github/workflows/audit.yml'
+  # New advisories are published without any change here, so check main weekly as well.
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      # Fails on a vulnerability advisory; unmaintained and unsound crates are reported as warnings.
+      - name: Audit Cargo.lock
+        working-directory: ./honeybeepf-llm
+        run: cargo audit
