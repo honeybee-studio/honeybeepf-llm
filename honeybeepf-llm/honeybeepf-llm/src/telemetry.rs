@@ -449,19 +449,21 @@ fn get_otlp_endpoint() -> Option<String> {
     }
 }
 
-/// TLS for an `https://` endpoint: the system roots, plus the CA in `OTEL_EXPORTER_OTLP_CERTIFICATE` if set
-/// (a private collector CA). Auth headers come from `OTEL_EXPORTER_OTLP_HEADERS`, which the exporter reads itself.
+/// TLS for an `https://` endpoint, verified against the CA in `OTEL_EXPORTER_OTLP_CERTIFICATE` when set (a private
+/// collector CA, as the OpenTelemetry spec defines that variable), else against the system roots. Auth headers come
+/// from `OTEL_EXPORTER_OTLP_HEADERS`, which the exporter reads itself.
 fn otlp_tls(endpoint: &str) -> Result<Option<ClientTlsConfig>> {
     if !endpoint.starts_with("https://") {
         return Ok(None);
     }
-    let mut tls = ClientTlsConfig::new().with_native_roots();
-    if let Some(path) = std::env::var_os("OTEL_EXPORTER_OTLP_CERTIFICATE") {
-        let pem = std::fs::read(&path)
-            .with_context(|| format!("Failed to read OTLP CA {}", path.to_string_lossy()))?;
-        tls = tls.ca_certificate(Certificate::from_pem(pem));
-    }
-    Ok(Some(tls))
+    let Some(path) = std::env::var_os("OTEL_EXPORTER_OTLP_CERTIFICATE") else {
+        return Ok(Some(ClientTlsConfig::new().with_native_roots()));
+    };
+    let pem = std::fs::read(&path)
+        .with_context(|| format!("Failed to read OTLP CA {}", path.to_string_lossy()))?;
+    Ok(Some(
+        ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem)),
+    ))
 }
 
 /// Initialize OpenTelemetry metrics provider

@@ -12,12 +12,13 @@ podAnnotations: {}
 output:
   otlp:
     # host:port or http://host:port for a plaintext collector; https://host:port sends over TLS, checked against the
-    # system roots plus caSecret if set.
+    # CA in caSecret if set, else the system roots.
     endpoint: ""
     collectorReleaseName: "honeybeepf-llm-otel-collector"
     port: 4317
     protocol: "grpc"
-    # Secret in the release namespace with the collector's CA (key ca.crt), for a private CA. Used with https:// only.
+    # Secret in the release namespace with the collector's CA (key ca.crt), for a private CA; it replaces the system
+    # roots. Used with https:// only.
     caSecret: ""
     # Secret key holding gRPC headers to send, for example an auth token: "authorization=Bearer <token>"
     # (comma-separated key=value pairs, the OTEL_EXPORTER_OTLP_HEADERS format).

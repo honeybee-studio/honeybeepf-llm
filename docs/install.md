@@ -40,8 +40,8 @@ helm upgrade --install honeybeepf-llm charts/honeybeepf-llm -n honeybeepf --reus
   --set output.otlp.headersSecret.name=otel-auth --set output.otlp.headersSecret.key=headers
 ```
 
-An `https://` endpoint is verified against the system roots plus the CA in `caSecret`; `host:port` and `http://` stay
-plaintext.
+An `https://` endpoint is verified against the CA in `caSecret` if set, else the system roots; `host:port` and
+`http://` stay plaintext.
 
 ```
 2026-10-26T08:43:35.510264Z  INFO honeybeepf_llm::probes::builtin::llm::processor: LLM SUCCESS | PID: 1686847 | Model: claude-test | Latency: 0.00s | Tokens: 140 (Prompt: 125, Compl: 15, Cache read: 100, Cache write: 0) | Pod: team-b/support-bot-589db898dd-rv9ts

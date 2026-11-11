@@ -161,10 +161,9 @@ services and endpointslices is granted but the code only gets and lists them.
 - **Network.** No listening port: the chart defines no Service and the container exposes no port; the liveness and
   readiness checks are exec probes. Outbound connections are the OTLP collector, the Kubernetes API, and DNS for
   plaintext hosts outside the cluster. OTLP is gRPC: plaintext for a `host:port` or `http://` endpoint (the in-cluster
-  default), TLS for an `https://` endpoint, verified against the system roots plus an optional CA from
-  `output.otlp.caSecret` (`otlp_tls` in `honeybeepf-llm/honeybeepf-llm/src/telemetry.rs`). `output.otlp.headersSecret`
-  passes headers such as a bearer token from a Secret. With the default empty `output.otlp.endpoint`, nothing is
-  exported.
+  default), TLS for an `https://` endpoint, verified against the CA in `output.otlp.caSecret` if set, else the system
+  roots (`otlp_tls` in `honeybeepf-llm/honeybeepf-llm/src/telemetry.rs`). `output.otlp.headersSecret` passes headers
+  such as a bearer token from a Secret. With the default empty `output.otlp.endpoint`, nothing is exported.
 - **Disk.** The root filesystem and every host mount are read-only; the agent writes no files. (`/proc/<pid>/root` is a
   separate path; see "If the agent is compromised" in section 2.)
 - The agent reads TLS plaintext on its own node by design; keeping that plaintext inside the agent is the security
