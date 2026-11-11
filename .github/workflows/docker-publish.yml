@@ -123,6 +123,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Keyless cosign signing: the job's OIDC token is the signing identity.
+      id-token: write
     env:
       # PRs build arm64 only with the arm64 label; reviewers pull pr-N on amd64.
       BUILD_ARM64: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'arm64') }}
@@ -162,6 +164,7 @@ jobs:
             type=sha,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
@@ -173,7 +176,19 @@ jobs:
           cache-from: ${{ env.BUILD_CACHE }}
           # Only main writes the cache, so a PR cannot poison the layers main builds from.
           cache-to: ${{ github.ref == 'refs/heads/main' && format('{0},mode=max', env.BUILD_CACHE) || '' }}
-          provenance: false
+          # Build provenance and an SBOM are attached to the pushed image; a build that is not pushed has none.
+          provenance: ${{ env.PUSH_IMAGE == 'true' && 'mode=max' || 'false' }}
+          sbom: ${{ env.PUSH_IMAGE == 'true' }}
+
+      - name: Install cosign
+        if: env.PUSH_IMAGE == 'true'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign image
+        if: env.PUSH_IMAGE == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$REGISTRY/$IMAGE_NAME@$DIGEST"
 
       - name: Summary
         if: env.PUSH_IMAGE == 'true'

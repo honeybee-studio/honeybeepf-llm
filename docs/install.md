@@ -62,6 +62,22 @@ helm uninstall honeybeepf-llm honeybeepf-llm-otel-collector honeybeepf-llm-prome
 kubectl delete namespace honeybeepf
 ```
 
+## Verifying the image and chart
+
+Images built from `main`, release images and the release chart are signed with keyless
+[cosign](https://docs.sigstore.dev/cosign/) by the GitHub Actions workflow that built them, and the images carry an SBOM
+and build provenance. Images published before signing started are not signed. To check a release before installing it:
+
+```bash
+ID='^https://github.com/honeybee-studio/honeybeepf-llm/\.github/workflows/'
+ISSUER=https://token.actions.githubusercontent.com
+cosign verify ghcr.io/honeybee-studio/honeybeepf-llm:X.Y.Z \
+  --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER"
+cosign verify ghcr.io/honeybee-studio/charts/honeybeepf-llm:X.Y.Z \
+  --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER"
+docker buildx imagetools inspect ghcr.io/honeybee-studio/honeybeepf-llm:X.Y.Z --format '{{ json .SBOM }}'
+```
+
 ## Building from source
 
 Requires the nightly toolchain with `rust-src` and `bpf-linker`; see the
