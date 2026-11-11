@@ -256,11 +256,12 @@ returning at once for destinations that are not watched. On kernel 7.0 that meas
 
 - **Pinned actions.** Every GitHub Action in `.github/workflows/` is pinned to a full commit SHA with the version in a
   trailing comment, and Dependabot (`.github/dependabot.yml`) proposes minor and patch updates to them weekly.
-- **Unpinned build inputs.** The image's base images (`rustlang/rust:nightly-trixie` for the build, `debian:trixie-slim`
-  at runtime, in `Dockerfile`) are referenced by tag, not digest; the nightly toolchain, the apt packages and
-  `cargo-chef` are not pinned. `bpf-linker` is pinned in the image build.
-- **No dependency scanning in CI.** Dependabot covers GitHub Actions only. No workflow runs `cargo audit`, `cargo deny`
-  or an image scanner.
+- **Build inputs.** The image's base images (`rustlang/rust:nightly-trixie` for the build, which fixes the nightly
+  toolchain, and `debian:trixie-slim` at runtime, in `Dockerfile`) are pinned by digest, and Dependabot proposes digest
+  updates weekly. `bpf-linker` is pinned in the image build; the apt packages and `cargo-chef` are not.
+- **Dependency scanning.** `.github/workflows/audit.yml` runs `cargo audit` when a `Cargo.toml` or `Cargo.lock` changes
+  and weekly on `main`; it fails on a vulnerability advisory and reports unmaintained or unsound crates as warnings.
+  No workflow runs `cargo deny` or scans the image.
 - **Workflow tokens.** Each workflow sets top-level `permissions: contents: read`. The image-publish job in
   `docker-publish.yml` and the image and chart jobs in `release.yml` raise it to `packages: write`, and the GitHub
   release job in `release.yml` to `contents: write`. `build.yml` also declares a `contents: write` release job, which
@@ -295,5 +296,4 @@ These are open and listed here so a reviewer does not have to find them:
 - Userspace memory has no node-wide cap, so heavy concurrent traffic can OOM-kill the agent (section 4).
 - OTLP is sent as plaintext gRPC, without TLS or authentication (section 3).
 - `customProbes` in `values.yaml` is accepted but does nothing (section 1).
-- Images and the chart are not signed, there is no SBOM, base images are not pinned by digest, and CI runs no dependency
-  scan (section 7).
+- Images and the chart are not signed, there is no SBOM, and CI does not scan the image (section 7).

@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM rustlang/rust:nightly-trixie AS chef
+FROM --platform=$BUILDPLATFORM rustlang/rust:nightly-trixie@sha256:56c3170cf8a4feaf0d641cff64b43c609ca425c58260041d5cb8bbe6a83ebff3 AS chef
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
@@ -58,7 +58,7 @@ RUN --mount=type=cache,id=cargo-registry-${TARGETARCH},target=/usr/local/cargo/r
     cargo build --release --features k8s --package honeybeepf-llm --target $TARGET_TRIPLE && \
     cp target/$TARGET_TRIPLE/release/honeybeepf-llm /app/honeybeepf-llm-bin
 
-FROM debian:trixie-slim AS runtime
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS runtime
 RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update && apt-get install -y libelf1 ca-certificates
 WORKDIR /app
