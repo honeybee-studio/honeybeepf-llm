@@ -118,7 +118,6 @@ spec:
                 name: {{ include "honeybeepf-llm.fullname" . }}
 
           volumeMounts:
-            # tracefs for the exec-watch tracepoint; with neither tracefs path the agent records nothing
             {{- if .Values.output.otlp.caSecret }}
             - mountPath: /etc/honeybeepf-llm/otlp-ca
               name: otlp-ca
@@ -126,6 +125,7 @@ spec:
             {{- end }}
             - mountPath: /run/honeybeepf
               name: heartbeat
+            # tracefs for the exec-watch tracepoint; with neither tracefs path the agent records nothing
             - mountPath: /sys/kernel/tracing
               name: tracefs
               readOnly: true
