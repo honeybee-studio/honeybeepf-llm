@@ -60,17 +60,29 @@ spec:
               type: "spc_t"
             {{- end }}
 
+          # The agent rewrites the heartbeat every 10 s only while its ring readers and discovery loop keep
+          # turning, so a stale file means a hung agent. Startup allows up to 5 minutes for the BPF load and attach.
+          startupProbe:
+            exec:
+              command: ["test", "-f", "/run/honeybeepf/heartbeat"]
+            periodSeconds: 5
+            # The default 1 s timeout can expire on a busy node before the shell even starts.
+            timeoutSeconds: 5
+            failureThreshold: 60
           livenessProbe:
             exec:
-              command: ["sh", "-c", "cat /proc/self/status"]
-            initialDelaySeconds: 10
+              command: ["sh", "-c", "[ $(( $(date +%s) - $(stat -c %Y /run/honeybeepf/heartbeat) )) -lt 60 ]"]
             periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
           readinessProbe:
             exec:
-              command: ["sh", "-c", "cat /proc/self/status"]
-            initialDelaySeconds: 5
+              command: ["sh", "-c", "[ $(( $(date +%s) - $(stat -c %Y /run/honeybeepf/heartbeat) )) -lt 60 ]"]
             periodSeconds: 15
+            timeoutSeconds: 5
           env:
+            - name: HEARTBEAT_FILE
+              value: /run/honeybeepf/heartbeat
             - name: K8S_NODE_NAME
               valueFrom:
                 fieldRef:
@@ -94,6 +106,8 @@ spec:
 
           volumeMounts:
             # tracefs for the exec-watch tracepoint; with neither tracefs path the agent records nothing
+            - mountPath: /run/honeybeepf
+              name: heartbeat
             - mountPath: /sys/kernel/tracing
               name: tracefs
               readOnly: true
@@ -116,6 +130,10 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
       volumes:
+        - name: heartbeat
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
         - name: tracefs
           hostPath:
             path: /sys/kernel/tracing

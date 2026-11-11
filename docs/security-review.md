@@ -219,8 +219,11 @@ returning at once for destinations that are not watched. On kernel 7.0 that meas
 - **A startup error after programs attach** sets a global shutdown flag through a drop guard, so the ring-buffer reader
   threads stop and the process exits with an error line rather than hanging (`ShutdownOnDrop` in `HoneyBeeEngine::run`,
   `honeybeepf-llm/honeybeepf-llm/src/lib.rs`).
-- **Health checks do not detect a hung agent.** The liveness and readiness probes run `cat /proc/self/status`, which
-  reads `cat`'s own status and always succeeds, so they only show that the container can run a command.
+- **Health checks:** the agent rewrites `/run/honeybeepf/heartbeat` (a 1 MiB in-memory `emptyDir`) every 10 s, but only
+  while each ring-buffer reader and the discovery loop has made progress in the last 30 s
+  (`honeybeepf-llm/honeybeepf-llm/src/health.rs`). The liveness and readiness probes fail when the file is older than 60
+  s, so the kubelet restarts a hung agent; a startup probe allows 5 minutes for the BPF load and attach. The probes are
+  exec checks, so there is still no listening port.
 - **Visibility:** a call the agent saw but could not record is counted under `llm_responses_unparsed_total` with a
   reason, and kernel-side losses under `llm_events_total` (see [docs/metrics.md](metrics.md)). These reach a collector
   only when `output.otlp.endpoint` is set; otherwise only the logs show them.
@@ -284,7 +287,6 @@ These are open and listed here so a reviewer does not have to find them:
 - A compromised agent has root-level access to the node through its capabilities, uid 0 and `hostPID` (section 2).
 - The bytes of all TLS connections in probed processes reach the agent's memory until classified; HTTP/2 and non-HTTP
   TLS are not filtered in the kernel (section 3).
-- The health probes do not detect a hung agent (section 5).
 - The agent runs as root, and through `hostPID` and `SYS_PTRACE` a compromised agent can read host files via
   `/proc/<pid>/root` (section 2).
 - The service account can read every pod spec in the cluster, not only those on its node (section 2).
