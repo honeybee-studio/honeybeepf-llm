@@ -9,7 +9,7 @@ const NOV_30: u32 = 20_787; // 2026-11-30
 #[test]
 fn test_builtin_prices_match_the_pricing_pages() {
     let table = PriceTable::builtin().expect("built-in table loads");
-    assert_eq!(table.version(), "2026-11-10");
+    assert_eq!(table.version(), "2026-11-11");
     let sources: Vec<_> = table
         .sources()
         .iter()
@@ -20,7 +20,7 @@ fn test_builtin_prices_match_the_pricing_pages() {
         [
             ("anthropic", "2026-11-10"),
             ("openai", "2026-11-07"),
-            ("gemini", "2026-10-26")
+            ("gemini", "2026-11-11")
         ]
     );
     // Opus 5.5 fast in the US: (10000×$4 + 500×$5 + 1500×$8 + 2000×$20) × 2 × 1.1.
@@ -70,6 +70,10 @@ fn test_builtin_prices_match_the_pricing_pages() {
         (NOV_30, million("gpt-4o-2024-05-13").tier("priority"), Ok(8.75)),
         (NOV_30, million("gemini-4-argon"), Ok(2.0)),
         (NOV_30 + 1, million("gemini-4-argon"), Ok(4.0)),
+        (NOV_30, million("gemini-4-carbon"), Ok(2.0)),
+        (NOV_30 + 1, million("gemini-4-carbon"), Ok(4.0)),
+        // 10000 input of which 4000 cached, 2000 output: 6000×$2 + 4000×$0.10 + 2000×$10.
+        (NOV_30, call("gemini-4-carbon", 10000, 2000).read(4000), Ok(0.0324)),
         // The gpt-5.6-sol promotion, first "through November 21", was extended through the 30th.
         (NOV_21, sol(), Ok(0.4)),
         (NOV_30, sol(), Ok(0.4)),
