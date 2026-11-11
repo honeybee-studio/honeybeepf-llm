@@ -66,16 +66,20 @@ spec:
             exec:
               command: ["test", "-f", "/run/honeybeepf/heartbeat"]
             periodSeconds: 5
+            # The default 1 s timeout can expire on a busy node before the shell even starts.
+            timeoutSeconds: 5
             failureThreshold: 60
           livenessProbe:
             exec:
               command: ["sh", "-c", "[ $(( $(date +%s) - $(stat -c %Y /run/honeybeepf/heartbeat) )) -lt 60 ]"]
             periodSeconds: 30
+            timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
             exec:
               command: ["sh", "-c", "[ $(( $(date +%s) - $(stat -c %Y /run/honeybeepf/heartbeat) )) -lt 60 ]"]
             periodSeconds: 15
+            timeoutSeconds: 5
           env:
             - name: HEARTBEAT_FILE
               value: /run/honeybeepf/heartbeat
