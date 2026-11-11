@@ -16,12 +16,13 @@ use honeybeepf_llm_core::types::{ModalityTokens, Operation, UsageInfo};
 use log::info;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 use opentelemetry::{KeyValue, global};
-use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
+use tonic::transport::{Certificate, ClientTlsConfig};
 
 #[cfg(feature = "k8s")]
 use crate::k8s::{PodInfo, UNATTRIBUTED};
@@ -423,6 +424,23 @@ fn get_otlp_endpoint() -> Option<String> {
     }
 }
 
+/// TLS for an `https://` endpoint, verified against the CA in `OTEL_EXPORTER_OTLP_CERTIFICATE` when set (a private
+/// collector CA, as the OpenTelemetry spec defines that variable), else against the system roots. Auth headers come
+/// from `OTEL_EXPORTER_OTLP_HEADERS`, which the exporter reads itself.
+fn otlp_tls(endpoint: &str) -> Result<Option<ClientTlsConfig>> {
+    if !endpoint.starts_with("https://") {
+        return Ok(None);
+    }
+    let Some(path) = std::env::var_os("OTEL_EXPORTER_OTLP_CERTIFICATE") else {
+        return Ok(Some(ClientTlsConfig::new().with_native_roots()));
+    };
+    let pem = std::fs::read(&path)
+        .with_context(|| format!("Failed to read OTLP CA {}", path.to_string_lossy()))?;
+    Ok(Some(
+        ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem)),
+    ))
+}
+
 /// Initialize OpenTelemetry metrics provider
 ///
 /// Configures metrics export to OTLP Collector via gRPC.
@@ -436,10 +454,14 @@ pub fn init_metrics() -> Result<()> {
     info!("Initializing OpenTelemetry metrics exporter");
     info!("OTLP endpoint: {endpoint}");
 
-    let exporter = opentelemetry_otlp::MetricExporter::builder()
+    let mut builder = opentelemetry_otlp::MetricExporter::builder()
         .with_tonic()
         .with_endpoint(&endpoint)
-        .with_timeout(Duration::from_secs(10))
+        .with_timeout(Duration::from_secs(10));
+    if let Some(tls) = otlp_tls(&endpoint)? {
+        builder = builder.with_tls_config(tls);
+    }
+    let exporter = builder
         .build()
         .context("Failed to create OTLP metric exporter")?;
 

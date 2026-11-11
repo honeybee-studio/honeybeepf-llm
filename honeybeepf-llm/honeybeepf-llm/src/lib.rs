@@ -109,7 +109,9 @@ impl HoneyBeeEngine {
     pub async fn run(mut self) -> Result<()> {
         let _shutdown = ShutdownOnDrop;
         if let Err(e) = telemetry::init_metrics() {
-            warn!("Failed to initialize OpenTelemetry metrics: {e}. Metrics will not be exported.");
+            warn!(
+                "Failed to initialize OpenTelemetry metrics: {e:#}. Metrics will not be exported."
+            );
         }
 
         // Start K8s pod watcher if available

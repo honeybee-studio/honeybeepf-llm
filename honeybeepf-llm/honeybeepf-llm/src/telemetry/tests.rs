@@ -67,6 +67,29 @@ fn test_get_otlp_endpoint_empty() {
 
 #[test]
 #[serial]
+fn otlp_tls_only_for_https_and_needs_a_readable_ca() {
+    // SAFETY: #[serial] keeps the tests that read or write this variable from running at the same time.
+    unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_CERTIFICATE") };
+    assert!(
+        otlp_tls("http://collector:4317")
+            .expect("plaintext")
+            .is_none()
+    );
+    assert!(
+        otlp_tls("https://collector:4317")
+            .expect("system roots")
+            .is_some()
+    );
+    // A configured CA that cannot be read stops startup rather than silently trusting the system roots only.
+    // SAFETY: as above.
+    unsafe { std::env::set_var("OTEL_EXPORTER_OTLP_CERTIFICATE", "/nonexistent/ca.crt") };
+    assert!(otlp_tls("https://collector:4317").is_err());
+    // SAFETY: as above.
+    unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_CERTIFICATE") };
+}
+
+#[test]
+#[serial]
 fn test_get_otlp_endpoint_from_env() {
     // SAFETY: #[serial] keeps the tests that read or write this variable from running at the same time.
     unsafe { std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://custom:4317") };

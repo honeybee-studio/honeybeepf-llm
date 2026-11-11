@@ -29,6 +29,20 @@ kubectl logs -n honeybeepf ds/honeybeepf-llm -f | grep 'LLM SUCCESS'
 `ds/honeybeepf-llm` follows one agent pod; on a cluster with several nodes, each node's calls are in that node's
 agent pod.
 
+To send metrics to a collector outside the cluster, use TLS and, if the collector requires it, an auth header:
+
+```bash
+kubectl -n honeybeepf create secret generic otel-ca --from-file=ca.crt=./collector-ca.crt   # only for a private CA
+kubectl -n honeybeepf create secret generic otel-auth --from-literal=headers='authorization=Bearer <token>'
+helm upgrade --install honeybeepf-llm charts/honeybeepf-llm -n honeybeepf --reuse-values \
+  --set output.otlp.endpoint=https://otel.example.com:4317 \
+  --set output.otlp.caSecret=otel-ca \
+  --set output.otlp.headersSecret.name=otel-auth --set output.otlp.headersSecret.key=headers
+```
+
+An `https://` endpoint is verified against the CA in `caSecret` if set, else the system roots; `host:port` and
+`http://` stay plaintext.
+
 ```
 2026-10-26T08:43:35.510264Z  INFO honeybeepf_llm::probes::builtin::llm::processor: LLM SUCCESS | PID: 1686847 | Model: claude-test | Latency: 0.00s | Tokens: 140 (Prompt: 125, Compl: 15, Cache read: 100, Cache write: 0) | Pod: team-b/support-bot-589db898dd-rv9ts
 ```

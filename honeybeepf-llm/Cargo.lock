@@ -1090,6 +1090,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "tokio",
+ "tonic",
  "tracing-subscriber",
 ]
 
@@ -2755,8 +2756,11 @@ dependencies = [
  "percent-encoding",
  "pin-project",
  "prost",
+ "rustls-native-certs 0.8.3",
+ "rustls-pemfile",
  "socket2 0.5.10",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower 0.4.13",
  "tower-layer",

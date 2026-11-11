@@ -18,7 +18,7 @@ private vulnerability reporting).
 | Runs as root? | Yes, uid 0 in the container, with `hostPID: true`. |
 | Host filesystem? | Only the host's cgroup tree is mounted (read-only, at `/host/sys/fs/cgroup`). Through `hostPID`, `/proc/<pid>/root` still reaches other processes' filesystems, including the host's (section 2). |
 | Reads plaintext? | Yes, in memory only: the decrypted bytes of TLS connections in processes that use the probed OpenSSL, until a connection is known not to be an LLM call (section 3). |
-| What leaves the node? | OTLP metrics over plaintext gRPC, and the container's log lines; never request or response bodies (section 3). |
+| What leaves the node? | OTLP metrics over gRPC (plaintext to an in-cluster collector by default, TLS with an `https://` endpoint), and the container's log lines; never request or response bodies (section 3). |
 | Listening ports? | None. |
 | In the request path? | No proxy, but the uprobes run in the application's own thread on every `SSL_read`/`SSL_write` (section 5). |
 | Signed images? | Yes, from the first build after signing started: keyless cosign signatures, an SBOM and build provenance on the images, and a signed release chart (section 7). |
@@ -160,9 +160,10 @@ services and endpointslices is granted but the code only gets and lists them.
   (`test_credentials_stay_out_of_logs`, `.../probes/builtin/llm/processor/tests.rs`); it covers the HTTP/1.1 path.
 - **Network.** No listening port: the chart defines no Service and the container exposes no port; the liveness and
   readiness checks are exec probes. Outbound connections are the OTLP collector, the Kubernetes API, and DNS for
-  plaintext hosts outside the cluster. OTLP is sent as plaintext gRPC: the agent is built without the exporter's TLS
-  support (`honeybeepf-llm/honeybeepf-llm/Cargo.toml`), and the chart has no authentication settings for it. With the
-  default empty `output.otlp.endpoint`, nothing is exported.
+  plaintext hosts outside the cluster. OTLP is gRPC: plaintext for a `host:port` or `http://` endpoint (the in-cluster
+  default), TLS for an `https://` endpoint, verified against the CA in `output.otlp.caSecret` if set, else the system
+  roots (`otlp_tls` in `honeybeepf-llm/honeybeepf-llm/src/telemetry.rs`). `output.otlp.headersSecret` passes headers
+  such as a bearer token from a Secret. With the default empty `output.otlp.endpoint`, nothing is exported.
 - **Disk.** The root filesystem and every host mount are read-only; the agent writes no files. (`/proc/<pid>/root` is a
   separate path; see "If the agent is compromised" in section 2.)
 - The agent reads TLS plaintext on its own node by design; keeping that plaintext inside the agent is the security
@@ -298,7 +299,6 @@ These are open and listed here so a reviewer does not have to find them:
 - The agent container runs AppArmor-unconfined; a narrower profile that allows only what discovery needs is not provided
   (section 2).
 - Userspace memory has no node-wide cap, so heavy concurrent traffic can OOM-kill the agent (section 4).
-- OTLP is sent as plaintext gRPC, without TLS or authentication (section 3).
 - `customProbes` in `values.yaml` is accepted but does nothing (section 1).
 - CI does not scan the published image for vulnerabilities, and images published before signing started are unsigned
   (section 7).
