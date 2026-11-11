@@ -56,11 +56,6 @@ static PROVIDER_CONFIG: OnceLock<Vec<KeyValue>> = OnceLock::new();
 
 /// honeybeepf-llm metrics collection
 pub struct HoneyBeeMetrics {
-    pub block_io_events: Counter<u64>,
-    pub block_io_bytes: Counter<u64>,
-    pub block_io_latency_ns: Histogram<u64>,
-    pub network_latency_ns: Histogram<u64>,
-    pub gpu_open_events: Counter<u64>,
     pub process_exit_total: Counter<u64>,
     pub process_lifetime_seconds: Histogram<f64>,
     pub file_access_events: Counter<u64>,
@@ -132,26 +127,6 @@ impl HoneyBeeMetrics {
         let (llm_cost_usd_total, llm_cache_savings_ceiling_usd_total, llm_unpriced_tokens_total) =
             Self::cost_counters(meter);
         Self {
-            block_io_events: meter
-                .u64_counter("block_io_events")
-                .with_description("Number of block I/O events")
-                .build(),
-            block_io_bytes: meter
-                .u64_counter("block_io_bytes")
-                .with_description("Total block I/O bytes")
-                .build(),
-            block_io_latency_ns: meter
-                .u64_histogram("block_io_latency_ns")
-                .with_description("Block I/O latency in nanoseconds")
-                .build(),
-            network_latency_ns: meter
-                .u64_histogram("network_latency_ns")
-                .with_description("Network latency in nanoseconds")
-                .build(),
-            gpu_open_events: meter
-                .u64_counter("gpu_open`_events")
-                .with_description("Number of GPU open events")
-                .build(),
             file_access_events: meter
                 .u64_counter("file_access_events")
                 .with_description("Number of monitored file access events")
