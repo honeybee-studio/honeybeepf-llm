@@ -1,8 +1,8 @@
 # Security review
 
 This document is for the security and platform teams who approve the agent before it runs. honeybeepf-llm is a DaemonSet
-with eBPF capabilities, the host PID namespace and a read-only view of the host filesystem. It attaches eBPF programs to
-OpenSSL and to a few kernel hooks, reads TLS plaintext in memory on the node to find LLM API calls, and exports token
+with eBPF capabilities, the host PID namespace and read-only access to the host's cgroup tree. It attaches eBPF programs
+to OpenSSL and to a few kernel hooks, reads TLS plaintext in memory on the node to find LLM API calls, and exports token
 and cost metrics over OTLP. It is not a proxy and does not change the data or the result of any call.
 
 Every statement below is drawn from the chart, the code or the CI workflows, with the file named inline, and it
@@ -16,7 +16,7 @@ private vulnerability reporting).
 |---|---|
 | Privileged container? | Not `privileged: true`: `capabilities.drop: [ALL]`, then `BPF`, `PERFMON`, `SYS_ADMIN`, `SYS_PTRACE`, `NET_ADMIN` and `SYS_RESOURCE` are added back, and AppArmor is unconfined for the agent container. With uid 0 and `hostPID`, a compromised agent has root-level access to the node (section 2). |
 | Runs as root? | Yes, uid 0 in the container, with `hostPID: true`. |
-| Host filesystem? | `/` is mounted read-only at `/host`, which exposes the whole host filesystem for reading; `/proc/<pid>/root` also reaches other processes' filesystems (section 2). |
+| Host filesystem? | Only the host's cgroup tree is mounted (read-only, at `/host/sys/fs/cgroup`). Through `hostPID`, `/proc/<pid>/root` still reaches other processes' filesystems, including the host's (section 2). |
 | Reads plaintext? | Yes, in memory only: the decrypted bytes of TLS connections in processes that use the probed OpenSSL, until a connection is known not to be an LLM call (section 3). |
 | What leaves the node? | OTLP metrics over gRPC (plaintext to an in-cluster collector by default, TLS with an `https://` endpoint), and the container's log lines; never request or response bodies (section 3). |
 | Listening ports? | None. |
@@ -58,12 +58,12 @@ or observes: none changes a syscall result, drops or redirects a packet, or modi
   true). Without kernel BTF the libssl-open watch falls back from fentry to a kprobe.
 - **Plaintext programs** load only when a provider sets `plaintext` and the node has cgroup v2 on kernel 5.10 or later;
   otherwise they stay off and the agent logs why (`plaintext::start`, called from
-  `honeybeepf-llm/honeybeepf-llm/src/lib.rs`). They attach at the host's cgroup v2 root through the `/host` mount, so
-  they see the connections of every process on the node (if `/host/sys/fs/cgroup` is not a cgroup2 mount they fall back
-  to the agent's own `/sys/fs/cgroup` and see only the agent pod; the log names the path), and act only on sockets to
-  the configured endpoints: in-cluster Services, or any other host the agent resolves by DNS
-  (`honeybeepf-llm/honeybeepf-llm/src/plaintext.rs`). `plaintext_connect4` always allows the connect and both data
-  programs always return `SK_PASS`. Watched sockets do pass through the kernel's sockmap layer, and `sk_msg` may
+  `honeybeepf-llm/honeybeepf-llm/src/lib.rs`). They attach at the host's cgroup v2 root through the
+  `/host/sys/fs/cgroup` mount, so they see the connections of every process on the node (if `/host/sys/fs/cgroup` is not
+  a cgroup2 mount they fall back to the agent's own `/sys/fs/cgroup` and see only the agent pod; the log names the
+  path), and act only on sockets to the configured endpoints: in-cluster Services, or any other host the agent resolves
+  by DNS (`honeybeepf-llm/honeybeepf-llm/src/plaintext.rs`). `plaintext_connect4` always allows the connect and both
+  data programs always return `SK_PASS`. Watched sockets do pass through the kernel's sockmap layer, and `sk_msg` may
   linearize a message (`bpf_msg_pull_data`) before copying it; the bytes delivered are unchanged.
 - **Process-lifecycle programs** (`honeybeepf_llm_group_exit`, `honeybeepf_llm_process_exit`,
   `honeybeepf_llm_oom_mark_victim`) attach only when `builtinProbes.process_lifecycle.enabled` is true (default false).
@@ -110,9 +110,11 @@ spc_t`, an unconfined SELinux type; it is off by default.
 Host access, from `charts/honeybeepf-llm/templates/daemonset.yaml`:
 
 - `hostPID: true`, to read `/proc/<pid>` of processes in other pods for libssl discovery and pod attribution.
-- `/` mounted read-only at `/host`. The agent reads only the host's cgroup tree there (`/host/sys/fs/cgroup`, for pod
-  attribution and the plaintext attach point; `honeybeepf-llm/honeybeepf-llm/src/k8s.rs`), but the mount exposes the
-  whole host filesystem for reading, including files such as other pods' mounted Secrets under `/var/lib/kubelet/pods`.
+- The host's `/sys/fs/cgroup`, mounted read-only at `/host/sys/fs/cgroup`, for pod attribution
+  (`honeybeepf-llm/honeybeepf-llm/src/k8s.rs`) and the plaintext attach point (`.../src/plaintext.rs`). No other part
+  of the host filesystem is mounted. With `hostPID` and `SYS_PTRACE` the agent can still open any process's
+  `/proc/<pid>/root`, which is how it finds other containers' libssl; that path also reaches the host's own root
+  through the host's processes, so a compromised agent can still read host files (see "If the agent is compromised").
 - `/sys/kernel/tracing` and `/sys/kernel/debug`, read-only, for tracefs. A prices ConfigMap is mounted read-only only
   when `builtinProbes.llm.prices` is set. No host path is mounted writable.
 - No `privileged: true`, no `hostNetwork`, no `hostIPC`.
@@ -219,8 +221,11 @@ returning at once for destinations that are not watched. On kernel 7.0 that meas
 - **A startup error after programs attach** sets a global shutdown flag through a drop guard, so the ring-buffer reader
   threads stop and the process exits with an error line rather than hanging (`ShutdownOnDrop` in `HoneyBeeEngine::run`,
   `honeybeepf-llm/honeybeepf-llm/src/lib.rs`).
-- **Health checks do not detect a hung agent.** The liveness and readiness probes run `cat /proc/self/status`, which
-  reads `cat`'s own status and always succeeds, so they only show that the container can run a command.
+- **Health checks:** the agent rewrites `/run/honeybeepf/heartbeat` (a 1 MiB in-memory `emptyDir`) every 10 s, but only
+  while each ring-buffer reader and the discovery loop has made progress in the last 30 s
+  (`honeybeepf-llm/honeybeepf-llm/src/health.rs`). The liveness and readiness probes fail when the file is older than 60
+  s, so the kubelet restarts a hung agent; a startup probe allows 5 minutes for the BPF load and attach. The probes are
+  exec checks, so there is still no listening port.
 - **Visibility:** a call the agent saw but could not record is counted under `llm_responses_unparsed_total` with a
   reason, and kernel-side losses under `llm_events_total` (see [docs/metrics.md](metrics.md)). These reach a collector
   only when `output.otlp.endpoint` is set; otherwise only the logs show them.
@@ -284,9 +289,8 @@ These are open and listed here so a reviewer does not have to find them:
 - A compromised agent has root-level access to the node through its capabilities, uid 0 and `hostPID` (section 2).
 - The bytes of all TLS connections in probed processes reach the agent's memory until classified; HTTP/2 and non-HTTP
   TLS are not filtered in the kernel (section 3).
-- The health probes do not detect a hung agent (section 5).
-- The agent runs as root, and the `/host` mount exposes the whole host filesystem for reading; only the cgroup tree is
-  used (section 2).
+- The agent runs as root, and through `hostPID` and `SYS_PTRACE` a compromised agent can read host files via
+  `/proc/<pid>/root` (section 2).
 - The service account can read every pod spec in the cluster, not only those on its node (section 2).
 - The agent container runs AppArmor-unconfined; a narrower profile that allows only what discovery needs is not provided
   (section 2).

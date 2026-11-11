@@ -154,7 +154,7 @@ where
     F: FnMut(&T) + Send + 'static,
 {
     let ring_buf = RingBuf::try_from(bpf.take_map(map_name).context("Failed to get map")?)?;
-    spawn_ring_loop(ring_buf, move |rb| drain_ring(rb, &mut handler));
+    spawn_ring_loop(map_name, ring_buf, move |rb| drain_ring(rb, &mut handler));
     Ok(())
 }
 
@@ -165,20 +165,24 @@ where
     F: FnMut(&LlmEventHeader, &[u8]) + Send + 'static,
 {
     let ring_buf = RingBuf::try_from(bpf.take_map(map_name).context("Failed to get map")?)?;
-    spawn_ring_loop(ring_buf, move |rb| drain_var(rb, &mut handler));
+    spawn_ring_loop(map_name, ring_buf, move |rb| drain_var(rb, &mut handler));
     Ok(())
 }
 
 /// Drive a ring reader on its own blocking thread, not a tokio worker. Under load: drain, then sleep
-/// 10 ms so it wakes per batch, not per event. Idle: block on the ring fd with poll(), so no CPU.
+/// 10 ms so it wakes per batch, not per event. Idle: block on the ring fd with poll(), so no CPU. Every pass
+/// beats the liveness heartbeat, so a reader stuck in its handler stops it.
 fn spawn_ring_loop(
+    name: &str,
     mut ring_buf: RingBuf<MapData>,
     mut drain: impl FnMut(&mut RingBuf<MapData>) -> usize + Send + 'static,
 ) {
     let shutdown = shutdown_flag();
     let fd = ring_buf.as_raw_fd();
+    let beat = crate::health::register(name);
     tokio::task::spawn_blocking(move || {
         while !shutdown.load(Ordering::Relaxed) {
+            beat.beat();
             if drain(&mut ring_buf) > 0 {
                 std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
             } else {

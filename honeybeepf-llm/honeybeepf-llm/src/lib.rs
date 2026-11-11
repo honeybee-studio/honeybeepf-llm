@@ -1,3 +1,4 @@
+pub mod health;
 pub mod settings;
 pub mod telemetry;
 
@@ -163,6 +164,7 @@ impl HoneyBeeEngine {
         }
 
         self.attach_probes()?;
+        health::spawn_writer();
 
         // Start dynamic probe discovery if any dynamic probes are enabled
         if self.dynamic_probes.is_empty() {
@@ -192,9 +194,12 @@ impl HoneyBeeEngine {
 
         info!("Dynamic discovery active. Press Ctrl-C to exit.");
 
+        let beat = health::register("discovery loop");
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
         loop {
             tokio::select! {
                 _ = signal::ctrl_c() => break,
+                _ = tick.tick() => beat.beat(),
                 () = lib_notify.notified() => {
                     let opens: Vec<LibOpen> = {
                         let mut q = lib_queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
