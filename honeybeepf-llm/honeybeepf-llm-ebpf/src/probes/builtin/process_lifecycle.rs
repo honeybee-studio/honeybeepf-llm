@@ -1,7 +1,5 @@
 use aya_ebpf::{
-    helpers::{
-        bpf_get_current_cgroup_id, bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_ktime_get_ns,
-    },
+    helpers::{bpf_get_current_cgroup_id, bpf_get_current_comm, bpf_ktime_get_ns},
     macros::{kprobe, map, tracepoint},
     maps::{LruHashMap, RingBuf},
     programs::{ProbeContext, TracePointContext},
@@ -41,14 +39,14 @@ pub fn honeybeepf_llm_oom_mark_victim(ctx: TracePointContext) -> u32 {
 
 #[kprobe]
 pub fn honeybeepf_llm_group_exit(_ctx: ProbeContext) -> u32 {
-    let tgid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    let tgid = (crate::probes::current_pid_tgid() >> 32) as u32;
     let _ = GROUP_EXITING.insert(&tgid, &1, 0);
     0
 }
 
 #[kprobe]
 pub fn honeybeepf_llm_process_exit(ctx: ProbeContext) -> u32 {
-    let pid_tgid = bpf_get_current_pid_tgid();
+    let pid_tgid = crate::probes::current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
     // mark_victim may name a non-leader thread; carry its mark over to the group.

@@ -5,9 +5,8 @@
 
 use aya_ebpf::{
     helpers::{
-        bpf_get_current_cgroup_id, bpf_get_current_comm, bpf_get_current_pid_tgid,
-        bpf_ktime_get_ns, bpf_probe_read_kernel, bpf_probe_read_kernel_buf,
-        bpf_probe_read_user_str_bytes, r#gen,
+        bpf_get_current_cgroup_id, bpf_get_current_comm, bpf_ktime_get_ns, bpf_probe_read_kernel,
+        bpf_probe_read_kernel_buf, bpf_probe_read_user_str_bytes, r#gen,
     },
     macros::{fentry, kprobe, map, tracepoint},
     maps::{Array, HashMap, LruHashMap, PerCpuArray, RingBuf},
@@ -68,7 +67,7 @@ pub static PROCESS_NAMES: HashMap<u32, [u8; 16]> = HashMap::with_max_entries(102
 
 #[tracepoint]
 pub fn probe_exec(_ctx: TracePointContext) -> u32 {
-    let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    let pid = (crate::probes::current_pid_tgid() >> 32) as u32;
 
     // Cache the accurate process name during exec phase
     if let Ok(comm) = bpf_get_current_comm() {
@@ -225,7 +224,7 @@ fn lib_open(ptr: *const u8, how: *const u64) -> u32 {
         i += 1;
     }
 
-    let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    let pid = (crate::probes::current_pid_tgid() >> 32) as u32;
     // cgroup v1 reports one id for every task, so key by process there.
     // SAFETY: argument-free helper, valid in kprobe and fentry context.
     let cgroup = unsafe { bpf_get_current_cgroup_id() };
