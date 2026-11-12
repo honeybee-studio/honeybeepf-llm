@@ -43,6 +43,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -104,6 +106,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Download all artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -195,7 +199,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout
+      # This job pushes a release tag with the checkout's token, so the token stays.
+      - name: Checkout  # zizmor: ignore[artipacked]
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -210,6 +215,9 @@ jobs:
 
       - name: Bump version
         id: bump
+        env:
+          # A workflow_dispatch input goes through the environment, never into the script text.
+          BUMP_INPUT: ${{ github.event.inputs.bump }}
         run: |
           LATEST_TAG="${{ steps.get_tag.outputs.latest_tag }}"
           
@@ -220,7 +228,7 @@ jobs:
           IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
           
           # Default bump type is patch (can be overridden by workflow_dispatch)
-          BUMP_TYPE="${{ github.event.inputs.bump || 'patch' }}"
+          BUMP_TYPE="${BUMP_INPUT:-patch}"
           
           case $BUMP_TYPE in
             major)
