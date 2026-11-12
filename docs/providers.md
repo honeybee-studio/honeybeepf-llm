@@ -13,6 +13,7 @@ replayed against it as well. A blank cell was not checked.
 | Anthropic Messages | ✅ | ✅ | ✅ read/write |
 | Google Gemini (`generateContent`, `streamGenerateContent`) | ✅ | ✅ | ✅ read |
 | Google Gemini Interactions API (Gemini API and Vertex AI) | ✅ | ✅ | ✅ read |
+| Google Gemini Decisions API (`gemini-decision-1`, input tokens only; the response names no model, so calls are unpriced) | ✅ | | |
 | Azure OpenAI | ✅ Chat Completions | ✅ Responses API | |
 | Google Vertex AI (Gemini) | ✅ | ✅ | |
 | Claude on Vertex AI, Google Cloud and Microsoft Foundry | ✅ | ✅ | ✅ read/write |

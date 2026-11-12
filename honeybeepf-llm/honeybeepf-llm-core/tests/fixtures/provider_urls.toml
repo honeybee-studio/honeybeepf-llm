@@ -94,6 +94,8 @@ gemini = [
   { url = "generativelanguage.googleapis.com/v1beta/interactions", reason = "Interactions API" },
   { url = "generativelanguage.googleapis.com/v1beta/interactions?alt=sse", reason = "Interactions API, query ignored by the anchor" },
   { url = "generativelanguage.googleapis.com/v1/interactions", reason = "Interactions API, stable v1" },
+  # Decisions API: input tokens only, same usage object as Interactions
+  { url = "generativelanguage.googleapis.com/v1beta/decisions", reason = "Decisions API" },
   # Embeddings (#79)
   { url = "generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent", reason = "Gemini API embeddings" },
   { url = "generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents", reason = "Gemini API batch embeddings" },
