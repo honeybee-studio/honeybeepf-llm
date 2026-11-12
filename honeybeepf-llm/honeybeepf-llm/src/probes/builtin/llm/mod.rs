@@ -1,5 +1,7 @@
 mod background;
 mod conn_filter;
+#[cfg(feature = "k8s")]
+pub(crate) mod coverage;
 pub mod http;
 pub mod processor;
 
@@ -192,6 +194,8 @@ fn unique_new_files<'a>(
 pub struct LlmProbe {
     /// Files already tried (attached, failed or exporting no SSL functions), so each is attempted once.
     known_targets: Arc<Mutex<HashSet<FileId>>>,
+    /// Files the SSL probes are attached to, for the per-pod TLS coverage.
+    attached: Arc<Mutex<HashSet<FileId>>>,
     /// Also probe main executables with OpenSSL built in (official Node.js builds).
     executables: bool,
 }
@@ -207,6 +211,7 @@ impl LlmProbe {
         }
         Self {
             known_targets: Arc::new(Mutex::new(HashSet::new())),
+            attached: Arc::new(Mutex::new(HashSet::new())),
             executables,
         }
     }
@@ -215,9 +220,20 @@ impl LlmProbe {
     where
         I: IntoIterator<Item = &'a String> + Clone,
     {
-        attach_new_files(&self.known_targets, paths, |path| {
+        let results = attach_new_files(&self.known_targets, paths, |path| {
             attach_probes_to_path(bpf, path)
-        })
+        });
+        let mut attached = self
+            .attached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        attached.extend(
+            results
+                .iter()
+                .filter(|(_, _, r)| matches!(r, Ok(true)))
+                .map(|(_, id, _)| *id),
+        );
+        results
     }
 }
 
@@ -430,6 +446,12 @@ impl Probe for LlmProbe {
             }
         }
 
+        #[cfg(feature = "k8s")]
+        coverage::spawn(
+            self.attached.clone(),
+            _resolver.clone(),
+            crate::telemetry::tls_coverage(),
+        );
         let state: StreamMap = Arc::new(Mutex::new(HashMap::new()));
         let background: BackgroundMap = Arc::default();
         let handler_state = state.clone();
