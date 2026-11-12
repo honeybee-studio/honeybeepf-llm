@@ -23,16 +23,17 @@ latency per Kubernetes namespace and pod over OpenTelemetry.
 ## Quickstart
 
 Requires a cluster whose nodes run a Linux 5.10+ or RHEL 8.10 / 9.6 / 9.7 kernel, `kubectl` and Helm 3. Install the
-agent and watch LLM calls per pod:
+latest release and watch LLM calls per pod:
 
 ```bash
-git clone https://github.com/honeybee-studio/honeybeepf-llm.git
-cd honeybeepf-llm
 kubectl create namespace honeybeepf
-helm install honeybeepf-llm charts/honeybeepf-llm -n honeybeepf \
-  --set builtinProbes.llm.enabled=true
+helm install honeybeepf-llm oci://ghcr.io/honeybee-studio/charts/honeybeepf-llm --version 0.2.0 \
+  -n honeybeepf --set builtinProbes.llm.enabled=true
 kubectl logs -n honeybeepf ds/honeybeepf-llm -f | grep 'LLM SUCCESS'
 ```
+
+The chart in `charts/` on `main` can expect a newer agent than the latest release image, so install it only together
+with an image built from the same commit.
 
 ![Agent log on k3s: LLM calls from pods in team-a (OpenAI), team-b (Anthropic) and team-c (Gemini), each line showing the model and the token counts the agent recorded](docs/images/demo.svg)
 

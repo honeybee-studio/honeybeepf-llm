@@ -26,6 +26,16 @@ fail() {
   fail "$cargo_toml" "[package] version '$crate' is not X.Y.Z"
 [[ $chart == "$crate" ]] || fail "$chart_yaml" "version '$chart' differs from the agent crate's $crate"
 [[ $app == "$crate" ]] || fail "$chart_yaml" "appVersion '$app' differs from the agent crate's $crate"
+# The install docs pin the release chart and tag, so a version bump must move them too.
+readme_pin="oci://ghcr.io/honeybee-studio/charts/honeybeepf-llm --version $crate"
+grep -qF -- "$readme_pin" "$root/README.md" || fail README.md "Quickstart does not install '$readme_pin'"
+for doc in README.md docs/install.md; do
+  [[ -f $root/$doc ]] || continue
+  while read -r pinned; do
+    [[ $pinned == "$crate" ]] || fail "$doc" "pins release $pinned, not the agent crate's $crate"
+  done < <(grep -oE -- '(charts/honeybeepf-llm --version |clone --branch v)[^ ]+' "$root/$doc" |
+    sed -E 's/.*(--version |--branch v)//')
+done
 # A given but empty tag is a caller bug, not "no tag".
 if ((has_tag)) && [[ $tag != "v$crate" ]]; then
   echo "::error::tag $tag is not v$crate (the version in $cargo_toml)" >&2
