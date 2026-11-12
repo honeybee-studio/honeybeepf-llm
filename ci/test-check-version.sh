@@ -30,6 +30,9 @@ type: application
 version: 0.1.0
 appVersion: "0.1.0"
 EOF
+  mkdir -p "$root/docs"
+  echo 'helm install x oci://ghcr.io/honeybee-studio/charts/honeybeepf-llm --version 0.1.0 -n x' >"$root/README.md"
+  echo 'git clone --branch v0.1.0 https://github.com/honeybee-studio/honeybeepf-llm.git' >"$root/docs/install.md"
 }
 
 cargo_version() { sed -i -E "0,/^version = .*/s//version = \"$1\"/" "$root/honeybeepf-llm/honeybeepf-llm/Cargo.toml"; }
@@ -109,5 +112,24 @@ expect "empty tag argument" fail "tag  is not v0.1.0" ""
 setup
 sed -i "s/^version = .*/version = '0.1.0'/" "$root/honeybeepf-llm/honeybeepf-llm/Cargo.toml"
 expect "single-quoted crate version" fail "[package] version '' is not X.Y.Z"
+
+setup
+cargo_version 0.2.0
+chart_field version 0.2.0
+chart_field appVersion 0.2.0
+expect "release bumped, README still pins the old chart" fail \
+  "file=README.md::Quickstart does not install 'oci://ghcr.io/honeybee-studio/charts/honeybeepf-llm --version 0.2.0'"
+
+setup
+sed -i 's/--branch v0.1.0/--branch v0.0.9/' "$root/docs/install.md"
+expect "install guide clones another tag" fail "file=docs/install.md::pins release 0.0.9, not the agent crate's 0.1.0"
+
+setup
+echo 'helm install x charts/honeybeepf-llm' >"$root/README.md"
+expect "README installs the local chart" fail "Quickstart does not install"
+
+setup
+rm "$root/docs/install.md"
+expect "no install guide" pass "0.1.0"
 
 exit "$failed"
