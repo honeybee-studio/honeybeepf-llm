@@ -182,7 +182,7 @@ the source of truth.
 | BPF map memory (`memlock`) | ~18.8 MB with plaintext capture off |
 | Application impact | −6.5% throughput in the saturating `max` case; p99 latency +0.6 ms at 200 req/s, which the benchmark treats as noise |
 
-The chart requests 200m CPU / 512Mi and limits 1 CPU / 1Gi per node (`charts/honeybeepf-llm/values.yaml`).
+The chart requests 50m CPU / 128Mi and limits 1 CPU / 1Gi per node (`charts/honeybeepf-llm/values.yaml`).
 
 **Kernel memory is fixed by the map sizes.** The ring buffers are 8 MB for TLS, 4 MB for plaintext when it is on (4 KB
 otherwise), 1 MB each for process exit and file access, and 64 KB each for exec and libssl opens. The per-thread maps of
