@@ -1856,3 +1856,29 @@ fn h2_a_stored_response_get_we_never_queued_is_not_recorded() {
     assert_eq!(count(&out, Outcome::Recorded), 0, "{out:?}");
     assert!(unparsed(&out).is_empty(), "{out:?}");
 }
+
+#[test]
+fn response_without_model_takes_the_request_model() {
+    let body = r#"{"model":"gemini-decision-1","input":"Is this a refund request?"}"#;
+    let request = format!(
+        "POST /v1beta/decisions HTTP/1.1\r\nHost: generativelanguage.googleapis.com\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let mut p = StreamProcessor::new();
+    send(&mut p, LlmDirection::Write, request.as_bytes(), None);
+    let named = p.named_by_request(UsageInfo {
+        prompt_tokens: 412,
+        ..UsageInfo::default()
+    });
+    assert_eq!(named.model.as_deref(), Some("gemini-decision-1"));
+
+    let served = p.named_by_request(UsageInfo {
+        model: Some("served".into()),
+        ..UsageInfo::default()
+    });
+    assert_eq!(
+        served.model.as_deref(),
+        Some("served"),
+        "the response's model wins"
+    );
+}

@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-11",
+  "version": "2026-11-12",
   "providers": [
     {
       "name": "anthropic",
@@ -186,10 +186,11 @@
     {
       "name": "gemini",
       "source": "https://ai.google.dev/gemini-api/docs/pricing",
-      "checked": "2026-11-11",
+      "checked": "2026-11-12",
       "models": {
         "gemini-4-argon": {"input": 2, "output": 10, "cache_read": 0.1,
           "until": "2026-11-30", "then": {"input": 4, "output": 20, "cache_read": 0.2}},
+        "gemini-decision-1": {"input": 0.1, "output": 0},
         "gemini-4-carbon": {"input": 2, "output": 10, "cache_read": 0.1,
           "until": "2026-11-30", "then": {"input": 4, "output": 20, "cache_read": 0.2}},
         "gemini-3.8-flash": {"input": 0.75, "output": 3.75, "cache_read": 0.075,
