@@ -1,6 +1,6 @@
 //! Keeps each connection's SSL_CLASS entry and drops the calls its class skips, before any ringbuf reserve.
 
-use aya_ebpf::helpers::bpf_probe_read_user;
+use aya_ebpf::helpers::{bpf_get_current_pid_tgid, bpf_probe_read_user};
 use honeybeepf_llm_common::{
     LlmDirection,
     ssl_class::{self, ClassEntry, GetHead},
@@ -44,6 +44,6 @@ pub fn drops(call: &SslCall, rw: u8) -> bool {
 /// Drop the connection's class, since its SSL* address can be reused by the next connection.
 #[inline(always)]
 pub fn forget(ssl: u64) {
-    let tgid = crate::probes::current_pid_tgid() >> 32;
+    let tgid = bpf_get_current_pid_tgid() >> 32;
     let _ = SSL_CLASS.remove(&[tgid, ssl]);
 }

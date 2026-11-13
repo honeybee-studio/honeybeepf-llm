@@ -1,5 +1,7 @@
 use aya_ebpf::{
-    helpers::{bpf_get_current_comm, bpf_ktime_get_ns, bpf_probe_read_user},
+    helpers::{
+        bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_user,
+    },
     programs::RetProbeContext,
 };
 use honeybeepf_llm_common::{EventMetadata, LlmEventHeader, LlmStat};
@@ -8,7 +10,7 @@ use crate::probes::builtin::llm::maps::{BUFS, LLM_STATS, READBYTES_PTRS, START_N
 
 #[inline(always)]
 pub fn get_current_tid() -> u32 {
-    crate::probes::current_pid_tgid() as u32
+    bpf_get_current_pid_tgid() as u32
 }
 
 /// Increment one `LlmStat` counter for the current CPU (approximate: not atomic).
@@ -55,7 +57,7 @@ impl Session {
 /// Metadata for an event of the current task (LlmEvent doesn't use the HoneyBeeEvent trait).
 #[inline(always)]
 pub fn current_metadata() -> EventMetadata {
-    let pid_tgid = crate::probes::current_pid_tgid();
+    let pid_tgid = bpf_get_current_pid_tgid();
     EventMetadata {
         pid: (pid_tgid >> 32) as u32,
         // EventMetadata is shared across all event types, so the tid goes in the padding field.

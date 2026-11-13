@@ -2,7 +2,7 @@
 //! Uses exact path matching with FNV-1a hash for efficient lookups.
 
 use aya_ebpf::{
-    helpers::{bpf_get_current_comm, bpf_probe_read_user_str_bytes},
+    helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_probe_read_user_str_bytes},
     macros::{map, tracepoint},
     maps::{HashMap, RingBuf},
     programs::TracePointContext,
@@ -84,7 +84,7 @@ impl HoneyBeeEvent<TracePointContext> for FileAccessEvent {
 
         self.flags = flags as u32;
         self.mode = mode as u32;
-        self.tid = (crate::probes::current_pid_tgid() & 0xFFFFFFFF) as u32;
+        self.tid = (bpf_get_current_pid_tgid() & 0xFFFFFFFF) as u32;
 
         // Read process comm
         if let Ok(comm) = bpf_get_current_comm() {
