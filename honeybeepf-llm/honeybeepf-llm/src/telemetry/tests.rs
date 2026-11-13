@@ -1154,7 +1154,7 @@ fn manual_provider() -> (SdkMeterProvider, SharedReader) {
     (provider, reader)
 }
 
-/// `llm_responses_unparsed_total` by pod name, and the count in the overflow series, as one reader saw it.
+/// `llm_responses_unparsed_total` by pod name in the `batch` namespace, and the count in the overflow series.
 #[cfg(feature = "k8s")]
 fn unparsed_by_pod(reader: &SharedReader) -> Result<(HashMap<String, u64>, u64)> {
     let mut rm = ResourceMetrics {
@@ -1169,15 +1169,21 @@ fn unparsed_by_pod(reader: &SharedReader) -> Result<(HashMap<String, u64>, u64)>
         .find(|m| m.name == "llm_responses_unparsed_total")
         .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
         .context("llm_responses_unparsed_total not collected")?;
+    // Other tests record into the global metrics at the same time; count only this test's namespace.
+    let attr = |p: &data::DataPoint<u64>, key: &str| {
+        p.attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.to_string())
+    };
     let (mut pods, mut overflow) = (HashMap::new(), 0);
     for p in &sum.data_points {
-        let pod = p
-            .attributes
-            .iter()
-            .find(|kv| kv.key.as_str() == "target.pod.name");
-        match pod {
-            Some(kv) => *pods.entry(kv.value.to_string()).or_default() += p.value,
-            None => overflow += p.value,
+        if attr(p, "otel.metric.overflow").is_some() {
+            overflow += p.value;
+        } else if attr(p, "target.namespace").as_deref() == Some("batch")
+            && let Some(pod) = attr(p, "target.pod.name")
+        {
+            *pods.entry(pod).or_default() += p.value;
         }
     }
     Ok((pods, overflow))
