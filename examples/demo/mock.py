@@ -86,6 +86,7 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.minimum_version = ssl.TLSVersion.TLSv1_2
 ctx.load_cert_chain(sys.argv[1], sys.argv[2])
 srv = Server(("0.0.0.0", int(sys.argv[3]) if len(sys.argv) > 3 else 8443), Handler)
 srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
