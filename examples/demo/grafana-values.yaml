@@ -1,0 +1,24 @@
+# Grafana for examples/demo: anonymous viewer, the demo's Prometheus as the data source, dashboards from a ConfigMap.
+grafana.ini:
+  auth.anonymous:
+    enabled: true
+    org_role: Viewer
+  auth:
+    disable_login_form: true
+  users:
+    default_theme: light
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: prometheus
+        type: prometheus
+        url: http://honeybeepf-llm-prometheus-server.honeybeepf.svc
+        isDefault: true
+sidecar:
+  dashboards:
+    enabled: true
+    label: grafana_dashboard
+persistence:
+  enabled: false
