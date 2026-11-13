@@ -26,6 +26,8 @@ use log::{debug, warn};
 
 /// Workload label value for a pod whose owner cannot be named.
 pub const UNATTRIBUTED: &str = "unattributed";
+/// Fewest time between two cgroup-tree searches for a cgroup_id missing from the cache (nested PID namespace).
+const REFILL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Kubernetes pod identity resolved from a PID/cgroup_id.
 #[derive(Debug, Clone)]
@@ -67,6 +69,11 @@ pub struct PodResolver {
     pod_store: RwLock<HashMap<String, Arc<PodInfo>>>,
     /// (pod label key, metric attribute) of each label copied onto LLM metrics.
     pod_labels: Vec<(String, String)>,
+    /// False when the agent runs in a nested PID namespace: event PIDs are then not this /proc's, and
+    /// /proc/<pid>/cgroup could name another process, so a cache miss is looked up in the cgroup tree.
+    pid_lookup: bool,
+    /// When the cgroup tree was last searched on a miss, so a burst of misses searches it once.
+    last_refill: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl Default for PodResolver {
@@ -87,7 +94,15 @@ impl PodResolver {
             cgroup_cache: RwLock::new(HashMap::new()),
             pod_store: RwLock::new(HashMap::new()),
             pod_labels: pod_label_attrs(allowlist),
+            pid_lookup: true,
+            last_refill: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Resolve cache misses from the cgroup tree, not `/proc/<pid>/cgroup`, when event PIDs are not this /proc's.
+    pub fn without_pid_lookup(mut self) -> Self {
+        self.pid_lookup = false;
+        self
     }
 
     /// Resolve a PID + cgroup_id to pod metadata.
@@ -108,6 +123,10 @@ impl PodResolver {
                 Some(container_id) => self.pod_store.read().ok()?.get(container_id).cloned(),
                 None => None, // Known non-container PID
             };
+        }
+
+        if !self.pid_lookup {
+            return self.refill_and_get(cgroup_id);
         }
 
         // Slow path: parse /proc/{pid}/cgroup.
@@ -133,6 +152,38 @@ impl PodResolver {
     pub fn resolve_pid(&self, pid: u32) -> Option<Arc<PodInfo>> {
         let container_id = extract_container_id(pid)?;
         self.pod_store.read().ok()?.get(&container_id).cloned()
+    }
+
+    /// Look up the cgroup id of every known container not cached yet, at most once a second, then retry.
+    fn refill_and_get(&self, cgroup_id: u64) -> Option<Arc<PodInfo>> {
+        if !self.cgroup_v2 {
+            return None;
+        }
+        {
+            let mut last = self.last_refill.lock().ok()?;
+            if last.is_some_and(|t| t.elapsed() < REFILL_INTERVAL) {
+                return None;
+            }
+            *last = Some(std::time::Instant::now());
+        }
+        let known: Vec<String> = self.pod_store.read().ok()?.keys().cloned().collect();
+        let cached: std::collections::HashSet<String> = self
+            .cgroup_cache
+            .read()
+            .ok()?
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        for cid in known.iter().filter(|cid| !cached.contains(*cid)) {
+            if let Some(id) = lookup_cgroup_id_by_container(cid)
+                && let Ok(mut cache) = self.cgroup_cache.write()
+            {
+                cache.insert(id, Some(cid.clone()));
+            }
+        }
+        let cid = self.cgroup_cache.read().ok()?.get(&cgroup_id)?.clone()?;
+        self.pod_store.read().ok()?.get(&cid).cloned()
     }
 
     /// Start the K8s pod watcher background task.

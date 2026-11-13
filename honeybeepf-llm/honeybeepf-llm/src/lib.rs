@@ -39,11 +39,21 @@ use crate::probes::{
     request_shutdown, shutdown_flag,
 };
 
+/// Inode of the root PID namespace (PROC_PID_INIT_INO); any other means the agent runs in a nested one.
+const INIT_PIDNS_INO: u64 = 0xEFFF_FFFC;
+/// In a nested PID namespace, the fewest seconds between two /proc rescans an exec or libssl open asks for.
+const RESCAN_DEBOUNCE_SECS: u64 = 2;
+/// In a nested PID namespace, a /proc rescan every this many discovery ticks (5 s), for libssl loaded after exec.
+const RESCAN_EVERY_TICKS: u32 = 2;
+
 pub struct HoneyBeeEngine {
     pub settings: Settings,
     bpf: Ebpf,
     dynamic_probes: Vec<Box<dyn DynamicProbe>>,
     resolver: IdentityResolver,
+    /// The agent runs in a nested PID namespace (node in a container: kind, k3d, minikube). The kernel reports
+    /// root-namespace PIDs, which this /proc does not show, so discovery rescans /proc instead of using them.
+    nested_pidns: bool,
 }
 
 impl HoneyBeeEngine {
@@ -57,6 +67,12 @@ impl HoneyBeeEngine {
         // Not required to exist: test objects without the LLM programs still load.
         let mut loader = EbpfLoader::new();
         loader.set_global("TAIL_CALL_OK", &tail_call_ok, false);
+        let nested_pidns = nested_pidns().is_some();
+        if nested_pidns {
+            info!(
+                "Agent runs in a nested PID namespace (node in a container): new processes are found by rescanning /proc"
+            );
+        }
         // The plaintext hash/sock maps prealloc ~8 MB at full size (PLAIN_CONNS ~6.5 MB); keep them
         // at one slot unless capture is configured, which only the k8s build resolves endpoints for.
         #[cfg(feature = "k8s")]
@@ -103,6 +119,7 @@ impl HoneyBeeEngine {
             bpf,
             dynamic_probes,
             resolver,
+            nested_pidns,
         })
     }
 
@@ -132,9 +149,12 @@ impl HoneyBeeEngine {
             if let Ok(node_name) = resolved_node_name {
                 info!("Starting K8s pod watcher for node: {node_name}");
                 let pod_labels = self.settings.builtin_probes.llm_pod_labels.as_deref();
-                let pod_resolver = Arc::new(k8s::PodResolver::with_pod_labels(
-                    pod_labels.unwrap_or_default(),
-                ));
+                let mut pod_resolver =
+                    k8s::PodResolver::with_pod_labels(pod_labels.unwrap_or_default());
+                if self.nested_pidns {
+                    pod_resolver = pod_resolver.without_pid_lookup();
+                }
+                let pod_resolver = Arc::new(pod_resolver);
                 match pod_resolver.start_k8s_watcher(node_name).await {
                     Ok(_handle) => {
                         info!("K8s pod watcher started");
@@ -198,11 +218,24 @@ impl HoneyBeeEngine {
 
         let beat = health::register("discovery loop");
         let mut tick = tokio::time::interval(Duration::from_secs(5));
+        // Nested PID namespace only: event PIDs are not this /proc's, so events just ask for a rescan.
+        let mut ticks = 0u32;
+        let mut rescan = RescanGate::default();
         loop {
             tokio::select! {
                 _ = signal::ctrl_c() => break,
-                _ = tick.tick() => beat.beat(),
-                () = lib_notify.notified() => {
+                _ = tick.tick() => {
+                    beat.beat();
+                    ticks = ticks.wrapping_add(1);
+                    if self.nested_pidns && ticks.is_multiple_of(RESCAN_EVERY_TICKS) {
+                        rescan.request();
+                    }
+                },
+                () = lib_notify.notified(), if self.nested_pidns => {
+                    lib_queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+                    rescan.request();
+                }
+                () = lib_notify.notified(), if !self.nested_pidns => {
                     let opens: Vec<LibOpen> = {
                         let mut q = lib_queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         q.drain(..).collect()
@@ -229,8 +262,11 @@ impl HoneyBeeEngine {
                         let mut q = queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         q.drain(..).collect()
                     };
+                    if self.nested_pidns && !pids.is_empty() {
+                        rescan.request();
+                    }
 
-                    if !pids.is_empty() {
+                    if !self.nested_pidns && !pids.is_empty() {
                         for pid in pids {
                             // Pre-fetch libraries once per process to avoid redundant I/O
                             let libs = match crate::probes::discovery::get_process_libraries(pid) {
@@ -254,6 +290,10 @@ impl HoneyBeeEngine {
                 }
             }
 
+            if rescan.take(std::time::Instant::now()) {
+                self.rescan_processes();
+            }
+
             if shutdown.load(Ordering::Relaxed) {
                 break;
             }
@@ -263,6 +303,24 @@ impl HoneyBeeEngine {
         telemetry::shutdown_metrics();
 
         Ok(())
+    }
+
+    /// Offer every process in /proc to the probes as its exec would; files already tried are skipped there.
+    fn rescan_processes(&mut self) {
+        let Ok(procs) = procfs::process::all_processes() else {
+            return;
+        };
+        for process in procs.flatten() {
+            let pid = process.pid as u32;
+            let Ok(libs) = crate::probes::discovery::get_process_libraries(pid) else {
+                continue;
+            };
+            if libs.is_empty() {
+                continue;
+            }
+            let exe = crate::probes::discovery::get_process_exe(pid);
+            self.notify_probes(&ProcessInfo { pid, libs, exe });
+        }
     }
 
     fn notify_probes(&mut self, process_info: &ProcessInfo) {
@@ -331,6 +389,44 @@ impl Drop for ShutdownOnDrop {
     }
 }
 
+/// A /proc rescan asked for by events, run at most once per `RESCAN_DEBOUNCE_SECS`.
+#[derive(Default)]
+struct RescanGate {
+    due: bool,
+    last: Option<std::time::Instant>,
+}
+
+impl RescanGate {
+    fn request(&mut self) {
+        self.due = true;
+    }
+
+    /// Whether to rescan now; a request within the debounce waits for a later call.
+    fn take(&mut self, now: std::time::Instant) -> bool {
+        let ready = self
+            .last
+            .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(RESCAN_DEBOUNCE_SECS));
+        if self.due && ready {
+            (self.due, self.last) = (false, Some(now));
+            return true;
+        }
+        false
+    }
+}
+
+/// The agent's PID namespace (st_dev, st_ino) when it is not the root one: on a node in a container (kind, k3d,
+/// minikube), the kernel's PIDs differ from the ones this /proc shows.
+fn nested_pidns() -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let ns = std::fs::metadata("/proc/self/ns/pid").ok()?;
+    nested(ns.dev(), ns.ino())
+}
+
+/// The namespace when it is not the root one, whose PIDs the kernel reports.
+fn nested(dev: u64, ino: u64) -> Option<(u64, u64)> {
+    (ino != INIT_PIDNS_INO).then_some((dev, ino))
+}
+
 fn bump_memlock_rlimit() -> Result<()> {
     let rlim = libc::rlimit {
         rlim_cur: libc::RLIM_INFINITY,
@@ -358,6 +454,33 @@ mod tests {
         probes::POLL_INTERVAL_MS,
         settings::{BuiltinProbes, FilesystemProbes},
     };
+
+    #[test]
+    fn rescans_run_once_per_debounce_and_only_when_asked() {
+        let mut gate = RescanGate::default();
+        let t0 = std::time::Instant::now();
+        assert!(!gate.take(t0), "nothing asked");
+        gate.request();
+        assert!(gate.take(t0));
+        gate.request();
+        gate.request();
+        assert!(
+            !gate.take(t0 + Duration::from_secs(1)),
+            "within the debounce"
+        );
+        assert!(
+            gate.take(t0 + Duration::from_secs(RESCAN_DEBOUNCE_SECS)),
+            "kept until then"
+        );
+        assert!(!gate.take(t0 + Duration::from_secs(10)), "served");
+    }
+
+    #[test]
+    fn only_a_pid_namespace_other_than_the_root_one_is_nested() {
+        assert_eq!(nested(4, INIT_PIDNS_INO), None);
+        // kind v0.29: the node container's namespace, as the agent pod with hostPID sees it.
+        assert_eq!(nested(4, 4_026_532_239), Some((4, 4_026_532_239)));
+    }
 
     #[test]
     fn test_tail_call_allowed_by_kernel() {

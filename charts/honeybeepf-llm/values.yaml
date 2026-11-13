@@ -139,13 +139,15 @@ securityContext:
       - NET_ADMIN   # create the plaintext sockhash map, made at load even with plaintext off (kernels before 6.9 refuse it without NET_ADMIN)
       - SYS_RESOURCE  # raise RLIMIT_MEMLOCK for the BPF maps; kernels before 5.11 charge map memory to it, not to the cgroup
 
+# Requests follow docs/benchmark.md (plaintext capture off): about 50 MB in use (RSS plus BPF maps) and under
+# 0.1 CPU at 11k LLM calls/s. The limits leave room for large calls, which are buffered per connection.
 resources:
   limits:
     cpu: "1000m"
     memory: "1Gi"
   requests:
-    cpu: "200m"
-    memory: "512Mi"
+    cpu: "50m"
+    memory: "128Mi"
 
 nodeSelector:
   kubernetes.io/os: linux
