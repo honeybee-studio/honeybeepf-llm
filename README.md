@@ -12,9 +12,11 @@
 repository against a local mock of the provider APIs with fake keys.</sub>
 
 - **0 lines of app code changed** — SDKs keep calling the real provider; nothing to import, wrap or redeploy.
-- **~7.7 µs of agent CPU per request** at ~31 MB RSS, measured A/B at ~6.8k HTTPS requests/s ([benchmark](docs/benchmark.md)).
+- **~67 µs of agent CPU per LLM call** at 200 calls/s, 31 MB RSS plus 19 MB of BPF maps, and −6.5% throughput at
+  ~11k calls/s, measured with and without the agent in v0.2.0 ([benchmark](docs/benchmark.md)).
 - **11 built-in provider APIs** — OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI, Meta.
-- **10 kernels in CI** — Linux 5.10 through 7.2 and RHEL 8.10 / 9.6 / 9.7, probes loaded and attached on x86-64 (and arm64 on 5.15 and 6.1).
+- **10 kernels in CI** — Linux 5.10 through 7.2 and RHEL 8.10 / 9.6 / 9.7, probes loaded and attached on x86-64
+  (arm64 on 5.15 and 6.1 runs too, not yet required to pass).
 
 honeybeepf-llm is a Rust eBPF agent that runs as a DaemonSet. It attaches uprobes to OpenSSL's `SSL_write` and
 `SSL_read`, reads the plaintext HTTP of calls to LLM providers, and exports token usage, request counts and
@@ -23,16 +25,17 @@ latency per Kubernetes namespace and pod over OpenTelemetry.
 ## Quickstart
 
 Requires a cluster whose nodes run a Linux 5.10+ or RHEL 8.10 / 9.6 / 9.7 kernel, `kubectl` and Helm 3. Install the
-agent and watch LLM calls per pod:
+latest release and watch LLM calls per pod:
 
 ```bash
-git clone https://github.com/honeybee-studio/honeybeepf-llm.git
-cd honeybeepf-llm
 kubectl create namespace honeybeepf
-helm install honeybeepf-llm charts/honeybeepf-llm -n honeybeepf \
-  --set builtinProbes.llm.enabled=true
+helm install honeybeepf-llm oci://ghcr.io/honeybee-studio/charts/honeybeepf-llm --version 0.2.0 \
+  -n honeybeepf --set builtinProbes.llm.enabled=true
 kubectl logs -n honeybeepf ds/honeybeepf-llm -f | grep 'LLM SUCCESS'
 ```
+
+The chart in `charts/` on `main` can expect a newer agent than the latest release image, so install it only together
+with an image built from the same commit.
 
 ![Agent log on k3s: LLM calls from pods in team-a (OpenAI), team-b (Anthropic) and team-c (Gemini), each line showing the model and the token counts the agent recorded](docs/images/demo.svg)
 
@@ -60,7 +63,7 @@ commands, required capabilities, resources and uninstall are in [docs/install.md
 | Runtimes | Python, Node.js, curl, anything linked to OpenSSL `libssl` — not Go `crypto/tls`, rustls, JSSE, GnuTLS, NSS |
 | Protocols | HTTP/1.1 and HTTP/2 — not WebSocket, not HTTP/3 (QUIC) |
 | Transport | HTTPS through OpenSSL; in-cluster plain HTTP (Ollama, vLLM) on opt-in |
-| Kernels | Linux 5.10–7.2 and RHEL 8.10 / 9.6 / 9.7 on x86-64, 5.15 and 6.1 on arm64, loaded and attached in CI; token counts checked on 7.0 |
+| Kernels | Linux 5.10–7.2 and RHEL 8.10 / 9.6 / 9.7 on x86-64, 5.15 and 6.1 on arm64 (not yet required to pass), loaded and attached in CI; token counts checked on 7.0 |
 
 The exact checks, how to add a provider, and plain-HTTP capture are in [docs/providers.md](docs/providers.md).
 

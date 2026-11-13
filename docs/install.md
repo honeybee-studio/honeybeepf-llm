@@ -3,9 +3,14 @@
 ## Quickstart
 
 Requires a Kubernetes cluster whose nodes run a Linux 5.10+ or RHEL 8.10 / 9.6 / 9.7 kernel, `kubectl` and Helm 3.
+These steps install the latest release, v0.2.0, with a bundled Prometheus and OpenTelemetry Collector. The charts are
+checked out at the release tag because the charts on `main` can expect a newer agent than the release image.
+
+The rest of this page describes the chart on `main`. The v0.2.0 chart differs in two ways: it grants only `BPF`,
+`PERFMON`, `SYS_ADMIN` and `SYS_PTRACE`, and it has no `output.otlp.caSecret` or `output.otlp.headersSecret`.
 
 ```bash
-git clone https://github.com/honeybee-studio/honeybeepf-llm.git
+git clone --branch v0.2.0 https://github.com/honeybee-studio/honeybeepf-llm.git
 cd honeybeepf-llm
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
@@ -47,7 +52,7 @@ An `https://` endpoint is verified against the CA in `caSecret` if set, else the
 2026-10-26T08:43:35.510264Z  INFO honeybeepf_llm::probes::builtin::llm::processor: LLM SUCCESS | PID: 1686847 | Model: claude-test | Latency: 0.00s | Tokens: 140 (Prompt: 125, Compl: 15, Cache read: 100, Cache write: 0) | Pod: team-b/support-bot-589db898dd-rv9ts
 ```
 
-The agent needs `hostPID` and the `BPF`, `PERFMON`, `SYS_ADMIN`, `SYS_PTRACE`, `NET_ADMIN` and `SYS_RESOURCE` capabilities, and requests 200m CPU / 512Mi per node (limits 1 CPU / 1Gi); see
+The agent needs `hostPID` and the `BPF`, `PERFMON`, `SYS_ADMIN`, `SYS_PTRACE`, `NET_ADMIN` and `SYS_RESOURCE` capabilities, and requests 50m CPU / 128Mi per node (limits 1 CPU / 1Gi); see
 [`values.yaml`](../charts/honeybeepf-llm/values.yaml).
 
 Two of those capabilities are only needed on older kernels. The chart grants them so one install works on every node;

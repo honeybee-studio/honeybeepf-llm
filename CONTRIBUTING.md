@@ -124,7 +124,8 @@ make test
 The agent, its image and the `honeybeepf-llm` chart share one version.
 
 1. In a PR, set the same `X.Y.Z` in `honeybeepf-llm/honeybeepf-llm/Cargo.toml` (`version`) and
-   `charts/honeybeepf-llm/Chart.yaml` (`version` and `appVersion`). CI runs `ci/check-version.sh` on every PR.
+   `charts/honeybeepf-llm/Chart.yaml` (`version` and `appVersion`), and in the install commands of `README.md` and
+   `docs/install.md` (`--version X.Y.Z`, `--branch vX.Y.Z`). CI runs `ci/check-version.sh` on every PR.
 2. Right after it merges, tag that commit on `main` and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
    Until the tag's image exists, the chart on `main` points at an image tag that is not there yet.
 3. `release.yml` checks that the tag matches both files and that neither the image nor the chart version exists,
