@@ -39,6 +39,9 @@ use crate::probes::{
     request_shutdown, shutdown_flag,
 };
 
+/// Inode of the root PID namespace (PROC_PID_INIT_INO); any other means the agent runs in a nested one.
+const INIT_PIDNS_INO: u64 = 0xEFFF_FFFC;
+
 pub struct HoneyBeeEngine {
     pub settings: Settings,
     bpf: Ebpf,
@@ -57,6 +60,15 @@ impl HoneyBeeEngine {
         // Not required to exist: test objects without the LLM programs still load.
         let mut loader = EbpfLoader::new();
         loader.set_global("TAIL_CALL_OK", &tail_call_ok, false);
+        // The loader borrows the values until `load`, so they live out here.
+        let pidns = nested_pidns();
+        if let Some((dev, ino)) = &pidns {
+            info!(
+                "Agent runs in a nested PID namespace (inode {ino}): eBPF reports PIDs as this /proc shows them"
+            );
+            loader.set_global("PIDNS_DEV", dev, false);
+            loader.set_global("PIDNS_INO", ino, false);
+        }
         // The plaintext hash/sock maps prealloc ~8 MB at full size (PLAIN_CONNS ~6.5 MB); keep them
         // at one slot unless capture is configured, which only the k8s build resolves endpoints for.
         #[cfg(feature = "k8s")]
@@ -331,6 +343,19 @@ impl Drop for ShutdownOnDrop {
     }
 }
 
+/// The agent's PID namespace (st_dev, st_ino) when it is not the root one: on a node in a container (kind, k3d,
+/// minikube), the kernel's PIDs differ from the ones this /proc shows.
+fn nested_pidns() -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let ns = std::fs::metadata("/proc/self/ns/pid").ok()?;
+    nested(ns.dev(), ns.ino())
+}
+
+/// The namespace to translate PIDs into, or None for the root one, whose PIDs the kernel already reports.
+fn nested(dev: u64, ino: u64) -> Option<(u64, u64)> {
+    (ino != INIT_PIDNS_INO).then_some((dev, ino))
+}
+
 fn bump_memlock_rlimit() -> Result<()> {
     let rlim = libc::rlimit {
         rlim_cur: libc::RLIM_INFINITY,
@@ -358,6 +383,13 @@ mod tests {
         probes::POLL_INTERVAL_MS,
         settings::{BuiltinProbes, FilesystemProbes},
     };
+
+    #[test]
+    fn only_a_nested_pid_namespace_is_passed_to_ebpf() {
+        assert_eq!(nested(4, INIT_PIDNS_INO), None);
+        // kind v0.29: the node container's namespace, as the agent pod with hostPID sees it.
+        assert_eq!(nested(4, 4_026_532_239), Some((4, 4_026_532_239)));
+    }
 
     #[test]
     fn test_tail_call_allowed_by_kernel() {
