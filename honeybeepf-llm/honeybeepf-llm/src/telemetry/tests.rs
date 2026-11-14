@@ -562,8 +562,8 @@ fn llm_suppressed_fallback_attempt_records_tokens_but_no_cost() -> Result<()> {
     };
     // Both attempts' tokens are recorded, but only the served model is billed.
     let cost_models = models("llm_cost_usd_total");
-    assert!(cost_models.contains(&"served-m".to_string()));
-    assert!(!cost_models.contains(&"declined-m".to_string()));
+    assert!(cost_models.iter().any(|m| m == "served-m"));
+    assert!(!cost_models.iter().any(|m| m == "declined-m"));
     Ok(())
 }
 
