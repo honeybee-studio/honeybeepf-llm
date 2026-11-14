@@ -29,7 +29,7 @@ latest release and watch LLM calls per pod:
 
 ```bash
 kubectl create namespace honeybeepf
-helm install honeybeepf-llm oci://ghcr.io/honeybee-studio/charts/honeybeepf-llm --version 0.3.0 \
+helm install honeybeepf-llm oci://ghcr.io/honeybee-studio/charts/honeybeepf-llm --version 0.3.1 \
   -n honeybeepf --set builtinProbes.llm.enabled=true
 kubectl logs -n honeybeepf ds/honeybeepf-llm -f | grep 'LLM SUCCESS'
 ```

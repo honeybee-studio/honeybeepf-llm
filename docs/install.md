@@ -3,11 +3,11 @@
 ## Quickstart
 
 Requires a Kubernetes cluster whose nodes run a Linux 5.10+ or RHEL 8.10 / 9.6 / 9.7 kernel, `kubectl` and Helm 3.
-These steps install the latest release, v0.3.0, with a bundled Prometheus and OpenTelemetry Collector. The charts are
+These steps install the latest release, v0.3.1, with a bundled Prometheus and OpenTelemetry Collector. The charts are
 checked out at the release tag because the charts on `main` can expect a newer agent than the release image.
 
 ```bash
-git clone --branch v0.3.0 https://github.com/honeybee-studio/honeybeepf-llm.git
+git clone --branch v0.3.1 https://github.com/honeybee-studio/honeybeepf-llm.git
 cd honeybeepf-llm
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
