@@ -9,7 +9,7 @@ const NOV_30: u32 = 20_787; // 2026-11-30
 #[test]
 fn test_builtin_prices_match_the_pricing_pages() {
     let table = PriceTable::builtin().expect("built-in table loads");
-    assert_eq!(table.version(), "2026-11-12");
+    assert_eq!(table.version(), "2026-11-14");
     let sources: Vec<_> = table
         .sources()
         .iter()
@@ -20,7 +20,7 @@ fn test_builtin_prices_match_the_pricing_pages() {
         [
             ("anthropic", "2026-11-10"),
             ("openai", "2026-11-07"),
-            ("gemini", "2026-11-12")
+            ("gemini", "2026-11-14")
         ]
     );
     // Opus 5.5 fast in the US: (10000×$4 + 500×$5 + 1500×$8 + 2000×$20) × 2 × 1.1.
@@ -71,6 +71,9 @@ fn test_builtin_prices_match_the_pricing_pages() {
         (NOV_30, million("gemini-4-argon"), Ok(2.0)),
         (NOV_30 + 1, million("gemini-4-argon"), Ok(4.0)),
         (NOV_30, million("gemini-4-carbon"), Ok(2.0)),
+        (NOV_30, million("gemini-4-hydrogen"), Ok(1.5)),
+        // 10000 input of which 4000 cached, 2000 output: 6000×$1.50 + 4000×$0.075 + 2000×$7.50.
+        (NOV_30, call("gemini-4-hydrogen", 10000, 2000).read(4000), Ok(0.0243)),
         (NOV_30 + 1, million("gemini-4-carbon"), Ok(4.0)),
         (NOV_30, million("gemini-decision-1"), Ok(0.1)),
         // 10000 input of which 4000 cached, 2000 output: 6000×$2 + 4000×$0.10 + 2000×$10.
