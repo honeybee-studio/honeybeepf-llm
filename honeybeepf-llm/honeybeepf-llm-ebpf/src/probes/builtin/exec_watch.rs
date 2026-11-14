@@ -19,9 +19,10 @@ use super::llm::maps::EXEC_RINGBUF_SIZE;
 
 /// Path bytes searched for the basename, counted from the end; libssl basenames are far shorter.
 const TAIL_LEN: usize = 32;
-/// "/libssl.so" as the last 10 bytes read: first two in `hi`, last eight in `lo`.
-const LIBSSL_WIN_HI: u64 = u16::from_be_bytes(*b"/l") as u64;
-const LIBSSL_WIN_LO: u64 = u64::from_be_bytes(*b"ibssl.so");
+/// "/libssl.so" as read from memory: the first two bytes as a u16, the last eight as a u64.
+const LIBSSL_WIN_LEN: usize = 10;
+const LIBSSL_WIN_HI: u16 = u16::from_le_bytes(*b"/l");
+const LIBSSL_WIN_LO: u64 = u64::from_le_bytes(*b"ibssl.so");
 /// Any "ibssl.so" in the tail fully covers an aligned 4-byte block, and that block is one of these.
 const LIBSSL_BLOCKS: [u32; 4] = [
     u32::from_le_bytes(*b"ibss"),
@@ -135,16 +136,28 @@ fn copy_tail(path: &[u8; MAX_FILENAME_LEN], len: usize, tail: &mut [u32; TAIL_LE
 /// Whether the path ending in `tail` has a basename starting with "libssl.so".
 #[inline(always)]
 fn libssl_tail(tail: &[u32; TAIL_LEN / 4]) -> bool {
-    // "/libssl.so" in a rolling 10-byte window; a later '/' means it was a directory name.
-    let mut hi = 0u64;
-    let mut lo = 0u64;
+    // Each window is read from memory and only the flag is carried. A rolling window kept in
+    // registers made the verifier keep one state per byte history, past its 1M-insn limit with
+    // some compilers.
+    let bytes = tail.as_ptr().cast::<u8>();
     let mut libssl = false;
-    let mut i = 0usize;
+    let mut i = LIBSSL_WIN_LEN - 1;
     while i < TAIL_LEN {
-        let c = (tail[i / 4] >> ((i % 4) * 8)) as u8;
-        hi = ((hi << 8) | (lo >> 56)) & 0xffff;
-        lo = (lo << 8) | c as u64;
-        libssl = (hi == LIBSSL_WIN_HI && lo == LIBSSL_WIN_LO) || (libssl && c != b'/');
+        let start = i + 1 - LIBSSL_WIN_LEN;
+        // SAFETY: start + LIBSSL_WIN_LEN <= TAIL_LEN, the size of `tail` in bytes.
+        let (c, hi, lo) = unsafe {
+            (
+                *bytes.add(i),
+                bytes.add(start).cast::<u16>().read_unaligned(),
+                bytes.add(start + 2).cast::<u64>().read_unaligned(),
+            )
+        };
+        // A later '/' means it was a directory name.
+        if c == b'/' {
+            libssl = false;
+        } else if hi == LIBSSL_WIN_HI && lo == LIBSSL_WIN_LO {
+            libssl = true;
+        }
         i += 1;
     }
     libssl
