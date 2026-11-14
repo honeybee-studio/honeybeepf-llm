@@ -14,6 +14,10 @@
 which tells an OpenSSL-captured call apart from one captured on the socket-level plaintext path; the cache and
 reasoning metrics do not carry it.
 
+`model` is the model the response names. When it names none, as with the Gemini Decisions API and Bedrock Converse,
+it is the top-level `model` of the request body, or the model ID in a Bedrock `/model/{id}/...` path (an inference
+profile ARN is left out); with neither, `unknown`.
+
 `llm_responses_unparsed_total` counts LLM calls the agent saw but could not record, so a drop in recorded calls
 can be told apart from a drop in traffic. `reason` is one of:
 

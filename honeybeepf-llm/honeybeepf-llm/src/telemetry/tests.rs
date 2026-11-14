@@ -562,8 +562,8 @@ fn llm_suppressed_fallback_attempt_records_tokens_but_no_cost() -> Result<()> {
     };
     // Both attempts' tokens are recorded, but only the served model is billed.
     let cost_models = models("llm_cost_usd_total");
-    assert!(cost_models.contains(&"served-m".to_string()));
-    assert!(!cost_models.contains(&"declined-m".to_string()));
+    assert!(cost_models.iter().any(|m| m == "served-m"));
+    assert!(!cost_models.iter().any(|m| m == "declined-m"));
     Ok(())
 }
 
@@ -792,7 +792,7 @@ fn llm_cost_is_priced_per_call_and_unknown_models_stay_unpriced() -> Result<()> 
     );
     assert!(
         cost.data_points.iter().all(|p| {
-            label(&p.attributes, "price_table_version").as_deref() == Some("2026-11-11")
+            label(&p.attributes, "price_table_version").as_deref() == Some("2026-11-12")
         })
     );
     let unpriced = find("llm_unpriced_tokens_total")?
@@ -1128,5 +1128,147 @@ fn llm_cost_after_a_reload_has_the_new_price_and_version() -> Result<()> {
     let usd: Vec<f64> = points.iter().map(|p| p.0).collect();
     assert_eq!(usd, [1.0, 3.0]);
     assert!(points[0].1.contains("+custom-") && points[0].1 != points[1].1);
+    Ok(())
+}
+
+#[test]
+fn series_budget_is_spent_by_distinct_sets_only() {
+    let budget = rotate::SeriesBudget::default();
+    let attrs = |i: usize| [KeyValue::new("target.pod.name", format!("job-{i}"))];
+    for i in 0..rotate::ROTATE_AT - 1 {
+        budget.note("llm_requests_total", &attrs(i), 1u64.into());
+        budget.note("llm_requests_total", &attrs(i), 1u64.into());
+        budget.note("llm_tokens_total", &attrs(i), 1u64.into());
+    }
+    assert!(!budget.due(), "repeats and other instruments do not count");
+    budget.note("llm_requests_total", &attrs(rotate::ROTATE_AT), 1u64.into());
+    assert!(budget.due());
+}
+
+#[cfg(feature = "k8s")]
+fn manual_provider() -> (SdkMeterProvider, SharedReader) {
+    let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
+    let provider = SdkMeterProvider::builder()
+        .with_reader(reader.clone())
+        .build();
+    (provider, reader)
+}
+
+/// `llm_responses_unparsed_total` by pod name in the `batch` namespace, and the count in the overflow series.
+#[cfg(feature = "k8s")]
+fn unparsed_by_pod(reader: &SharedReader) -> Result<(HashMap<String, u64>, u64)> {
+    let mut rm = ResourceMetrics {
+        resource: Resource::empty(),
+        scope_metrics: vec![],
+    };
+    reader.collect(&mut rm)?;
+    let sum = rm
+        .scope_metrics
+        .iter()
+        .flat_map(|s| &s.metrics)
+        .find(|m| m.name == "llm_responses_unparsed_total")
+        .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
+        .context("llm_responses_unparsed_total not collected")?;
+    // Other tests record into the global metrics at the same time; count only this test's namespace.
+    let attr = |p: &data::DataPoint<u64>, key: &str| {
+        p.attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.to_string())
+    };
+    let (mut pods, mut overflow) = (HashMap::new(), 0);
+    for p in &sum.data_points {
+        if attr(p, "otel.metric.overflow").is_some() {
+            overflow += p.value;
+        } else if attr(p, "target.namespace").as_deref() == Some("batch")
+            && let Some(pod) = attr(p, "target.pod.name")
+        {
+            *pods.entry(pod).or_default() += p.value;
+        }
+    }
+    Ok((pods, overflow))
+}
+
+#[cfg(feature = "k8s")]
+fn job_pod(i: usize) -> Option<Arc<PodInfo>> {
+    Some(Arc::new(PodInfo {
+        pod_name: format!("job-{i}"),
+        namespace: "batch".to_string(),
+        workload_kind: Some("CronJob".to_string()),
+        workload_name: Some("nightly".to_string()),
+        pod_labels: vec![],
+    }))
+}
+
+#[cfg(feature = "k8s")]
+#[test]
+#[serial]
+fn a_rebuild_drops_stale_pods_so_new_ones_stay_out_of_the_overflow_series() -> Result<()> {
+    let prices = Arc::new(ArcSwapOption::empty());
+    let (first, first_reader) = manual_provider();
+    install(first, prices.clone());
+    // A node that ran 2,100 short-lived pods: past the SDK's 2,000 series per instrument.
+    for i in 0..rotate::ROTATE_AT {
+        record_llm_unparsed("capture_lost", job_pod(i).as_ref());
+    }
+    assert!(metrics().is_some_and(|m| m.budget.due()));
+
+    let (second, second_reader) = manual_provider();
+    let (old, old_metrics) =
+        install(second, prices).context("the first provider is handed back")?;
+    // Every pod so far is long gone: nothing is active.
+    let new = metrics().context("metrics installed")?;
+    assert_eq!(old_metrics.budget.carry_over(&new, Duration::ZERO), 0);
+    for i in rotate::ROTATE_AT..2100 {
+        record_llm_unparsed("capture_lost", job_pod(i).as_ref());
+    }
+
+    let (first_pods, first_overflow) = unparsed_by_pod(&first_reader)?;
+    let (second_pods, second_overflow) = unparsed_by_pod(&second_reader)?;
+    assert_eq!((first_pods.len(), first_overflow), (rotate::ROTATE_AT, 0));
+    assert_eq!(
+        (second_pods.len(), second_overflow),
+        (2100 - rotate::ROTATE_AT, 0)
+    );
+    old.shutdown()?;
+    shutdown_metrics();
+    METRICS.store(None);
+    Ok(())
+}
+
+#[cfg(feature = "k8s")]
+#[test]
+#[serial]
+fn a_rebuild_carries_active_totals_so_no_series_goes_backwards() -> Result<()> {
+    let prices = Arc::new(ArcSwapOption::empty());
+    let (first, first_reader) = manual_provider();
+    install(first, prices.clone());
+    for (pod, calls) in [(0, 3), (1, 2)] {
+        for _ in 0..calls {
+            record_llm_unparsed("capture_lost", job_pod(pod).as_ref());
+        }
+    }
+    let (second, second_reader) = manual_provider();
+    let (old, old_metrics) =
+        install(second, prices).context("the first provider is handed back")?;
+    // Recorded during the drain, on the new provider.
+    record_llm_unparsed("capture_lost", job_pod(0).as_ref());
+    let new = metrics().context("metrics installed")?;
+    let window = Duration::from_secs(rotate::ACTIVE_WINDOW_SECS);
+    assert_eq!(old_metrics.budget.carry_over(&new, window), 2);
+
+    let (first_pods, _) = unparsed_by_pod(&first_reader)?;
+    let (second_pods, _) = unparsed_by_pod(&second_reader)?;
+    assert_eq!(
+        first_pods,
+        HashMap::from([("job-0".into(), 3), ("job-1".into(), 2)])
+    );
+    assert_eq!(
+        second_pods,
+        HashMap::from([("job-0".into(), 4), ("job-1".into(), 2)])
+    );
+    old.shutdown()?;
+    shutdown_metrics();
+    METRICS.store(None);
     Ok(())
 }

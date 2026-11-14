@@ -182,13 +182,13 @@
     },
     {
       "name": "gemini",
-      "note": "Gemini Interactions API: POST /v1beta/interactions and /v1/interactions, and Vertex /locations/*/interactions (streaming signalled by a body stream flag, no custom verb); same hosts as generateContent. required_field total_input_tokens keeps this entry off other providers' top-level usage.",
+      "note": "Gemini Interactions API: POST /v1beta/interactions and /v1/interactions, and Vertex /locations/*/interactions (streaming signalled by a body stream flag, no custom verb); same hosts as generateContent. Also the Decisions API (POST /v1beta/decisions, gemini-decision-1), which returns the same usage object with total_output_tokens always 0 and no model field. required_field total_input_tokens keeps this entry off other providers' top-level usage.",
       "hosts": [
         "generativelanguage.googleapis.com",
         "aiplatform.googleapis.com",
         "aiplatform.*.rep.googleapis.com"
       ],
-      "paths": ["/v1beta/interactions$", "/v1/interactions$", "/locations/*/interactions$"],
+      "paths": ["/v1beta/interactions$", "/v1/interactions$", "/locations/*/interactions$", "/v1beta/decisions$"],
       "response": {
         "usage_path": "usage",
         "prompt_tokens": "total_input_tokens",

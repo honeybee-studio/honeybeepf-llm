@@ -14,13 +14,13 @@ use arc_swap::ArcSwapOption;
 use honeybeepf_llm_core::pricing::PriceTable;
 use honeybeepf_llm_core::types::{ModalityTokens, Operation, UsageInfo};
 use log::info;
-use opentelemetry::metrics::{Counter, Histogram, Meter};
+use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider};
 use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 use tonic::transport::{Certificate, ClientTlsConfig};
 
@@ -30,6 +30,7 @@ use crate::k8s::{PodInfo, UNATTRIBUTED};
 use crate::probes::builtin::llm::coverage::Coverage;
 
 mod prices;
+mod rotate;
 use prices::{PriceFile, inline_prices, load_prices, start_price_reload};
 
 /// Metric export interval in seconds
@@ -41,11 +42,11 @@ const LLM_LATENCY_BOUNDARIES_SECS: [f64; 18] = [
     180.0, 300.0,
 ];
 
-/// Global metrics handle
-static METRICS: OnceLock<HoneyBeeMetrics> = OnceLock::new();
+/// The metrics of the current provider; replaced when the provider is rebuilt (see `rotate`).
+static METRICS: ArcSwapOption<HoneyBeeMetrics> = ArcSwapOption::const_empty();
 
-/// Global MeterProvider for graceful shutdown
-static METER_PROVIDER: OnceLock<SdkMeterProvider> = OnceLock::new();
+/// The current MeterProvider, for the rebuild and for graceful shutdown.
+static METER_PROVIDER: Mutex<Option<SdkMeterProvider>> = Mutex::new(None);
 
 /// Global active probes count (for ObservableGauge callback)
 static ACTIVE_PROBES: OnceLock<RwLock<HashMap<String, u64>>> = OnceLock::new();
@@ -111,8 +112,10 @@ pub struct HoneyBeeMetrics {
     pub llm_cost_usd_total: Counter<f64>,
     pub llm_cache_savings_ceiling_usd_total: Counter<f64>,
     pub llm_unpriced_tokens_total: Counter<u64>,
-    /// Swapped whole when the user price file changes, so a call never waits on a reload.
-    prices: ArcSwapOption<Prices>,
+    /// Swapped whole when the user price file changes, so a call never waits on a reload. Shared by
+    /// every provider generation, so a reload reaches the current one.
+    prices: Arc<ArcSwapOption<Prices>>,
+    budget: rotate::SeriesBudget,
 }
 
 /// A price table and its `price_table_version` label.
@@ -163,7 +166,12 @@ impl Transport {
 }
 
 impl HoneyBeeMetrics {
+    #[cfg(test)]
     fn new(meter: &Meter, prices: Option<Prices>) -> Self {
+        Self::with_prices(meter, Arc::new(ArcSwapOption::from_pointee(prices)))
+    }
+
+    fn with_prices(meter: &Meter, prices: Arc<ArcSwapOption<Prices>>) -> Self {
         let (llm_cost_usd_total, llm_cache_savings_ceiling_usd_total, llm_unpriced_tokens_total) =
             Self::cost_counters(meter);
         Self {
@@ -245,11 +253,50 @@ impl HoneyBeeMetrics {
             llm_cost_usd_total,
             llm_cache_savings_ceiling_usd_total,
             llm_unpriced_tokens_total,
-            prices: ArcSwapOption::from_pointee(prices),
+            prices,
+            budget: rotate::SeriesBudget::default(),
         }
     }
 
     /// The cost-related LLM counters: realized cost, the cache-savings ceiling, unpriced tokens.
+    /// Add a total carried over from the replaced provider to counter `name`; false for a histogram.
+    fn carry(&self, name: &'static str, total: rotate::Total, attrs: &[KeyValue]) -> bool {
+        let counted = match total {
+            rotate::Total::U64(n) => self.counter_u64(name).map(|c| c.add(n, attrs)),
+            rotate::Total::F64(v) => self.counter_f64(name).map(|c| c.add(v, attrs)),
+            rotate::Total::Hist => None,
+        };
+        if counted.is_some() {
+            self.budget.note(name, attrs, total);
+        }
+        counted.is_some()
+    }
+
+    fn counter_u64(&self, name: &str) -> Option<&Counter<u64>> {
+        Some(match name {
+            "file_access_events" => &self.file_access_events,
+            "process_exit_total" => &self.process_exit_total,
+            "llm_requests_total" => &self.llm_requests_total,
+            "llm_tokens_total" => &self.llm_tokens_total,
+            "llm_cache_read_tokens_total" => &self.llm_cache_read_tokens_total,
+            "llm_cache_write_tokens_total" => &self.llm_cache_write_tokens_total,
+            "llm_reasoning_tokens_total" => &self.llm_reasoning_tokens_total,
+            "llm_responses_unparsed_total" => &self.llm_responses_unparsed_total,
+            "llm_h2_resynced_total" => &self.llm_h2_resynced_total,
+            "llm_h2_midjoin_recorded_total" => &self.llm_h2_midjoin_recorded_total,
+            "llm_unpriced_tokens_total" => &self.llm_unpriced_tokens_total,
+            _ => return None,
+        })
+    }
+
+    fn counter_f64(&self, name: &str) -> Option<&Counter<f64>> {
+        Some(match name {
+            "llm_cost_usd_total" => &self.llm_cost_usd_total,
+            "llm_cache_savings_ceiling_usd_total" => &self.llm_cache_savings_ceiling_usd_total,
+            _ => return None,
+        })
+    }
+
     fn cost_counters(meter: &Meter) -> (Counter<f64>, Counter<f64>, Counter<u64>) {
         // No unit on the USD counters: the Prometheus exporter would append it to the name.
         let cost = meter
@@ -292,6 +339,7 @@ impl HoneyBeeMetrics {
                 for (cost_type, usd) in parts {
                     if usd > 0.0 {
                         labels.push(KeyValue::new("cost_type", cost_type));
+                        self.budget.note("llm_cost_usd_total", labels, usd.into());
                         self.llm_cost_usd_total.add(usd, labels);
                         labels.pop();
                     }
@@ -306,6 +354,8 @@ impl HoneyBeeMetrics {
                         "cache_price",
                         if exact { "known" } else { "assumed_free" },
                     ));
+                    self.budget
+                        .note("llm_cache_savings_ceiling_usd_total", labels, usd.into());
                     self.llm_cache_savings_ceiling_usd_total.add(usd, labels);
                     labels.pop();
                 }
@@ -313,6 +363,8 @@ impl HoneyBeeMetrics {
             Err(why) => {
                 labels.push(KeyValue::new("reason", why.as_str()));
                 let tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
+                self.budget
+                    .note("llm_unpriced_tokens_total", labels, tokens.into());
                 self.llm_unpriced_tokens_total.add(tokens, labels);
             }
         }
@@ -364,7 +416,11 @@ impl HoneyBeeMetrics {
         let mut call_attrs = attrs.clone();
         call_attrs.push(KeyValue::new("operation", usage.operation.as_str()));
         call_attrs.push(KeyValue::new("transport", transport.as_str()));
+        self.budget
+            .note("llm_requests_total", &call_attrs, 1u64.into());
         self.llm_requests_total.add(1, &call_attrs);
+        self.budget
+            .note("llm_latency_seconds", &call_attrs, rotate::Total::Hist);
         self.llm_latency_seconds.record(latency_secs, &call_attrs);
         if !is_error {
             self.record_tokens(usage, transport, attrs);
@@ -375,12 +431,18 @@ impl HoneyBeeMetrics {
     /// transport label.
     fn record_tokens(&self, usage: &UsageInfo, transport: Transport, mut attrs: Vec<KeyValue>) {
         if let Some(n) = usage.cache_read_tokens {
+            self.budget
+                .note("llm_cache_read_tokens_total", &attrs, n.into());
             self.llm_cache_read_tokens_total.add(n, &attrs);
         }
         if let Some(n) = usage.cache_write_tokens {
+            self.budget
+                .note("llm_cache_write_tokens_total", &attrs, n.into());
             self.llm_cache_write_tokens_total.add(n, &attrs);
         }
         if let Some(n) = usage.thoughts_tokens {
+            self.budget
+                .note("llm_reasoning_tokens_total", &attrs, n.into());
             self.llm_reasoning_tokens_total.add(n, &attrs);
         }
         // A fallback attempt declined before output in a non-billed category records tokens but no cost.
@@ -429,20 +491,27 @@ impl HoneyBeeMetrics {
     /// Add one `modality` label, record, and restore `attrs`, so the label vector is reused, not cloned.
     fn add_modality(&self, attrs: &mut Vec<KeyValue>, modality: &'static str, n: u64) {
         attrs.push(KeyValue::new("modality", modality));
+        self.budget.note("llm_tokens_total", attrs, n.into());
         self.llm_tokens_total.add(n, attrs);
         attrs.pop();
     }
 
     fn record_unparsed(&self, reason: &'static str, mut attrs: Vec<KeyValue>) {
         attrs.push(KeyValue::new("reason", reason));
+        self.budget
+            .note("llm_responses_unparsed_total", &attrs, 1u64.into());
         self.llm_responses_unparsed_total.add(1, &attrs);
     }
 
     fn record_resynced(&self, attrs: Vec<KeyValue>) {
+        self.budget
+            .note("llm_h2_resynced_total", &attrs, 1u64.into());
         self.llm_h2_resynced_total.add(1, &attrs);
     }
 
     fn record_midjoin(&self, attrs: Vec<KeyValue>) {
+        self.budget
+            .note("llm_h2_midjoin_recorded_total", &attrs, 1u64.into());
         self.llm_h2_midjoin_recorded_total.add(1, &attrs);
     }
 }
@@ -492,12 +561,36 @@ pub fn init_metrics() -> Result<()> {
 
     info!("Initializing OpenTelemetry metrics exporter");
     info!("OTLP endpoint: {endpoint}");
+    let provider = build_provider(&endpoint)?;
 
+    let mut price_file = std::env::var("LLM_PRICES_CONFIG_FILE")
+        .ok()
+        .map(PriceFile::new);
+    let custom = price_file
+        .as_mut()
+        .and_then(PriceFile::changed)
+        .map(str::to_owned)
+        .or_else(inline_prices);
+    let prices = Arc::new(ArcSwapOption::from_pointee(load_prices(custom.as_deref())));
+    install(provider, prices.clone());
+    if let Some(file) = price_file
+        && prices.load().is_some()
+    {
+        start_price_reload(prices.clone(), file);
+    }
+    rotate::spawn(move || Ok(install(build_provider(&endpoint)?, prices.clone())));
+
+    info!("OpenTelemetry metrics initialized successfully");
+    Ok(())
+}
+
+/// An OTLP gRPC exporter to `endpoint` behind a periodic reader.
+fn build_provider(endpoint: &str) -> Result<SdkMeterProvider> {
     let mut builder = opentelemetry_otlp::MetricExporter::builder()
         .with_tonic()
-        .with_endpoint(&endpoint)
+        .with_endpoint(endpoint)
         .with_timeout(Duration::from_secs(10));
-    if let Some(tls) = otlp_tls(&endpoint)? {
+    if let Some(tls) = otlp_tls(endpoint)? {
         builder = builder.with_tls_config(tls);
     }
     let exporter = builder
@@ -513,16 +606,21 @@ pub fn init_metrics() -> Result<()> {
         KeyValue::new("telemetry.sdk.language", "rust"),
     ]));
 
-    let provider = SdkMeterProvider::builder()
+    Ok(SdkMeterProvider::builder()
         .with_reader(reader)
         .with_resource(resource)
-        .build();
+        .build())
+}
 
+/// Record to `provider` from now on: its gauges, fresh instruments over the shared `prices`. Returns the
+/// provider and metrics it replaces: the caller carries their active totals over, then shuts it down.
+fn install(
+    provider: SdkMeterProvider,
+    prices: Arc<ArcSwapOption<Prices>>,
+) -> Option<(SdkMeterProvider, Arc<HoneyBeeMetrics>)> {
     global::set_meter_provider(provider.clone());
-    let _ = METER_PROVIDER.set(provider);
-
     // Meter name is used as prefix only
-    let meter = global::meter("honeybeepf-llm");
+    let meter = provider.meter("honeybeepf-llm");
 
     // This is the correct way to export gauge metrics via OTLP
     let _active_probes_gauge = meter
@@ -556,23 +654,9 @@ pub fn init_metrics() -> Result<()> {
     #[cfg(feature = "k8s")]
     register_tls_coverage(&meter);
 
-    let mut price_file = std::env::var("LLM_PRICES_CONFIG_FILE")
-        .ok()
-        .map(PriceFile::new);
-    let custom = price_file
-        .as_mut()
-        .and_then(PriceFile::changed)
-        .map(str::to_owned)
-        .or_else(inline_prices);
-    let _ = METRICS.set(HoneyBeeMetrics::new(&meter, load_prices(custom.as_deref())));
-    if let (Some(m), Some(file)) = (METRICS.get(), price_file)
-        && m.prices.load().is_some()
-    {
-        start_price_reload(m, file);
-    }
-
-    info!("OpenTelemetry metrics initialized successfully");
-    Ok(())
+    let old = METRICS.swap(Some(Arc::new(HoneyBeeMetrics::with_prices(&meter, prices))));
+    let old_provider = METER_PROVIDER.lock().ok()?.replace(provider);
+    old_provider.zip(old)
 }
 
 /// A constant 1 whose labels name the provider set, so a config change shows as a new series.
@@ -618,8 +702,8 @@ fn provider_config_labels(
     ]
 }
 
-pub fn metrics() -> Option<&'static HoneyBeeMetrics> {
-    METRICS.get()
+pub fn metrics() -> Option<Arc<HoneyBeeMetrics>> {
+    METRICS.load_full()
 }
 
 /// Record active probe count
@@ -654,6 +738,7 @@ pub fn record_file_access_event(
             attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
         }
 
+        m.budget.note("file_access_events", &attrs, 1u64.into());
         m.file_access_events.add(1, &attrs);
     }
 }
@@ -775,7 +860,7 @@ fn push_pod_attrs(attrs: &mut Vec<KeyValue>, pod_info: Option<&std::sync::Arc<Po
 /// Flushes pending metrics and shuts down the MeterProvider
 pub fn shutdown_metrics() {
     info!("Shutting down OpenTelemetry metrics...");
-    if let Some(provider) = METER_PROVIDER.get() {
+    if let Some(provider) = METER_PROVIDER.lock().ok().and_then(|mut p| p.take()) {
         if let Err(e) = provider.shutdown() {
             log::warn!("Failed to shutdown MeterProvider: {e}");
         } else {
@@ -791,6 +876,7 @@ pub fn record_process_exit(cause: &str, exit_code: u32, lifetime_secs: f64, cgro
             KeyValue::new("exit_code", exit_code.to_string()),
             KeyValue::new("cgroup_id", cgroup_id.to_string()),
         ];
+        m.budget.note("process_exit_total", &attrs, 1u64.into());
         m.process_exit_total.add(1, &attrs);
         m.process_lifetime_seconds.record(lifetime_secs, &attrs);
     }
