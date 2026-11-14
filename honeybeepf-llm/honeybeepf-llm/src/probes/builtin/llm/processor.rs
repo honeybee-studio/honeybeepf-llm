@@ -485,6 +485,7 @@ impl StreamProcessor {
                                 parser.parse_response_from(&self.read_buf, &mut self.read_progress)
                             }
                         };
+                        let usage = usage.map(|u| self.named_by_request(u));
                         let state = self.read_progress.take_background();
                         // A framed 2xx response that ended with no usage is the provider omitting it, not
                         // capture loss, so count it apart from the next-request and close reasons. An
@@ -604,6 +605,18 @@ impl StreamProcessor {
             start_time: Instant::now(),
             parser,
         }
+    }
+
+    /// Fill a missing model from the request: some responses name none (Gemini Decisions, Bedrock Converse).
+    /// A background poll is a GET with no model; its create request settles the call.
+    fn named_by_request(&self, mut usage: UsageInfo) -> UsageInfo {
+        if usage.model.is_none() && self.continuation.is_none() {
+            let end = self
+                .next_request
+                .map_or(self.write_buf.len(), |(at, _)| at.min(self.write_buf.len()));
+            usage.model = http::request_model::from_h1(&self.write_buf[..end]);
+        }
+        usage
     }
 
     fn reset(&mut self) {

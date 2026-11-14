@@ -221,7 +221,8 @@ fn on_frame(
             {
                 let (path, s) = match matched {
                     Matched::Create { path, record_only } => {
-                        (path, H2Stream::open(Instant::now(), record_only))
+                        let s = H2Stream::open_for(Instant::now(), record_only, &path);
+                        (path, s)
                     }
                     Matched::Poll { path, id } => (path, H2Stream::open_poll(Instant::now(), id)),
                 };
@@ -306,7 +307,7 @@ fn end_stream(s: H2Stream, on: &mut impl FnMut(H2Event)) {
     let (over, speculative, start) = (s.over_limit(), s.speculative(), s.start());
     let (success, errored) = (s.is_success(), s.errored());
     let poll = s.poll().map(Box::<str>::from);
-    let (usage, background) = s.finish();
+    let (usage, background) = s.finish_named();
     if speculative {
         if let Some(usage) = usage {
             on(H2Event::Recorded {

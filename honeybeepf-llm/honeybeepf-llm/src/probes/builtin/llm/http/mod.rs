@@ -13,6 +13,7 @@ mod h2;
 mod json_ends;
 mod provider_report;
 mod registry;
+pub(crate) mod request_model;
 mod sse;
 mod sse_stream;
 

@@ -66,6 +66,8 @@ pub(super) struct H2Stream {
     record_only: bool,
     /// The background Responses id this stream polls (`GET <responses path>/{id}`), if it is a poll.
     poll: Option<Box<str>>,
+    /// The model the request path names (Bedrock), for a response that names none.
+    request_model: Option<String>,
 }
 
 impl H2Stream {
@@ -80,6 +82,7 @@ impl H2Stream {
             status: None,
             record_only,
             poll: None,
+            request_model: None,
         }
     }
 
@@ -88,6 +91,14 @@ impl H2Stream {
         Self {
             speculative: true,
             ..Self::open(start, false)
+        }
+    }
+
+    /// A matched stream whose request path may name the model.
+    pub(super) fn open_for(start: Instant, record_only: bool, path: &str) -> Self {
+        Self {
+            request_model: super::super::request_model::from_path(path),
+            ..Self::open(start, record_only)
         }
     }
 
@@ -246,6 +257,17 @@ impl H2Stream {
     /// The usage once the response has ended, with where a background Responses call stands (a create's
     /// `queued`, or `Ended` once a result arrives). A JSON array carries usage in its last element; any other
     /// body that is not a JSON object (bad coding, a body given up for a cap) records nothing.
+    /// The usage with the request's model when the response named none.
+    pub(super) fn finish_named(&self) -> (Option<UsageInfo>, Option<BackgroundState>) {
+        let (mut usage, background) = self.finish();
+        if let Some(u) = usage.as_mut()
+            && u.model.is_none()
+        {
+            u.model.clone_from(&self.request_model);
+        }
+        (usage, background)
+    }
+
     pub(super) fn finish(&self) -> (Option<UsageInfo>, Option<BackgroundState>) {
         match &self.body {
             Body::Streaming(cursor) => sse_result(cursor.usage()),
@@ -317,6 +339,21 @@ mod tests {
         s.response_headers(Some(200), content_type, coding);
         s.data(body, usize::MAX);
         s.finish().0.map(|u| (u.prompt_tokens, u.completion_tokens))
+    }
+
+    #[test]
+    fn bedrock_path_names_the_model_of_a_converse_response() {
+        let converse = br#"{"output":{"message":{"role":"assistant","content":[{"text":"hi"}]}},"stopReason":"end_turn","usage":{"inputTokens":12,"outputTokens":3,"totalTokens":15}}"#;
+        let mut s = H2Stream::open_for(
+            Instant::now(),
+            false,
+            "/model/amazon.nova-pro-v1%3A0/converse",
+        );
+        s.response_headers(Some(200), Some(b"application/json"), b"");
+        s.data(converse, usize::MAX);
+        let usage = s.finish_named().0.expect("usage");
+        assert_eq!(usage.model.as_deref(), Some("amazon.nova-pro-v1:0"));
+        assert_eq!((usage.prompt_tokens, usage.completion_tokens), (12, 3));
     }
 
     /// A plain JSON object of about `size` bytes: `model` first, a long text, then usage last.
