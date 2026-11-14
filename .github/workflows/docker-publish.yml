@@ -171,6 +171,20 @@ jobs:
             # Also publish short SHA tag on main merges
             type=sha,enable=${{ github.ref == 'refs/heads/main' }}
 
+      # The agent's BPF programs are compiled by the image's toolchain, which the other jobs don't use.
+      - name: Build amd64 image for the smoke test
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: honeybeepf-llm:smoke
+          cache-from: ${{ env.BUILD_CACHE }}
+
+      - name: Smoke-test the image's BPF programs
+        run: bash ci/image-smoke.sh honeybeepf-llm:smoke
+
       - name: Build and push
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
