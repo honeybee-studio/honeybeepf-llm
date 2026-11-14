@@ -1145,6 +1145,25 @@ fn test_gemini_interactions_non_streaming_parses_usage() {
     assert_eq!(usage.model, Some("gemini-3.6-flash".to_string()));
 }
 
+// Gemini Decisions API: the Interactions usage object with no output tokens and no model in the body.
+#[test]
+fn test_gemini_decisions_counts_input_tokens_only() {
+    let provider = default_provider("generativelanguage.googleapis.com", "/v1beta/decisions");
+    let response = json!({
+        "answers": {"is_spam": {"answer": false}},
+        "usage": {
+            "total_input_tokens": 412,
+            "input_tokens_by_modality": [{"modality": "text", "tokens": 412}],
+            "total_output_tokens": 0,
+            "total_tokens": 412
+        }
+    });
+
+    let usage = provider.parse_usage(&response).unwrap();
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (412, 0));
+    assert_eq!(usage.model, None);
+}
+
 // total_tool_use_tokens (tool results billed as input, outside total_input_tokens) is added to the
 // prompt as generateContent's toolUsePromptTokenCount is; a Vertex host/path reaches the same entry.
 #[test]
