@@ -78,6 +78,12 @@ impl IdentityResolver {
     pub fn resolve_pod(&self, _pid: u32, _cgroup_id: u64) -> Option<()> {
         None
     }
+
+    /// The pod of a process found by scanning `/proc`, where no cgroup_id comes with it.
+    #[cfg(feature = "k8s")]
+    pub fn pod_of_pid(&self, pid: u32) -> Option<Arc<PodInfo>> {
+        self.inner.as_ref()?.resolve_pid(pid)
+    }
 }
 
 pub trait Probe {

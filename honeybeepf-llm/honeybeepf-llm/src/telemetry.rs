@@ -26,6 +26,8 @@ use tonic::transport::{Certificate, ClientTlsConfig};
 
 #[cfg(feature = "k8s")]
 use crate::k8s::{PodInfo, UNATTRIBUTED};
+#[cfg(feature = "k8s")]
+use crate::probes::builtin::llm::coverage::Coverage;
 
 mod prices;
 mod rotate;
@@ -51,6 +53,43 @@ static ACTIVE_PROBES: OnceLock<RwLock<HashMap<String, u64>>> = OnceLock::new();
 
 fn active_probes_map() -> &'static RwLock<HashMap<String, u64>> {
     ACTIVE_PROBES.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Pods per workload and TLS state, from the LLM probe's coverage scan (`llm_tls_coverage_pods`).
+#[cfg(feature = "k8s")]
+static TLS_COVERAGE: OnceLock<std::sync::Mutex<Coverage>> = OnceLock::new();
+
+#[cfg(feature = "k8s")]
+pub(crate) fn tls_coverage() -> &'static std::sync::Mutex<Coverage> {
+    TLS_COVERAGE.get_or_init(Default::default)
+}
+
+#[cfg(feature = "k8s")]
+fn register_tls_coverage(meter: &Meter) {
+    let _gauge = meter
+        .u64_observable_gauge("llm_tls_coverage_pods")
+        .with_description(
+            "Pods on the node by whether the TLS probes can read their calls (tls: hooked, \
+             openssl_not_hooked, go, java, other)",
+        )
+        // No unit: the Prometheus exporter would append it to the name.
+        .with_callback(|observer| {
+            let Ok(coverage) = tls_coverage().lock() else {
+                return;
+            };
+            for ((namespace, kind, name, tls), pods) in coverage.iter() {
+                observer.observe(
+                    *pods,
+                    &[
+                        KeyValue::new("target.namespace", namespace.clone()),
+                        KeyValue::new("target.workload.kind", kind.clone()),
+                        KeyValue::new("target.workload.name", name.clone()),
+                        KeyValue::new("tls", tls.as_str()),
+                    ],
+                );
+            }
+        })
+        .build();
 }
 
 /// Labels of `llm_provider_config_info`, set once when the LLM probe starts.
@@ -612,6 +651,8 @@ fn install(
         .build();
 
     register_provider_config_info(&meter, &PROVIDER_CONFIG);
+    #[cfg(feature = "k8s")]
+    register_tls_coverage(&meter);
 
     let old = METRICS.swap(Some(Arc::new(HoneyBeeMetrics::with_prices(&meter, prices))));
     let old_provider = METER_PROVIDER.lock().ok()?.replace(provider);

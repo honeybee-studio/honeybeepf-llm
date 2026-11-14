@@ -83,6 +83,27 @@ On the demo cluster above:
 {target_namespace="team-c", token_type="completion"}    21
 ```
 
+## TLS coverage
+
+`honeybeepf_llm_llm_tls_coverage_pods` (gauge, Kubernetes builds) counts the pods on each node by whether the TLS
+probes can read their calls, so a workload with no recorded calls can be told apart from one the agent cannot see.
+Labels: `target_namespace`, `target_workload_kind`, `target_workload_name` and `tls`. Every minute the agent looks
+at each pod's processes and counts the pod under its best one:
+
+| `tls` | The pod has a process that |
+|---|---|
+| `hooked` | maps a libssl, or runs an executable, that the probes are attached to |
+| `openssl_not_hooked` | maps a libssl the probes are not attached to (the attach failed or has not run yet) |
+| `go` | is a Go executable (crypto/tls is not hooked) |
+| `java` | runs a JVM (JSSE is not hooked) |
+| `other` | none of the above: rustls, a TLS library linked in statically, or no TLS at all |
+
+A workload that is gone reads 0. Workloads whose calls the agent cannot see:
+
+```promql
+sum by (target_namespace, target_workload_name, tls) (honeybeepf_llm_llm_tls_coverage_pods{tls!="hooked"}) > 0
+```
+
 ## Cost
 
 When a price table is loaded, each recorded call is also costed from the built-in price table (overlaid with any

@@ -148,6 +148,12 @@ impl PodResolver {
         container_id.and_then(|cid| self.pod_store.read().ok()?.get(&cid).cloned())
     }
 
+    /// The pod a process belongs to, read from `/proc/<pid>/cgroup` (no cgroup_id at hand).
+    pub fn resolve_pid(&self, pid: u32) -> Option<Arc<PodInfo>> {
+        let container_id = extract_container_id(pid)?;
+        self.pod_store.read().ok()?.get(&container_id).cloned()
+    }
+
     /// Look up the cgroup id of every known container not cached yet, at most once a second, then retry.
     fn refill_and_get(&self, cgroup_id: u64) -> Option<Arc<PodInfo>> {
         if !self.cgroup_v2 {
