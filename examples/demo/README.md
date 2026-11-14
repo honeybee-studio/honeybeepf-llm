@@ -40,9 +40,5 @@ examples/demo/demo.sh down
 
 ## Notes
 
-- v0.2.0 does not see calls from pods on nodes whose containerd applies an AppArmor profile (Ubuntu 26.04): use
-  `HB_DEMO_CHART=local` until the next release.
-- On kind, k3d and minikube the node runs in a container; agents before the fix for that (after v0.2.0) miss the
-  Node.js client.
 - `team-c` uses the official Node.js image, whose `node` binary has OpenSSL built in, so the agent hooks the
   executable rather than a shared libssl.

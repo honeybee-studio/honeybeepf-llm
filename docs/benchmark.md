@@ -105,3 +105,25 @@ the cells are noisier; read it alongside v0.2.0, not as a replacement.
 Startup with 1,000 idle processes took 0.15 s. Memory, token accuracy (100% in every case) and the `max` throughput
 cost (−5.7%) are in line with v0.2.0; the latency columns differ by a few tenths of a millisecond, within the noise
 at this rate and round count.
+
+### v0.3.0 (9018cd7), measured 2026-11-14
+
+- Kernel 7.0.0-43-generic (Ubuntu 26.04.1 LTS), multipass VM: 4 vCPU of an Intel Core Ultra 5 225H, 7.7 GiB memory;
+  CPU steal 0.0%; Python 3.14.4, OpenSSL 3.5.5; release build of `main` at 9018cd7 with the version set to 0.3.0,
+  defaults as above except 5 rounds
+
+| Case | req/s off | req/s on | p50 ms off | p50 ms on | p99 ms off | p99 ms on |
+|---|---|---|---|---|---|---|
+| `llm` | 200.12 | 200.12 | 1.00 | 0.86 | 1.91 | 2.37 |
+| `non-llm` | 200.13 | 200.13 | 0.73 | 0.81 | 1.84 | 2.06 |
+| `max` | 11,707 | 10,918 (−6.7%) | 0.31 | 0.34 | 0.77 | 0.90 |
+
+| Case | CPU s / 1k req | RSS anon MB | RSS file MB | PSS MB | BPF maps MB | Tokens recorded |
+|---|---|---|---|---|---|---|
+| `llm` | 0.053 | 4.4 | 27.2 | 21.2 | 18.8 | 100% |
+| `non-llm` | 0.020 | 4.4 | 27.3 | 21.3 | 18.8 | 100% |
+| `max` | 0.006 | 4.4 | 27.2 | 21.2 | 18.8 | 100% |
+
+Startup with 1,000 idle processes took 0.16 s. Against v0.2.0, CPU per call is lower (0.053 vs 0.067 s per 1,000
+`llm` calls), memory is 0.2 MB higher, and the `max` throughput cost is about the same (−6.7% vs −6.5%). Every token
+was recorded in all five runs.
