@@ -37,6 +37,9 @@ kubectl logs -n honeybeepf ds/honeybeepf-llm -f | grep 'LLM SUCCESS'
 The chart in `charts/` on `main` can expect a newer agent than the latest release image, so install it only together
 with an image built from the same commit.
 
+No LLM traffic in the cluster yet? [`examples/demo/demo.sh up`](examples/demo) runs a mock provider, clients in
+three team namespaces and Grafana, with no API keys.
+
 ![Agent log on k3s: LLM calls from pods in team-a (OpenAI), team-b (Anthropic) and team-c (Gemini), each line showing the model and the token counts the agent recorded](docs/images/demo.svg)
 
 ```
