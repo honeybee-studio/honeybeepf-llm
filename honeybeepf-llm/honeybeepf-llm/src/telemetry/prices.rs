@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use super::{HoneyBeeMetrics, Prices};
+use super::Prices;
 
 /// How often the user price file is reread; kubelet refreshes a ConfigMap volume only about once a minute.
 const PRICE_RELOAD_INTERVAL_SECS: u64 = 10;
@@ -87,12 +87,12 @@ pub(super) fn reload_prices(prices: &ArcSwapOption<Prices>, file: &mut PriceFile
 }
 
 /// Reread the user price file every PRICE_RELOAD_INTERVAL_SECS until shutdown.
-pub(super) fn start_price_reload(metrics: &'static HoneyBeeMetrics, mut file: PriceFile) {
+pub(super) fn start_price_reload(prices: Arc<ArcSwapOption<Prices>>, mut file: PriceFile) {
     let shutdown = crate::probes::shutdown_flag();
     std::thread::spawn(move || {
         while !shutdown.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_secs(PRICE_RELOAD_INTERVAL_SECS));
-            reload_prices(&metrics.prices, &mut file);
+            reload_prices(&prices, &mut file);
         }
     });
 }
