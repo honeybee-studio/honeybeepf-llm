@@ -171,16 +171,16 @@ services and endpointslices is granted but the code only gets and lists them.
 
 ## 4. Resource use per node
 
-Measured overhead is in [docs/benchmark.md](benchmark.md). The numbers below are from its v0.2.0 run: kernel 7.0.0-38 on
+Measured overhead is in [docs/benchmark.md](benchmark.md). The numbers below are from its v0.3.0 run: kernel 7.0.0-43 on
 a 4-vCPU VM, Python clients against a local mock server, plaintext capture off and no OTLP export. Use that document as
 the source of truth.
 
 | Measure | Value (from docs/benchmark.md) |
 |---|---|
-| Agent CPU | 0.067 CPU-seconds per 1,000 requests in the `llm` case; 0.008 at the `max` rate |
-| Memory (RSS anon / file) | ~4.2 MB anonymous, ~26.8 MB file-backed; PSS ~20.6 MB |
+| Agent CPU | 0.053 CPU-seconds per 1,000 requests in the `llm` case; 0.006 at the `max` rate |
+| Memory (RSS anon / file) | ~4.4 MB anonymous, ~27.2 MB file-backed; PSS ~21.2 MB |
 | BPF map memory (`memlock`) | ~18.8 MB with plaintext capture off |
-| Application impact | −6.5% throughput in the saturating `max` case; p99 latency +0.6 ms at 200 req/s, which the benchmark treats as noise |
+| Application impact | −6.7% throughput in the saturating `max` case; p99 latency +0.5 ms at 200 req/s, which the benchmark treats as noise |
 
 The chart requests 50m CPU / 128Mi and limits 1 CPU / 1Gi per node (`charts/honeybeepf-llm/values.yaml`).
 
