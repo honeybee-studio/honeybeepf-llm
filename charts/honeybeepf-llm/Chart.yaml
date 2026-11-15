@@ -1,18 +1,40 @@
 apiVersion: v2
 name: honeybeepf-llm
-description: eBPF-based observability agent for kernel-level monitoring
+description: Count LLM API tokens and USD cost per Kubernetes pod and workload with eBPF, with no gateway or SDK
 type: application
 version: 0.3.1
 appVersion: "0.3.1"
 keywords:
+  - llm
+  - finops
+  - cost
+  - tokens
+  - openai
+  - anthropic
+  - gemini
+  - bedrock
   - ebpf
+  - opentelemetry
   - observability
-  - monitoring
-  - rust
-  - aya
 home: https://github.com/honeybee-studio/honeybeepf-llm
 # The first source becomes the OCI source annotation, which links the ghcr chart package to this repository.
 sources:
   - https://github.com/honeybee-studio/honeybeepf-llm
 
-# maintainers (hope to add more in the future)
+maintainers:
+  - name: sammiee5311
+    url: https://github.com/sammiee5311
+  - name: jundorok
+    url: https://github.com/jundorok
+annotations:
+  artifacthub.io/category: monitoring-logging
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://github.com/honeybee-studio/honeybeepf-llm/tree/main/docs
+    - name: Install guide
+      url: https://github.com/honeybee-studio/honeybeepf-llm/blob/main/docs/install.md
+    - name: Overhead benchmark
+      url: https://github.com/honeybee-studio/honeybeepf-llm/blob/main/docs/benchmark.md
+    - name: Security review
+      url: https://github.com/honeybee-studio/honeybeepf-llm/blob/main/docs/security-review.md

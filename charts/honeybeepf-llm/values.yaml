@@ -34,23 +34,9 @@ serviceAccount:
 rustLog: "info"
 
 builtinProbes:
-  filesystem:
-    file_access:
-      enabled: false
-      watched_paths:
-        # SSH keys - common user paths
-        - "/root/.ssh/authorized_keys"
-        - "/root/.ssh/id_rsa"
-        - "/root/.ssh/id_ed25519"
-        - "/home/ubuntu/.ssh/authorized_keys"
-        - "/home/ubuntu/.ssh/id_rsa"
-        - "/home/ubuntu/.ssh/id_ed25519"
-        - "/home/root/.ssh/authorized_keys"
-        - "/home/root/.ssh/id_rsa"
-        - "/home/root/.ssh/id_ed25519"
-
   llm:
-    enabled: false
+    # Record LLM API calls on every node. Off loads no eBPF program and the agent only idles.
+    enabled: true
     # Also probe executables with OpenSSL built in (official Node.js builds, node: images).
     executables: true
     # Experimental. Record OpenAI/Anthropic/Gemini-compatible calls to hosts not listed below, by request path
@@ -106,16 +92,6 @@ builtinProbes:
     #       checked: "2026-10-01"
     #       models:
     #         my-vllm-llama: {input: 0.1, output: 0.2}
-
-  interval: 1000
-
-  process_lifecycle:
-    enabled: false
-
-customProbes:
-  kprobes: []
-  uprobes: []
-  tracepoints: []
 
 securityContext:
   # The agent opens other containers' libssl through /proc/<pid>/root. The containerd AppArmor profile on Ubuntu

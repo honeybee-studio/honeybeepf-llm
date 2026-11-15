@@ -25,9 +25,9 @@ private vulnerability reporting).
 
 ## 1. Kernel hooks
 
-With chart defaults no program attaches: the LLM probe is off until `builtinProbes.llm.enabled=true`, which the install
-commands in the README and `docs/install.md` set. The other groups below are opt-in as noted. Every program only reads
-or observes: none changes a syscall result, drops or redirects a packet, or modifies data.
+With chart defaults only the LLM probe attaches (`builtinProbes.llm.enabled: true`; `false` attaches nothing). The
+other groups below are opt-in as noted. Every program only reads or observes: none
+changes a syscall result, drops or redirects a packet, or modifies data.
 
 | Program (eBPF) | Type | Attaches to | Purpose | What it reads |
 |---|---|---|---|---|
@@ -66,16 +66,16 @@ or observes: none changes a syscall result, drops or redirects a packet, or modi
   data programs always return `SK_PASS`. Watched sockets do pass through the kernel's sockmap layer, and `sk_msg` may
   linearize a message (`bpf_msg_pull_data`) before copying it; the bytes delivered are unchanged.
 - **Process-lifecycle programs** (`honeybeepf_llm_group_exit`, `honeybeepf_llm_process_exit`,
-  `honeybeepf_llm_oom_mark_victim`) attach only when `builtinProbes.process_lifecycle.enabled` is true (default false).
+  `honeybeepf_llm_oom_mark_victim`) attach only when the agent runs with `BUILTIN_PROBES__PROCESS_LIFECYCLE=true`,
+  which the chart does not set.
   When on, they export `process_exit{cause, exit_code, cgroup_id}` and `process_lifetime_seconds`, and log the process
   `comm`. A kernel without one of the hooks is logged and skipped; any other attach error stops the agent.
-- **The `openat` file-access tracepoint** is off by default (`builtinProbes.filesystem.file_access.enabled: false`).
-  When on, it records opens of the configured `watched_paths` only (the chart's default list is SSH-key paths), capped
+- **The `openat` file-access tracepoint** attaches only when the agent runs with
+  `BUILTIN_PROBES__FILESYSTEM__FILE_ACCESS=true`, which the chart does not set. When on, it records opens of the paths
+  in `BUILTIN_PROBES__FILESYSTEM__WATCHED_PATHS` only, capped
   at 128 paths (`MAX_WATCHED_PATHS`, `.../probes/builtin/file_access.rs`). It reads the path, not file contents, and
   exports `file_access_events` with the file name, open flags, process name, cgroup id, namespace and pod, and logs each
   open at info level.
-- **`customProbes`** (kprobes, uprobes, tracepoints) in `values.yaml` reaches the agent's ConfigMap, but no code reads
-  it, so it attaches nothing.
 
 ## 2. Privileges
 
@@ -299,6 +299,5 @@ These are open and listed here so a reviewer does not have to find them:
 - The agent container runs AppArmor-unconfined; a narrower profile that allows only what discovery needs is not provided
   (section 2).
 - Userspace memory has no node-wide cap, so heavy concurrent traffic can OOM-kill the agent (section 4).
-- `customProbes` in `values.yaml` is accepted but does nothing (section 1).
 - CI does not scan the published image for vulnerabilities, and images published before signing started are unsigned
   (section 7).
