@@ -11,3 +11,4 @@ aya-ebpf = { workspace = true }
 [[bin]]
 name = "honeybeepf-llm"
 path = "src/main.rs"
+

@@ -257,6 +257,18 @@ fn parse_llm_record(item: &[u8]) -> Option<(&LlmEventHeader, &[u8])> {
 
 /// Attach a uprobe at a file offset in a library or executable.
 /// Loads the program if not already loaded.
+/// Loads the uprobe program `prog_name` unless it is loaded already.
+pub fn load_uprobe<'b>(bpf: &'b mut Ebpf, prog_name: &str) -> Result<&'b mut UProbe> {
+    let program: &mut UProbe = bpf
+        .program_mut(prog_name)
+        .with_context(|| format!("Failed to find program {prog_name}"))?
+        .try_into()?;
+    if program.fd().is_err() {
+        program.load()?;
+    }
+    Ok(program)
+}
+
 pub fn attach_uprobe(
     bpf: &mut Ebpf,
     prog_name: &str,
@@ -264,15 +276,7 @@ pub fn attach_uprobe(
     path: &str,
     offset: u64,
 ) -> Result<UProbeLinkId> {
-    let program: &mut UProbe = bpf
-        .program_mut(prog_name)
-        .with_context(|| format!("Failed to find program {prog_name}"))?
-        .try_into()?;
-
-    // Check if loaded using fd()
-    if program.fd().is_err() {
-        program.load()?;
-    }
+    let program = load_uprobe(bpf, prog_name)?;
 
     // With a name, aya would read the whole file again for every program.
     program
