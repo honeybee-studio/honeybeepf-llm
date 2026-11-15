@@ -1,0 +1,3 @@
+# Artifact Hub repository metadata. release.yml pushes it next to the chart as the `artifacthub.io` tag, where
+# Artifact Hub reads the ID to verify that the ghcr repository belongs to its entry (verified publisher).
+repositoryID: 8b2972af-bd10-461b-9464-3f51d17ebb08

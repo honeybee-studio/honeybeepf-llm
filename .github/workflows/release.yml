@@ -178,6 +178,17 @@ jobs:
           test -n "$digest"
           cosign sign --yes "${CHART_REPO#oci://}/honeybeepf-llm@$digest"
 
+      - name: Install oras
+        uses: oras-project/setup-oras@5e2f2482b30b0cb3e14e67f89a80c88c659a7c63 # v2.0.3
+
+      # Rewritten on every release; it holds no version, so overwriting it is safe.
+      - name: Push Artifact Hub metadata
+        working-directory: charts
+        run: |
+          oras push "${CHART_REPO#oci://}/honeybeepf-llm:artifacthub.io" \
+            --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml \
+            artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
+
   release:
     name: GitHub release
     needs: [version, image, chart]
