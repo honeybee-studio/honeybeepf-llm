@@ -41,7 +41,7 @@ run_yq '{"groups": .spec.groups}' < "$work/rule.yaml" > "$work/full.yml"
 run_yq '{"groups": .spec.groups} | del(.groups[].rules[].annotations)' < "$work/rule.yaml" > "$work/rules.yml"
 cp tests/alerts/rules.test.yml "$work/"
 
-run_promtool check rules full.yml
+run_promtool check rules --lint-fatal full.yml
 run_promtool test rules rules.test.yml
 
 render | run_yq -o=json -I=0 '.spec.groups' > "$work/chart.json"

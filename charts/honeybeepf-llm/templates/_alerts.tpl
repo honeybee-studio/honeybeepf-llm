@@ -11,14 +11,17 @@ Spend and call rules group by target_namespace, the calling pod's namespace: `na
 {{- if or $a.budgets (gt (float64 $a.defaultDailyBudgetUSD) 0.0) }}
 - name: honeybeepf-llm.budgets
   rules:
-  {{- range $ns, $usd := $a.budgets }}
+  # One rule, so the budget series has a single source; promtool flags a name recorded twice.
   - record: honeybeepf_llm:namespace_daily_budget_usd
-    expr: label_replace(vector({{ $usd }}), "target_namespace", {{ $ns | quote }}, "", "")
-  {{- end }}
-  {{- if gt (float64 $a.defaultDailyBudgetUSD) 0.0 }}
-  - record: honeybeepf_llm:namespace_daily_budget_usd
-    expr: sum by (target_namespace) (increase({{ $cost }}{target_namespace!~{{ keys $a.budgets | sortAlpha | join "|" | quote }}}[24h])) * 0 + {{ $a.defaultDailyBudgetUSD }}
-  {{- end }}
+    expr: |
+      {{- $terms := list }}
+      {{- range $ns, $usd := $a.budgets }}
+      {{- $terms = append $terms (printf "label_replace(vector(%v), \"target_namespace\", %q, \"\", \"\")" $usd $ns) }}
+      {{- end }}
+      {{- if gt (float64 $a.defaultDailyBudgetUSD) 0.0 }}
+      {{- $terms = append $terms (printf "sum by (target_namespace) (increase(%s{target_namespace!~%q}[24h])) * 0 + %v" $cost (keys $a.budgets | sortAlpha | join "|") $a.defaultDailyBudgetUSD) }}
+      {{- end }}
+      {{ join "\n      or " $terms }}
 {{- end }}
 - name: honeybeepf-llm.alerts
   rules:
