@@ -17,12 +17,6 @@ data:
   OTEL_SERVICE_NAME: "honeybeepf-llm"
   {{- end }}
 
-  # === Filesystem Probes ===
-  BUILTIN_PROBES__FILESYSTEM__FILE_ACCESS: {{ .Values.builtinProbes.filesystem.file_access.enabled | quote }}
-  {{- if .Values.builtinProbes.filesystem.file_access.watched_paths }}
-  BUILTIN_PROBES__FILESYSTEM__WATCHED_PATHS: {{ .Values.builtinProbes.filesystem.file_access.watched_paths | join "," | quote }}
-  {{- end }}
-
   # === LLM Probes ===
   BUILTIN_PROBES__LLM: {{ .Values.builtinProbes.llm.enabled | quote }}
   {{- if not (kindIs "invalid" .Values.builtinProbes.llm.executables) }}
@@ -41,15 +35,3 @@ data:
   LLM_PRICES_CONFIG: {{ .Values.builtinProbes.llm.prices | toJson | quote }}
   {{- end }}
 
-  # === Collection Interval ===
-  # === Process Lifecycle Probes ===
-  {{- if .Values.builtinProbes.process_lifecycle }}
-  BUILTIN_PROBES__PROCESS_LIFECYCLE: {{ .Values.builtinProbes.process_lifecycle.enabled | quote }}
-  {{- end }}
-
-  BUILTIN_PROBES__INTERVAL: {{ .Values.builtinProbes.interval | quote }}
-
-  # === Custom Probes ===
-  {{- if or .Values.customProbes.kprobes .Values.customProbes.uprobes .Values.customProbes.tracepoints }}
-  CUSTOM_PROBE_CONFIG: {{ toJson .Values.customProbes | quote }}
-  {{- end }}

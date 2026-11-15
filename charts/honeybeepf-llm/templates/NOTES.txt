@@ -1,0 +1,19 @@
+honeybeepf-llm {{ .Chart.AppVersion }} runs as DaemonSet {{ include "honeybeepf-llm.fullname" . }} in namespace {{ .Release.Namespace }}.
+{{- if not .Values.builtinProbes.llm.enabled }}
+
+builtinProbes.llm.enabled is false, so no LLM call is recorded. Set it to true to start.
+{{- else }}
+
+Recorded calls show in the agent log:
+  kubectl logs -n {{ .Release.Namespace }} ds/{{ include "honeybeepf-llm.fullname" . }} -f | grep 'LLM SUCCESS'
+{{- if .Values.output.otlp.endpoint }}
+
+Metrics go to {{ .Values.output.otlp.endpoint }} over OTLP, for example llm_cost_usd_total by target_namespace and
+target_workload_name. Dashboards: https://github.com/honeybee-studio/honeybeepf-llm/tree/main/docs/grafana
+{{- else }}
+
+output.otlp.endpoint is empty, so metrics are not exported. Point it at an OpenTelemetry Collector (OTLP gRPC):
+  helm upgrade {{ .Release.Name }} oci://ghcr.io/honeybee-studio/charts/honeybeepf-llm -n {{ .Release.Namespace }} \
+    --reuse-values --set output.otlp.endpoint=<host:port>
+{{- end }}
+{{- end }}

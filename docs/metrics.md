@@ -163,7 +163,7 @@ sum by (target_namespace, target_workload_name) (rate(honeybeepf_llm_llm_cost_us
 Two dashboards ship in [`docs/grafana/`](grafana/): **LLM Cost Observability**
 ([`honeybeepf-cost.json`](grafana/honeybeepf-cost.json)) and **Security & Compliance**
 ([`honeybeepf-security.json`](grafana/honeybeepf-security.json)); the security dashboard needs the file-access
-probe, which is off by default (`builtinProbes.filesystem.file_access.enabled`). Import them in Grafana
+probe, which the chart does not turn on (`BUILTIN_PROBES__FILESYSTEM__FILE_ACCESS` on the agent). Import them in Grafana
 (**Dashboards → New → Import**), or let the Grafana sidecar load them:
 
 ```bash
