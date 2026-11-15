@@ -313,6 +313,34 @@
       "request_extractor": "messages"
     },
     {
+      "name": "openai-compatible",
+      "note": "Chat Completions of hosted OpenAI-compatible APIs, from each provider's API reference (2026-11-15): Groq (/openai/v1), DeepSeek (no /v1), Together (also us-api.), Fireworks (/inference/v1), OpenRouter (/api/v1, also eu./us.), Mistral (also api.eu./api.us.) and Cerebras; usage is OpenAI's, so the OpenAI chat response block. Hosts match as substrings. xAI is left out: its completion_tokens appear to exclude reasoning tokens. Placed after the OpenAI chat entry, which catches the same body first in the host-independent usage parse.",
+      "hosts": [
+        "api.groq.com",
+        "api.deepseek.com",
+        "api.together.ai",
+        "api.fireworks.ai",
+        "openrouter.ai",
+        "api.mistral.ai",
+        "api.eu.mistral.ai",
+        "api.us.mistral.ai",
+        "api.cerebras.ai"
+      ],
+      "paths": ["/chat/completions$"],
+      "response": {
+        "usage_path": "usage",
+        "prompt_tokens": "prompt_tokens",
+        "completion_tokens": "completion_tokens",
+        "thoughts_tokens": "completion_tokens_details.reasoning_tokens",
+        "cache_read_tokens": "prompt_tokens_details.cached_tokens",
+        "model_path": "model",
+        "service_tier_path": "service_tier",
+        "input_modality_details": "prompt_tokens_details",
+        "output_modality_details": "completion_tokens_details"
+      },
+      "request_extractor": "messages"
+    },
+    {
       "name": "anthropic-agents",
       "note": "Claude Managed Agents session paths (/v1/sessions, /v1/sessions/*/events), api.anthropic.com only; record_only makes the processor count each call under the agent_session reason and never read the response, whose usage is a running session total. required_field list_cost keeps the entry from matching another provider's response in the host-independent usage parse.",
       "hosts": ["api.anthropic.com"],

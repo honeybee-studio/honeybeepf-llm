@@ -115,6 +115,22 @@ meta = [
   { url = "api.meta.ai/v1/messages/", reason = "trailing slash" },
 ]
 
+openai_compatible = [
+  # Hosted OpenAI-compatible Chat Completions, base URLs from each provider's API reference
+  { url = "api.groq.com/openai/v1/chat/completions", reason = "Groq, base /openai/v1" },
+  { url = "api.deepseek.com/chat/completions", reason = "DeepSeek, base without /v1" },
+  { url = "api.deepseek.com/beta/chat/completions", reason = "DeepSeek beta base" },
+  { url = "api.together.ai/v1/chat/completions", reason = "Together" },
+  { url = "us-api.together.ai/v1/chat/completions", reason = "Together US-only host, matched as a substring" },
+  { url = "api.fireworks.ai/inference/v1/chat/completions", reason = "Fireworks, base /inference/v1" },
+  { url = "openrouter.ai/api/v1/chat/completions", reason = "OpenRouter, base /api/v1" },
+  { url = "eu.openrouter.ai/api/v1/chat/completions", reason = "OpenRouter EU in-region host" },
+  { url = "api.mistral.ai/v1/chat/completions", reason = "Mistral" },
+  { url = "api.eu.mistral.ai/v1/chat/completions", reason = "Mistral EU host" },
+  { url = "api.us.mistral.ai/v1/chat/completions", reason = "Mistral US host" },
+  { url = "api.cerebras.ai/v1/chat/completions", reason = "Cerebras" },
+]
+
 none = [
   # Other services under the same parent domains
   { url = "ec2.us-east-1.api.aws/v1/messages", reason = "other api.aws service" },
@@ -177,4 +193,10 @@ none = [
   { url = "api.meta.ai/v1/embeddings", reason = "Meta embeddings not supported (no such entry, api.meta.ai not an OpenAI host)" },
   { url = "api.meta.ai/v1/messages/count_tokens", reason = "token counting, past the /v1/messages anchor" },
   { url = "api.meta.ai/v1/responses/resp_1", reason = "stored response, past the /v1/responses anchor" },
+  # OpenAI-compatible hosts: only Chat Completions is listed so far
+  { url = "api.groq.com/openai/v1/responses", reason = "Groq Responses not listed yet" },
+  { url = "api.mistral.ai/v1/fim/completions", reason = "Mistral FIM, not chat" },
+  { url = "api.deepseek.com/beta/completions", reason = "DeepSeek FIM completions, not chat" },
+  { url = "api.fireworks.ai/inference/v1/embeddings", reason = "Fireworks embeddings not listed" },
+  { url = "api.x.ai/v1/chat/completions", reason = "xAI left out: completion_tokens appear to exclude reasoning" },
 ]

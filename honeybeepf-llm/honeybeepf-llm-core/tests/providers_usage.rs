@@ -1602,3 +1602,81 @@ fn test_meta_messages_reads_anthropic_shape() {
     assert_eq!(usage.cache_write_tokens, Some(2000));
     assert_eq!(usage.model, Some("muse-spark-1".to_string()));
 }
+
+// Hosted OpenAI-compatible APIs: OpenAI chat usage plus each provider's extra fields, which the
+// OpenAI chat response block ignores.
+fn openai_compatible_provider(host: &str, path: &str) -> ConfigurableProvider {
+    let registry = ProviderRegistry::with_defaults();
+    let config = registry.find_provider(host, path).unwrap().clone();
+    assert_eq!(config.name, "openai-compatible", "{host}{path}");
+    ConfigurableProvider::new(config)
+}
+
+#[test]
+fn test_openai_compatible_reads_usage_past_provider_extras() {
+    // Groq: timing fields inside usage.
+    let groq = openai_compatible_provider("api.groq.com", "/openai/v1/chat/completions");
+    let usage = groq
+        .parse_usage(&json!({
+            "model": "llama-3.3-70b-versatile",
+            "usage": {
+                "queue_time": 0.02, "prompt_tokens": 18, "prompt_time": 0.001,
+                "completion_tokens": 25, "completion_time": 0.03, "total_tokens": 43,
+                "total_time": 0.031, "prompt_tokens_details": {"cached_tokens": 6}
+            }
+        }))
+        .unwrap();
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (18, 25));
+    assert_eq!(usage.cache_read_tokens, Some(6));
+    assert_eq!(usage.model.as_deref(), Some("llama-3.3-70b-versatile"));
+
+    // DeepSeek: cache hit/miss counts beside the OpenAI fields, and reasoning inside completion.
+    let deepseek = openai_compatible_provider("api.deepseek.com", "/chat/completions");
+    let usage = deepseek
+        .parse_usage(&json!({
+            "model": "deepseek-reasoner",
+            "usage": {
+                "prompt_tokens": 100, "completion_tokens": 60, "total_tokens": 160,
+                "prompt_cache_hit_tokens": 64, "prompt_cache_miss_tokens": 36,
+                "prompt_tokens_details": {"cached_tokens": 64},
+                "completion_tokens_details": {"reasoning_tokens": 40}
+            }
+        }))
+        .unwrap();
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (100, 60));
+    assert_eq!(usage.cache_read_tokens, Some(64));
+    assert_eq!(usage.thoughts_tokens, Some(40));
+
+    // OpenRouter: provider-reported cost fields are not tokens and are ignored.
+    let openrouter = openai_compatible_provider("openrouter.ai", "/api/v1/chat/completions");
+    let usage = openrouter
+        .parse_usage(&json!({
+            "model": "anthropic/claude-sonnet-4.5",
+            "usage": {
+                "prompt_tokens": 50, "completion_tokens": 10, "total_tokens": 60,
+                "cost": 0.00042, "is_byok": false,
+                "cost_details": {"upstream_inference_cost": 0.0004},
+                "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 20}
+            }
+        }))
+        .unwrap();
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (50, 10));
+    assert_eq!(usage.model.as_deref(), Some("anthropic/claude-sonnet-4.5"));
+}
+
+#[test]
+fn test_openai_compatible_hosts_are_admitted() {
+    let registry = ProviderRegistry::with_defaults();
+    for host in [
+        "api.groq.com",
+        "api.deepseek.com",
+        "us-api.together.ai",
+        "api.fireworks.ai",
+        "eu.openrouter.ai",
+        "api.eu.mistral.ai",
+        "api.cerebras.ai",
+    ] {
+        assert!(registry.may_serve_host(host), "{host}");
+    }
+    assert!(!registry.may_serve_host("api.x.ai"));
+}

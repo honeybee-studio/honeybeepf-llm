@@ -23,13 +23,14 @@ struct ProviderUrls {
     bedrock: Vec<UrlCase>,
     gemini: Vec<UrlCase>,
     meta: Vec<UrlCase>,
+    openai_compatible: Vec<UrlCase>,
     none: Vec<UrlCase>,
 }
 
 #[test]
 fn test_default_providers() {
     let registry = ProviderRegistry::with_defaults();
-    assert_eq!(registry.providers.len(), 16);
+    assert_eq!(registry.providers.len(), 17);
 }
 
 // Shape detection: the path-only fallback matches an LLM path on a host no entry lists.
@@ -112,7 +113,18 @@ fn test_default_provider_hosts() {
     let media = ["api.openai.com"];
     // Meta Model API: one host, three generation routes.
     let meta = ["api.meta.ai"];
-    let expected: [&[&str]; 16] = [
+    let openai_compatible = [
+        "api.groq.com",
+        "api.deepseek.com",
+        "api.together.ai",
+        "api.fireworks.ai",
+        "openrouter.ai",
+        "api.mistral.ai",
+        "api.eu.mistral.ai",
+        "api.us.mistral.ai",
+        "api.cerebras.ai",
+    ];
+    let expected: [&[&str]; 17] = [
         &openai,
         &openai,
         &media,
@@ -134,6 +146,7 @@ fn test_default_provider_hosts() {
         &meta,
         &meta,
         &meta,
+        &openai_compatible,
         &["api.anthropic.com"],
     ];
     let registry = ProviderRegistry::with_defaults();
@@ -160,6 +173,7 @@ fn test_find_provider_url_fixtures() {
         ("bedrock", &fixture.bedrock),
         ("gemini", &fixture.gemini),
         ("meta", &fixture.meta),
+        ("openai-compatible", &fixture.openai_compatible),
         ("none", &fixture.none),
     ];
     let mut cases = 0;
@@ -350,6 +364,7 @@ fn test_user_providers_are_added_to_the_defaults() {
             "meta",
             "meta",
             "meta",
+            "openai-compatible",
             "anthropic-agents",
             "ollama",
             "vllm"
@@ -399,6 +414,7 @@ fn test_user_provider_replaces_defaults_with_its_name_in_their_place() {
             "meta",
             "meta",
             "meta",
+            "openai-compatible",
             "anthropic-agents",
             "ollama"
         ]
