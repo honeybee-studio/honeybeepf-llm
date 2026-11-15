@@ -48,8 +48,8 @@ replaces every built-in entry of that name, so an `openai` entry must also cover
 built-in entries tried first: a gateway that returns an OpenAI-, Anthropic- or Gemini-shaped body is read with the
 built-in fields.
 
-By default only HTTPS calls made through OpenSSL are seen. An in-cluster **plain-HTTP** endpoint (a typical Ollama
-or vLLM) is captured at the socket layer when a provider opts in with `plaintext`:
+By default only HTTPS calls made through OpenSSL or Go `crypto/tls` are seen. An in-cluster **plain-HTTP** endpoint
+(a typical Ollama or vLLM) is captured at the socket layer when a provider opts in with `plaintext`:
 
 ```yaml
 builtinProbes:
@@ -98,7 +98,8 @@ outbound call.
 | Node.js official binaries and `node:` images | OpenSSL inside the `node` executable | ✅ |
 | Node.js from distro packages | shared `libssl` | ✅ |
 | curl and other programs linked to `libssl` | shared `libssl` | ✅ |
-| Go (`crypto/tls`), rustls, Java (JSSE), GnuTLS, NSS | not OpenSSL | ❌ not seen |
+| Go 1.20+ (`crypto/tls`), stripped or not, amd64 and arm64 | `crypto/tls` inside the executable | ✅ |
+| Go before 1.20, forks of `crypto/tls` (such as uTLS), rustls, Java (JSSE), GnuTLS, NSS | not probed | ❌ not seen |
 
 **Protocols**
 

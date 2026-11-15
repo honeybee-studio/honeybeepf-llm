@@ -65,9 +65,9 @@ commands, required capabilities, resources and uninstall are in [docs/install.md
 | Dimension | Covered |
 |---|---|
 | Providers | 11 built-in APIs: OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI, Meta; OpenAI-compatible APIs of 25 hosted providers (Groq, DeepSeek, Mistral, Qwen, Kimi, GLM, …) — JSON, streaming (SSE), cache tokens; other OpenAI/Anthropic/Gemini-compatible hosts by request shape (experimental, off by default) |
-| Runtimes | Python, Node.js, curl, anything linked to OpenSSL `libssl` — not Go `crypto/tls`, rustls, JSSE, GnuTLS, NSS |
+| Runtimes | Python, Node.js, curl, anything linked to OpenSSL `libssl`, and Go 1.20+ `crypto/tls` — not rustls, JSSE, GnuTLS, NSS |
 | Protocols | HTTP/1.1 and HTTP/2 — not WebSocket, not HTTP/3 (QUIC) |
-| Transport | HTTPS through OpenSSL; in-cluster plain HTTP (Ollama, vLLM) on opt-in |
+| Transport | HTTPS through OpenSSL or Go `crypto/tls`; in-cluster plain HTTP (Ollama, vLLM) on opt-in |
 | Kernels | Linux 5.10–7.2 and RHEL 8.10 / 9.6 / 9.7 on x86-64, 5.15 and 6.1 on arm64 (not yet required to pass), loaded and attached in CI; token counts checked on 7.0 |
 
 The exact checks, how to add a provider, and plain-HTTP capture are in [docs/providers.md](docs/providers.md).
@@ -77,7 +77,8 @@ The exact checks, how to add a provider, and plain-HTTP capture are in [docs/pro
 ![uprobes on SSL_write/SSL_read copy plaintext into a ring buffer; the agent parses HTTP, matches the provider, maps the cgroup to a pod and exports OTLP metrics](docs/images/how-it-works.svg)
 
 1. The agent finds every `libssl` mapped by a process (and executables with OpenSSL built in) and attaches
-   uprobes to `SSL_write` and `SSL_read`, including libraries opened after it started.
+   uprobes to `SSL_write` and `SSL_read`, including libraries opened after it started. In Go executables it probes
+   `crypto/tls` instead: `(*Conn).Write`, `Read` and each of `Read`'s return instructions.
 2. The uprobes copy the plaintext buffer, the pid and the cgroup id into a BPF ring buffer.
 3. In user space, the HTTP/1.1, HTTP/2 and SSE parser reassembles each request and response per TLS connection, picks
    the provider from the host and path, and reads the usage fields from the response.

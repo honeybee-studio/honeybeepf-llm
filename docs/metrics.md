@@ -93,9 +93,9 @@ at each pod's processes and counts the pod under its best one:
 
 | `tls` | The pod has a process that |
 |---|---|
-| `hooked` | maps a libssl, or runs an executable, that the probes are attached to |
+| `hooked` | maps a libssl, or runs an executable (built-in OpenSSL or Go `crypto/tls`), that the probes are attached to |
 | `openssl_not_hooked` | maps a libssl the probes are not attached to (the attach failed or has not run yet) |
-| `go` | is a Go executable (crypto/tls is not hooked) |
+| `go` | is a Go executable the probes are not attached to (Go before 1.20, or no `crypto/tls` linked in) |
 | `java` | runs a JVM (JSSE is not hooked) |
 | `other` | none of the above: rustls, a TLS library linked in statically, or no TLS at all |
 

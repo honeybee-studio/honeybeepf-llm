@@ -16,8 +16,8 @@ eBPF uprobes, and exports metrics over OpenTelemetry.
 
 - Linux 5.10+ or RHEL 8.10 / 9.6 / 9.7 nodes with BTF. x86-64 is tested on every kernel in CI; arm64 images are
   published and tested on fewer kernels.
-- Applications that use OpenSSL: Python, Node.js, curl and anything else linked to `libssl`. Go `crypto/tls`, rustls
-  and Java are not covered yet.
+- Applications that use OpenSSL (Python, Node.js, curl and anything else linked to `libssl`) or Go 1.20+
+  `crypto/tls`. rustls and Java are not covered yet.
 - An OpenTelemetry Collector (OTLP gRPC) to receive the metrics, or none to only read the agent log.
 
 The agent is not privileged. It adds the capabilities `BPF`, `PERFMON`, `SYS_ADMIN`, `SYS_PTRACE`, `NET_ADMIN` and

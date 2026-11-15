@@ -24,7 +24,7 @@ pub(crate) enum Tls {
     Hooked,
     /// Maps a libssl the probes are not attached to (attach failed, or not seen yet).
     OpensslNotHooked,
-    /// A Go executable: crypto/tls is not hooked.
+    /// A Go executable the probes are not attached to (Go before 1.20, or no crypto/tls).
     Go,
     /// A JVM: JSSE is not hooked.
     Java,
