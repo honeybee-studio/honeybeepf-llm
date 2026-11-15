@@ -101,6 +101,7 @@ the dashboards ship in [docs/grafana/](docs/grafana/).
 - [Security review](docs/security-review.md)
 - [Supported providers, runtimes, protocols and kernels](docs/providers.md)
 - [Metrics reference](docs/metrics.md)
+- [Alerts and budgets](docs/alerts.md)
 - [Overhead benchmark](docs/benchmark.md)
 - [Grafana dashboards](docs/grafana/)
 

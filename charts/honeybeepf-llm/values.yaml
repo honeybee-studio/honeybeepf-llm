@@ -125,6 +125,31 @@ resources:
     cpu: "50m"
     memory: "128Mi"
 
+# Prometheus alert rules for LLM spend and capture health (docs/alerts.md). The same rules ship in the bundled
+# Prometheus chart; set prometheusRule.enabled to get them as a PrometheusRule for the Prometheus Operator.
+alerts:
+  prometheusRule:
+    # Needs the monitoring.coreos.com CRDs (kube-prometheus-stack and similar), or the install fails.
+    enabled: false
+    # Labels the operator's ruleSelector matches, e.g. release: kube-prometheus-stack
+    labels: {}
+  # Daily LLM spend budget in USD per calling namespace, checked over the last 24 hours (not a calendar day).
+  budgets: {}
+  # Example:
+  # budgets:
+  #   team-a: 50
+  #   team-b: 200
+  # Budget for every namespace not listed above that spends anything; 0 means none.
+  defaultDailyBudgetUSD: 0
+  # LLMSpendSpike: the last hour's spend is over `factor` times the same hour yesterday and over minUSD.
+  spike:
+    factor: 3
+    minUSD: 5
+  # LLMCallsNotRecorded: share of seen calls the agent could not record, over 15 minutes.
+  notRecordedRatio: 0.05
+  # LLMCallsWentSilent: calls in the same hour yesterday needed before an hour with none counts as silence.
+  silentMinCalls: 20
+
 nodeSelector:
   kubernetes.io/os: linux
 tolerations: []
