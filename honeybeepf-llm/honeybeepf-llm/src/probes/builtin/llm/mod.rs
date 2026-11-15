@@ -2,6 +2,7 @@ mod background;
 mod conn_filter;
 #[cfg(feature = "k8s")]
 pub(crate) mod coverage;
+pub mod gotls;
 pub mod http;
 pub mod processor;
 

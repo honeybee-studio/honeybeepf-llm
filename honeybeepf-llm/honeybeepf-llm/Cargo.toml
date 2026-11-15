@@ -20,6 +20,8 @@ aya-log = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
 object = { version = "0.36", default-features = false, features = ["elf", "read_core", "std"] }
+# Finds the return instructions in Go functions, where the Go TLS probes read results.
+iced-x86 = { version = "1.21", default-features = false, features = ["decoder", "std"] }
 tokio = { workspace = true, features = [
     "macros",
     "rt",
