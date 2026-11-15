@@ -20,8 +20,17 @@ replayed against it as well. A blank cell was not checked.
 | Amazon Bedrock Converse | ✅ | ✅ ConverseStream (event stream) | ✅ read/write |
 | Amazon Bedrock InvokeModel (Anthropic Claude models) | ✅ | ✅ InvokeModelWithResponseStream, every model | ✅ read/write |
 | Meta Model API — Muse Spark (`api.meta.ai`: Chat Completions, Responses, Messages) | ✅ | ✅ | |
+| OpenAI-compatible Chat Completions of Groq, DeepSeek, Together, Fireworks, OpenRouter, Mistral and Cerebras (usage read as OpenAI Chat Completions) | | | |
 
 Compressed responses (`gzip`, `br`, `zstd`, `deflate`) are decoded, SSE included.
+
+The OpenAI-compatible hosts are those in each provider's API reference, regional hosts included (Together `us-api.`,
+OpenRouter `eu.` and `us.`, Mistral `api.eu.` and `api.us.`); only Chat Completions is listed, not their Responses or
+embeddings endpoints. Their models are not in the price table, so these calls are recorded with tokens and no cost
+unless a price file names the model. xAI is not listed: its `completion_tokens` appear to leave out reasoning tokens,
+which the OpenAI shape counts inside. Some providers send streaming usage only with `stream_options.include_usage`, as
+OpenAI does; a stream without it is counted under
+`llm_responses_unparsed_total{reason="usage_absent"}`.
 
 `builtinProbes.llm.providers` in `values.yaml` describes providers by host, path and usage fields, in the format of
 the [built-in list](../honeybeepf-llm/honeybeepf-llm-core/src/providers/default_providers.json). They are added to the
