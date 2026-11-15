@@ -24,6 +24,8 @@ sources:
 maintainers:
   - name: sammiee5311
     url: https://github.com/sammiee5311
+  - name: jundorok
+    url: https://github.com/jundorok
 annotations:
   artifacthub.io/category: monitoring-logging
   artifacthub.io/license: Apache-2.0
