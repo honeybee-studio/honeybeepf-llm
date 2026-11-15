@@ -130,7 +130,8 @@ The agent, its image and the `honeybeepf-llm` chart share one version.
    Until the tag's image exists, the chart on `main` points at an image tag that is not there yet.
 3. `release.yml` checks that the tag matches both files and that neither the image nor the chart version exists,
    then pushes the image as `X.Y.Z` and `X.Y` (linux/amd64 and linux/arm64), pushes the chart to
-   `oci://ghcr.io/honeybee-studio/charts` and creates a GitHub release whose notes group merged PRs by label
+   `oci://ghcr.io/honeybee-studio/charts` with its Artifact Hub metadata (`charts/artifacthub-repo.yml`, as the
+   `artifacthub.io` tag) and creates a GitHub release whose notes group merged PRs by label
    (`.github/release.yml`). An existing image or chart version is never overwritten: if a later job fails, use
    "Re-run failed jobs"; to redo a release, cut the next patch version.
 

@@ -5,6 +5,7 @@
 [![CI/CD](https://github.com/honeybee-studio/honeybeepf-llm/actions/workflows/docker-publish.yml/badge.svg?branch=main)](https://github.com/honeybee-studio/honeybeepf-llm/actions/workflows/docker-publish.yml)
 [![Kernel Matrix](https://github.com/honeybee-studio/honeybeepf-llm/actions/workflows/kernel-matrix.yml/badge.svg?branch=main)](https://github.com/honeybee-studio/honeybeepf-llm/actions/workflows/kernel-matrix.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/honeybeepf-llm)](https://artifacthub.io/packages/search?repo=honeybeepf-llm)
 
 ![LLM Cost Observability dashboard on the demo cluster: token usage, requests and latency by namespace, pod and workload; estimated spend per workload and per model in USD; and Cost-Waste Signals showing the measured cost of refused fallback attempts and the estimated savings from prompt caching, across team-a, team-b and team-c](docs/images/grafana.png)
 
