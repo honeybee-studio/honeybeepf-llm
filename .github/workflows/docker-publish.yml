@@ -235,3 +235,6 @@ jobs:
 
       - name: Lint chart
         run: helm lint charts/honeybeepf-llm
+
+      - name: Test alert rules
+        run: bash ci/test-alerts.sh

@@ -1,0 +1,7 @@
+# Chart values the alert rule tests render with: one explicit budget and a default for other namespaces.
+alerts:
+  prometheusRule:
+    enabled: true
+  budgets:
+    team-a: 50
+  defaultDailyBudgetUSD: 20

@@ -1,0 +1,123 @@
+# promtool unit tests for the chart's alert rules, run by ci/test-alerts.sh against rules rendered from
+# tests/alerts/values.yaml. Each rule has a case that fires and a case that must not.
+rule_files:
+  - rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # team-a spends $0.05/min ($72/day) against its $50 budget; team-b $0.01/min ($14.40/day) against the $20 default.
+  - interval: 1m
+    input_series:
+      - series: 'honeybeepf_llm_llm_cost_usd_total{target_namespace="team-a",model="m"}'
+        values: '0+0.05x1500'
+      - series: 'honeybeepf_llm_llm_cost_usd_total{target_namespace="team-b",model="m"}'
+        values: '0+0.01x1500'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: LLMSpendOverBudget
+        exp_alerts:
+          - exp_labels: {severity: warning, target_namespace: team-a}
+      - eval_time: 25h
+        alertname: LLMSpendPaceOverBudget
+        exp_alerts:
+          - exp_labels: {severity: warning, target_namespace: team-a}
+      # 24 hours have not passed yet, so the 24-hour spend is still under budget.
+      - eval_time: 10h
+        alertname: LLMSpendOverBudget
+        exp_alerts: []
+
+  # team-c goes from $0.01/min to $0.20/min after a day; team-d stays flat.
+  - interval: 1m
+    input_series:
+      - series: 'honeybeepf_llm_llm_cost_usd_total{target_namespace="team-c",model="m"}'
+        values: '0+0.01x1440 14.4+0.2x120'
+      - series: 'honeybeepf_llm_llm_cost_usd_total{target_namespace="team-d",model="m"}'
+        values: '0+0.2x1560'
+    alert_rule_test:
+      - eval_time: 25h30m
+        alertname: LLMSpendSpike
+        exp_alerts:
+          - exp_labels: {severity: info, target_namespace: team-c}
+
+  # team-e made 60 calls an hour yesterday and stops; team-f made 6 an hour and stops.
+  - interval: 1m
+    input_series:
+      - series: 'honeybeepf_llm_llm_requests_total{target_namespace="team-e",model="m",status="200"}'
+        values: '0+1x1440 1440x150'
+      - series: 'honeybeepf_llm_llm_requests_total{target_namespace="team-f",model="m",status="200"}'
+        values: '0+0.1x1440 144x150'
+    alert_rule_test:
+      - eval_time: 26h
+        alertname: LLMCallsWentSilent
+        exp_alerts:
+          - exp_labels: {severity: warning, target_namespace: team-e}
+      - eval_time: 24h30m
+        alertname: LLMCallsWentSilent
+        exp_alerts: []
+
+  # team-g loses 1 call in 11; team-h has only usage_absent calls, which do not count as lost.
+  - interval: 1m
+    input_series:
+      - series: 'honeybeepf_llm_llm_requests_total{target_namespace="team-g",model="m",status="200"}'
+        values: '0+10x60'
+      - series: 'honeybeepf_llm_llm_responses_unparsed_total{target_namespace="team-g",reason="connection_closed"}'
+        values: '0+1x60'
+      - series: 'honeybeepf_llm_llm_requests_total{target_namespace="team-h",model="m",status="200"}'
+        values: '0+10x60'
+      - series: 'honeybeepf_llm_llm_responses_unparsed_total{target_namespace="team-h",reason="usage_absent"}'
+        values: '0+5x60'
+      - series: 'honeybeepf_llm_llm_responses_unparsed_total{target_namespace="team-i",reason="capture_lost"}'
+        values: '0+1x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: LLMCallsNotRecorded
+        exp_alerts:
+          - exp_labels: {severity: warning, target_namespace: team-g}
+          # team-i records nothing at all: every call it makes is lost.
+          - exp_labels: {severity: warning, target_namespace: team-i}
+
+  - interval: 1m
+    input_series:
+      - series: 'honeybeepf_llm_llm_unpriced_tokens_total{target_namespace="team-j",reason="unknown_model",model="new-model"}'
+        values: '0+100x90'
+      - series: 'honeybeepf_llm_llm_events_total{stage="reserve_fail",k8s_node_name="node-1"}'
+        values: '0+5x90'
+      - series: 'honeybeepf_llm_llm_events_total{stage="reserve_fail",k8s_node_name="node-2"}'
+        values: '0x90'
+      - series: 'honeybeepf_llm_llm_tls_coverage_pods{target_namespace="team-k",target_workload_name="api",tls="openssl_not_hooked"}'
+        values: '2x90'
+      - series: 'honeybeepf_llm_llm_tls_coverage_pods{target_namespace="team-k",target_workload_name="gw",tls="go"}'
+        values: '3x90'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: LLMTokensUnpriced
+        exp_alerts:
+          - exp_labels: {severity: info, target_namespace: team-j, reason: unknown_model}
+      - eval_time: 60m
+        alertname: LLMCaptureEventsDropped
+        exp_alerts:
+          - exp_labels: {severity: warning, k8s_node_name: node-1}
+      - eval_time: 60m
+        alertname: LLMWorkloadNotHooked
+        exp_alerts:
+          - exp_labels: {severity: warning, target_namespace: team-k, target_workload_name: api}
+
+  # node-1's agent stops reporting after an hour; node-2 keeps reporting; node-3 runs with no LLM probe.
+  - interval: 1m
+    input_series:
+      - series: 'honeybeepf_llm_active_probes{k8s_node_name="node-1",probe="llm"}'
+        values: '1x60 stale'
+      - series: 'honeybeepf_llm_active_probes{k8s_node_name="node-2",probe="llm"}'
+        values: '1x100'
+      - series: 'honeybeepf_llm_active_probes{k8s_node_name="node-3",probe="llm"}'
+        values: '0x100'
+    alert_rule_test:
+      - eval_time: 80m
+        alertname: HoneybeepfAgentMissing
+        exp_alerts:
+          - exp_labels: {severity: critical, k8s_node_name: node-1}
+      - eval_time: 80m
+        alertname: HoneybeepfLLMProbeInactive
+        exp_alerts:
+          - exp_labels: {severity: critical, k8s_node_name: node-3}

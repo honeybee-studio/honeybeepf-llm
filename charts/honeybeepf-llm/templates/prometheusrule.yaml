@@ -1,0 +1,14 @@
+{{- if .Values.alerts.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "honeybeepf-llm.fullname" . }}
+  labels:
+    {{- include "honeybeepf-llm.labels" . | nindent 4 }}
+    {{- with .Values.alerts.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    {{- include "honeybeepf-llm.alertGroups" . | trim | nindent 4 }}
+{{- end }}
