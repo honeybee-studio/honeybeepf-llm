@@ -356,7 +356,8 @@ fn moduledata(elf: &Elf) -> Result<Option<Moduledata>> {
     Ok(None)
 }
 
-/// Each name's function, looked up in the pclntab tables the moduledata points to.
+/// Each name's function, looked up in the pclntab tables the moduledata points to. Both tables list
+/// functions in the same order, standard library first, so the lookup stops once every name is found.
 fn find_funcs(elf: &Elf, md: &Moduledata, names: &[&str]) -> Result<Vec<Option<Func>>> {
     let wanted = name_offsets(elf, md, names)?;
     let mut ftab = Chunked::at_addr(elf, md.ftab)?;
@@ -364,10 +365,14 @@ fn find_funcs(elf: &Elf, md: &Moduledata, names: &[&str]) -> Result<Vec<Option<F
     // The table ends with one more entry, the end of the last function.
     let nfunc = md.ftab.1 / 8 - 1;
     let mut found = vec![None; names.len()];
+    let mut left = wanted.iter().flatten().count();
     for i in 0..nfunc {
+        if left == 0 {
+            break;
+        }
         let func = u64::from(ftab.u32_at(i * 8 + 4)?);
         let name = pcln.u32_at(func + 4)?;
-        let Some(slot) = wanted.iter().position(|offs| offs.contains(&name)) else {
+        let Some(slot) = wanted.iter().position(|off| *off == Some(name)) else {
             continue;
         };
         let entry = ftab.u32_at(i * 8)?;
@@ -376,6 +381,7 @@ fn find_funcs(elf: &Elf, md: &Moduledata, names: &[&str]) -> Result<Vec<Option<F
             addr: md.text + u64::from(entry),
             size: u64::from(next.saturating_sub(entry)),
         });
+        left -= 1;
     }
     if md.text + u64::from(ftab.u32_at(nfunc * 8)?) != md.maxpc {
         bail!("Go moduledata and pclntab disagree on the end of the code");
@@ -383,13 +389,13 @@ fn find_funcs(elf: &Elf, md: &Moduledata, names: &[&str]) -> Result<Vec<Option<F
     Ok(found)
 }
 
-/// Offsets in the function name table of each of `names`.
-fn name_offsets(elf: &Elf, md: &Moduledata, names: &[&str]) -> Result<Vec<Vec<u32>>> {
+/// Offset in the function name table of each of `names`, which the linker writes once per function.
+fn name_offsets(elf: &Elf, md: &Moduledata, names: &[&str]) -> Result<Vec<Option<u32>>> {
     let mut tab = Chunked::at_addr(elf, md.funcnametab)?;
     let len = md.funcnametab.1;
-    let mut found = vec![Vec::new(); names.len()];
+    let mut found = vec![None; names.len()];
     let mut off = 0;
-    while off < len {
+    while off < len && found.iter().any(Option::is_none) {
         let n = usize::try_from((len - off).min(CHUNK as u64))?;
         let chunk = tab.get(off, n)?;
         // Names are NUL-terminated; one cut by the chunk's end is read again with the next chunk.
@@ -400,7 +406,7 @@ fn name_offsets(elf: &Elf, md: &Moduledata, names: &[&str]) -> Result<Vec<Vec<u3
         let mut start = 0;
         for name in chunk[..last].split(|&b| b == 0) {
             if let Some(slot) = names.iter().position(|n| n.as_bytes() == name) {
-                found[slot].push(u32::try_from(off + start as u64)?);
+                found[slot].get_or_insert(u32::try_from(off + start as u64)?);
             }
             start += name.len() + 1;
         }
