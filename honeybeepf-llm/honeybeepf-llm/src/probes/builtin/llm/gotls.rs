@@ -2,7 +2,7 @@
 //! Returns get uprobes, not uretprobes: the Go runtime moves goroutine stacks, which breaks a uretprobe.
 //! Functions come from the runtime's own tables (moduledata and pclntab), which stripping keeps, read in chunks.
 
-use std::{fs::File, os::unix::fs::FileExt};
+use std::{collections::HashMap, fs::File, os::unix::fs::FileExt};
 
 use anyhow::{Context, Result, bail};
 use object::{
@@ -37,6 +37,9 @@ const MD_MINPC: usize = 20;
 const MD_MAXPC: usize = 21;
 const MD_TEXT: usize = 22;
 const MD_WORDS: usize = 23;
+/// Size of a dynamic relocation entry, and the RELATIVE types whose addend is what a PIE loader writes.
+const DYN_RELOC_ENTRY: u64 = 24;
+const RELATIVE: [u32; 2] = [elf::R_X86_64_RELATIVE, elf::R_AARCH64_RELATIVE];
 /// Bytes of a table read at a time, so a large binary never sits in memory whole.
 const CHUNK: usize = 64 * 1024;
 
@@ -304,10 +307,24 @@ fn uvarint(data: &[u8]) -> Option<(u64, usize)> {
     None
 }
 
-/// The runtime's moduledata, found by its first word: a pointer to the pclntab header, whose offsets
-/// must match the moduledata's own table pointers. Function entries are relative to its `text`, which
-/// is not the start of `.text` when a C linker put its own code first.
+/// The runtime's moduledata: its first word points at the pclntab header, whose function count must
+/// match. Only its own pointers are used (a C linker can move the tables the header's offsets name), and
+/// entries are relative to its `text`, which a C linker's code before Go's moves off the `.text` start.
 fn moduledata(elf: &Elf) -> Result<Option<Moduledata>> {
+    if let Some(md) = scan_moduledata(elf, &HashMap::new())? {
+        return Ok(Some(md));
+    }
+    // A PIE's words can be stale in the file, with the loaded values only in its relocations.
+    let relocated = relative_relocations(elf)?;
+    if relocated.is_empty() {
+        return Ok(None);
+    }
+    scan_moduledata(elf, &relocated)
+}
+
+/// The moduledata in the first moduledata section that has one, each word taken from `relocated`
+/// when a relocation sets it, else from the file.
+fn scan_moduledata(elf: &Elf, relocated: &HashMap<u64, u64>) -> Result<Option<Moduledata>> {
     for name in MODULEDATA_SECTIONS {
         let Some(s) = elf.section(name) else {
             continue;
@@ -317,43 +334,79 @@ fn moduledata(elf: &Elf) -> Result<Option<Moduledata>> {
         let mut off = 0;
         while off + span <= s.size {
             let mut w = [0u64; MD_WORDS];
-            for (word, b) in w
+            for (i, (word, b)) in w
                 .iter_mut()
                 .zip(data.get(off, MD_WORDS * 8)?.as_chunks::<8>().0)
+                .enumerate()
             {
-                *word = u64::from_le_bytes(*b);
+                let addr = s.addr + off + 8 * i as u64;
+                *word = relocated
+                    .get(&addr)
+                    .copied()
+                    .unwrap_or(u64::from_le_bytes(*b));
             }
             off += 8;
-            let names_at = w[MD_FUNCNAMETAB].wrapping_sub(w[0]);
-            if w[0] == 0 || !(1..=0x100).contains(&names_at) || w[MD_FTAB] != w[MD_PCLNTABLE] {
-                continue;
-            }
-            let Ok(header) = elf.read_addr(w[0], 72) else {
-                continue;
-            };
-            // Header words after the magic: nfunc, nfiles, (unused), funcnameOffset, cuOffset,
-            // filetabOffset, pctabOffset, pclnOffset.
-            let (h, _) = header[8..].as_chunks::<8>();
-            let h: Vec<u64> = h.iter().map(|b| u64::from_le_bytes(*b)).collect();
-            if u32::from_le_bytes(header[..4].try_into()?) != PCLNTAB_GO120
-                || header[7] != 8
-                || h[3] != names_at
-                || h[7] != w[MD_PCLNTABLE].wrapping_sub(w[0])
-                || h[0].wrapping_add(1) != w[MD_FTAB + 1]
+            if w[0] == 0
+                || w[MD_FTAB] != w[MD_PCLNTABLE]
+                || w[MD_FTAB + 1] == 0
                 || w[MD_MINPC] != w[MD_TEXT]
             {
                 continue;
             }
-            return Ok(Some(Moduledata {
+            let md = Moduledata {
                 text: w[MD_TEXT],
                 maxpc: w[MD_MAXPC],
                 funcnametab: (w[MD_FUNCNAMETAB], w[MD_FUNCNAMETAB + 1]),
                 pclntable: (w[MD_PCLNTABLE], w[MD_PCLNTABLE + 1]),
                 ftab: (w[MD_FTAB], w[MD_FTAB + 1].saturating_mul(8)),
-            }));
+            };
+            let in_file = |(addr, len): (u64, u64)| elf.file_offset(addr, len).is_some();
+            if !(in_file(md.funcnametab) && in_file(md.pclntable) && in_file(md.ftab)) {
+                continue;
+            }
+            let Ok(header) = elf.read_addr(w[0], 16) else {
+                continue;
+            };
+            // The header's first word after the magic is the function count.
+            let nfunc = u64::from_le_bytes(header[8..16].try_into()?);
+            if u32::from_le_bytes(header[..4].try_into()?) != PCLNTAB_GO120
+                || header[7] != 8
+                || nfunc.wrapping_add(1) != w[MD_FTAB + 1]
+            {
+                continue;
+            }
+            return Ok(Some(md));
         }
     }
     Ok(None)
+}
+
+/// Values the loader writes into the moduledata sections, by address: the addends of the RELATIVE
+/// dynamic relocations that land there.
+fn relative_relocations(elf: &Elf) -> Result<HashMap<u64, u64>> {
+    let mut out = HashMap::new();
+    let Some(relocs) = elf.section(b".rela.dyn") else {
+        return Ok(out);
+    };
+    let targets: Vec<(u64, u64)> = MODULEDATA_SECTIONS
+        .iter()
+        .filter_map(|name| elf.section(name))
+        .map(|s| (s.addr, s.addr + s.size))
+        .collect();
+    let mut table = Chunked::at_offset(elf, relocs.offset, relocs.size);
+    for i in 0..relocs.size / DYN_RELOC_ENTRY {
+        let (entry, _) = table
+            .get(i * DYN_RELOC_ENTRY, DYN_RELOC_ENTRY as usize)?
+            .as_chunks::<8>();
+        let [at, info, addend] = [0, 1, 2].map(|j| u64::from_le_bytes(entry[j]));
+        // The type is the low 32 bits of r_info; a RELATIVE entry's value is its addend.
+        if RELATIVE.contains(&(info as u32))
+            && targets.iter().any(|&(lo, hi)| (lo..hi).contains(&at))
+        {
+            out.insert(at, addend);
+        }
+    }
+    Ok(out)
 }
 
 /// Each name's function, looked up in the pclntab tables the moduledata points to. Both tables list

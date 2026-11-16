@@ -184,8 +184,14 @@ pub fn attach_probes_to_path(bpf: &mut Ebpf, libssl_path: &str) -> Result<bool> 
 /// Attach the Go `crypto/tls` probes to the Go executable at `path`: `Ok(None)` if it has no
 /// `crypto/tls` this agent can probe, else the Go version and the number of returns probed in `Read`.
 fn attach_go_tls(bpf: &mut Ebpf, path: &str) -> Result<Option<(String, usize)>> {
-    let Some(targets) = gotls::inspect(path)? else {
-        return Ok(None);
+    // An executable whose Go tables cannot be read is left unprobed, not failed: nothing was attached.
+    let targets = match gotls::inspect(path) {
+        Ok(Some(targets)) => targets,
+        Ok(None) => return Ok(None),
+        Err(e) => {
+            info!("Go executable not probed, its function tables could not be read: {path}: {e:#}");
+            return Ok(None);
+        }
     };
     let [write, read_enter, read_return, close] = GO_TLS_PROGRAMS;
     let mut sites = vec![

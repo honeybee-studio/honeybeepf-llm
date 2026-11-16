@@ -243,3 +243,62 @@ fn uvarint_matches_go_encoding() {
     assert_eq!(uvarint(&[0xac, 0x02]), Some((300, 2)));
     assert_eq!(uvarint(&[0x80]), None);
 }
+
+/// A copy of `path` whose moduledata words set by RELATIVE dynamic relocations hold stale bytes, as the
+/// arm64 GNU linker leaves them: the loaded values are then only in the relocations.
+fn with_stale_moduledata(path: &str) -> Result<PathBuf> {
+    let mut data = std::fs::read(path)?;
+    let stale: Vec<usize> = {
+        let obj = object::File::parse(&*data)?;
+        let ranges: Vec<(u64, u64, u64)> = [".go.module", ".noptrdata"]
+            .iter()
+            .filter_map(|name| obj.section_by_name(name))
+            .filter_map(|s| Some((s.address(), s.size(), s.file_range()?.0)))
+            .collect();
+        let relocs = obj
+            .section_by_name(".rela.dyn")
+            .context("no dynamic relocations")?;
+        relocs
+            .data()?
+            .as_chunks::<24>()
+            .0
+            .iter()
+            .filter(|e| {
+                u32::from_le_bytes(e[8..12].try_into().unwrap_or_default())
+                    == elf::R_X86_64_RELATIVE
+            })
+            .map(|e| u64::from_le_bytes(e[..8].try_into().unwrap_or_default()))
+            .filter_map(|at| {
+                ranges
+                    .iter()
+                    .find(|&&(addr, size, _)| (addr..addr + size).contains(&at))
+                    .map(|&(addr, _, file)| {
+                        usize::try_from(file + (at - addr)).unwrap_or(usize::MAX)
+                    })
+            })
+            .collect()
+    };
+    assert!(!stale.is_empty(), "no relocated moduledata words in {path}");
+    for at in stale {
+        data[at..at + 8].copy_from_slice(&[0xaa; 8]);
+    }
+    let out = PathBuf::from(format!("{path}-stale"));
+    std::fs::write(&out, data)?;
+    Ok(out)
+}
+
+#[test]
+fn moduledata_set_only_by_relocations_is_found() -> Result<()> {
+    let Some((_, dir)) = fixtures() else {
+        return Ok(());
+    };
+    // Built only with a C compiler on an x86-64 host.
+    let path = fixture(dir, "fx-amd64-ext-stripped");
+    if !Path::new(&path).exists() {
+        return Ok(());
+    }
+    let stale = with_stale_moduledata(&path)?;
+    let want = inspect(&path)?.context("probe targets")?;
+    assert_eq!(inspect(&stale.to_string_lossy())?, Some(want));
+    Ok(())
+}
