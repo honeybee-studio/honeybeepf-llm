@@ -35,7 +35,7 @@ use crate::probes::{
     discovery::{
         FileId, exported_function_offsets, file_identity, find_executables_all, find_libraries_all,
     },
-    spawn_ringbuf_handler_var,
+    load_uprobe, spawn_ringbuf_handler_var,
 };
 // Re-export exec watch types and functions for lib.rs
 pub use crate::probes::{
@@ -108,6 +108,15 @@ const TASK_EXIT_PROBE: TracepointConfig = TracepointConfig {
     category: "sched",
     name: "sched_process_exit",
 };
+
+/// Go `crypto/tls` programs, loaded at start so that a verifier rejection is logged on every node even
+/// before a Go executable is attached.
+const GO_TLS_PROGRAMS: [&str; 4] = [
+    "probe_go_tls_write",
+    "probe_go_tls_read_enter",
+    "probe_go_tls_read_return",
+    "probe_go_tls_close",
+];
 
 /// Every function in the probe tables, resolved in one pass over the file's symbols.
 const PROBED_FUNCTIONS: [&str; 6] = [
@@ -424,6 +433,11 @@ impl Probe for LlmProbe {
         // Without it, every thread killed inside an SSL call keeps its session map entries until restart.
         if let Err(e) = attach_tracepoint(bpf, TASK_EXIT_PROBE) {
             warn!("{e:#}; session entries of killed threads are not cleared");
+        }
+        for prog in GO_TLS_PROGRAMS {
+            if let Err(e) = load_uprobe(bpf, prog) {
+                warn!("Go TLS probe {prog} failed to load: {e:#}");
+            }
         }
 
         // Skip libcrypto for SSL_* probes as they usually don't contain them
@@ -851,7 +865,7 @@ mod tests {
                 programs.insert(sym.name()?);
             }
         }
-        let tabled: HashSet<&str> = tabled.into_keys().collect();
+        let tabled: HashSet<&str> = tabled.into_keys().chain(GO_TLS_PROGRAMS).collect();
         assert_eq!(programs, tabled, "uprobe programs vs probe tables");
         Ok(())
     }

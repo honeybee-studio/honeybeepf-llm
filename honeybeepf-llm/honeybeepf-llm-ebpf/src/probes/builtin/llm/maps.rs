@@ -23,6 +23,11 @@ pub static BUFS: HashMap<u32, [u64; 2]> = HashMap::with_max_entries(MAX_ENTRIES,
 #[map]
 pub static READBYTES_PTRS: HashMap<u32, u64> = HashMap::with_max_entries(MAX_ENTRIES, 0);
 
+/// [start ns, buf, *tls.Conn] of each Go `(*Conn).Read` in progress, keyed by [tgid, goroutine]: a
+/// goroutine can resume on another thread before Read returns. LRU, since a goroutine can end inside it.
+#[map]
+pub static GO_READS: LruHashMap<[u64; 2], [u64; 3]> = LruHashMap::with_max_entries(MAX_ENTRIES, 0);
+
 /// `ssl_class::ClassEntry` of each connection, keyed by [tgid, SSL*]; userspace adds SkipConnection by Host.
 #[map]
 pub static SSL_CLASS: LruHashMap<[u64; 2], u64> =

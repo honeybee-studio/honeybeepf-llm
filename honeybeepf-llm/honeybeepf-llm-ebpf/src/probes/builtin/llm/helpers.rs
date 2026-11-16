@@ -93,6 +93,26 @@ impl SslCall {
         }
     }
 
+    /// A Go `crypto/tls` call on `conn` that moved `len` bytes at `buf_addr`.
+    #[inline(always)]
+    pub fn go(conn: u64, buf_addr: u64, len: u64, start_ts: u64) -> Self {
+        let metadata = current_metadata();
+        let latency_ns = if start_ts > 0 {
+            metadata.timestamp.saturating_sub(start_ts)
+        } else {
+            0
+        };
+        Self {
+            metadata,
+            latency_ns,
+            comm: bpf_get_current_comm().unwrap_or([0; 16]),
+            buf_addr,
+            ssl: conn,
+            len: u32::try_from(len).unwrap_or(u32::MAX),
+            closed: 0,
+        }
+    }
+
     #[inline(always)]
     pub fn capture(ctx: &RetProbeContext, is_handshake: bool) -> Result<Self, u32> {
         let tid = get_current_tid();

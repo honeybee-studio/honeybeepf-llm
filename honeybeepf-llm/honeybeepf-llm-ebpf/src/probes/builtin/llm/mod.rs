@@ -25,6 +25,7 @@ use honeybeepf_llm_common::{
 };
 
 mod filter;
+pub mod gotls;
 pub(crate) mod helpers;
 pub mod maps;
 
