@@ -6,8 +6,8 @@ eBPF uprobes, and exports metrics over OpenTelemetry.
 
 - **No app change.** Pods keep calling the provider directly; nothing to import, wrap or redeploy.
 - **Providers built in:** OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI and Meta, plus the
-  OpenAI-compatible APIs of Groq, DeepSeek, Together, Fireworks, OpenRouter, Mistral and Cerebras. JSON and streaming,
-  HTTP/1.1 and HTTP/2, cache and reasoning tokens.
+  OpenAI-compatible APIs of 25 hosted providers such as Groq, DeepSeek, Mistral, Qwen, Kimi and GLM. JSON and
+  streaming, HTTP/1.1 and HTTP/2, cache and reasoning tokens.
 - **Priced** from a dated built-in table, with your own prices and discounts on top.
 - **Measured overhead:** about 53 µs of agent CPU per LLM call and 32 MB RSS plus 19 MB of BPF maps
   ([benchmark](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/docs/benchmark.md)).
