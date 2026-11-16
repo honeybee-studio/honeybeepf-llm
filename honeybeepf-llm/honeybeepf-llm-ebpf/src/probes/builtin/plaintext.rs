@@ -331,15 +331,21 @@ fn capture_recv(ctx: &SkBuffContext, meta: &EventMetadata, stream: u64) {
     if !sent {
         return;
     }
-    for i in 1..PLAIN_RECV_FRAGMENTS {
-        let offset = i * MAX_SSL_BUF_SIZE;
-        if offset >= size as usize || offset >= limit {
-            return;
-        }
-        if !emit_recv::<MAX_SSL_BUF_SIZE>(ctx, meta, size, offset as u32, truncated, stream) {
-            return;
-        }
+    // Written out, not looped: a counted loop is checked once per iteration by pre-6.6 verifiers,
+    // which made the load take seconds there.
+    macro_rules! rest {
+        ($($i:literal)*) => {$(
+            let offset = $i * MAX_SSL_BUF_SIZE;
+            if offset >= size as usize || offset >= limit {
+                return;
+            }
+            if !emit_recv::<MAX_SSL_BUF_SIZE>(ctx, meta, size, offset as u32, truncated, stream) {
+                return;
+            }
+        )*};
     }
+    rest!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15);
+    const { assert!(PLAIN_RECV_FRAGMENTS == 16) };
 }
 
 /// Copy each receive on a watched socket into PLAIN_EVENTS, attributed from the connect-time entry
