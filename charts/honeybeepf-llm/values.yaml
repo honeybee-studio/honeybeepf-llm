@@ -43,6 +43,7 @@ builtinProbes:
     # + response usage shape instead of host (new providers, gateways, in-cluster model servers).
     # A call is kept only when its path matches a built-in pattern (e.g. /chat/completions) and its
     # response carries that family's usage fields; off records listed hosts only (default).
+    # Calls kept this way carry match="shape" on their metrics; host-matched calls have no match label.
     detectByShape: false
     # Pod labels copied onto LLM metrics as target_pod_label_<name> ("." "/" "-" become "_"), e.g. for A/B variants.
     # Each label multiplies the series by its distinct values: list only low-cardinality labels.
