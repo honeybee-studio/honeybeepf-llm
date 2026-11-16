@@ -18,8 +18,8 @@ repository against a local mock of the provider APIs with fake keys.</sub>
 - **11 built-in provider APIs** — OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI, Meta — plus the
   OpenAI-compatible APIs of 25 hosted providers, among them Groq, DeepSeek, Mistral, Together, OpenRouter, Qwen, Kimi,
   GLM, NVIDIA and Hugging Face ([list](docs/providers.md)).
-- **10 kernels in CI** — Linux 5.10 through 7.2 and RHEL 8.10 / 9.6 / 9.7, probes loaded and attached on x86-64
-  (arm64 on 5.15 and 6.1 runs too, not yet required to pass).
+- **12 kernels in CI** — Linux 5.10 through 7.2 and RHEL 8.10 / 9.6 / 9.7 on x86-64, 5.15 and 6.1 on arm64: probes
+  loaded and attached, and token counts checked on each.
 
 honeybeepf-llm is a Rust eBPF agent that runs as a DaemonSet. It attaches uprobes to OpenSSL's `SSL_write` and
 `SSL_read`, reads the plaintext HTTP of calls to LLM providers, and exports token usage, request counts and
@@ -68,7 +68,7 @@ commands, required capabilities, resources and uninstall are in [docs/install.md
 | Runtimes | Python, Node.js, curl, anything linked to OpenSSL `libssl`, and Go 1.20+ `crypto/tls` — not rustls, JSSE, GnuTLS, NSS |
 | Protocols | HTTP/1.1 and HTTP/2 — not WebSocket, not HTTP/3 (QUIC) |
 | Transport | HTTPS through OpenSSL or Go `crypto/tls`; in-cluster plain HTTP (Ollama, vLLM) on opt-in |
-| Kernels | Linux 5.10–7.2 and RHEL 8.10 / 9.6 / 9.7 on x86-64, 5.15 and 6.1 on arm64 (not yet required to pass), loaded and attached in CI; token counts checked on 7.0 |
+| Kernels | Linux 5.10–7.2 and RHEL 8.10 / 9.6 / 9.7 on x86-64, 5.15 and 6.1 on arm64: loaded, attached and token counts checked in CI |
 
 The exact checks, how to add a provider, and plain-HTTP capture are in [docs/providers.md](docs/providers.md).
 
