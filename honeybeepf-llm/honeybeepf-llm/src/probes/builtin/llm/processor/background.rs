@@ -93,6 +93,7 @@ fn record_poll_result(
             pid: call.pid,
             #[cfg(feature = "k8s")]
             pod_info: call.pod_info,
+            by_shape: false,
         },
     );
     Outcome::Recorded
@@ -169,6 +170,7 @@ pub(crate) fn give_up(call: PendingCall) -> Outcome {
             pid: call.pid,
             #[cfg(feature = "k8s")]
             pod_info: call.pod_info,
+            by_shape: false,
         },
     )
 }
@@ -191,6 +193,7 @@ pub(super) fn record_usage(
         latency_secs,
         is_error,
         transport,
+        ctx.by_shape,
         #[cfg(feature = "k8s")]
         ctx.pod_info.as_ref(),
     );
@@ -199,14 +202,20 @@ pub(super) fn record_usage(
     let pod_str = fmt_pod(ctx.pod_info.as_ref());
     #[cfg(not(feature = "k8s"))]
     let pod_str = "";
+    let shape_str = if ctx.by_shape {
+        " | Matched by shape"
+    } else {
+        ""
+    };
 
     if is_error {
         info!(
-            "LLM FAILED/ERROR | PID: {} | Model: {} | Transport: {} | Latency: {:.2}s{}",
+            "LLM FAILED/ERROR | PID: {} | Model: {} | Transport: {} | Latency: {:.2}s{}{}",
             ctx.pid,
             model_str,
             transport.as_str(),
             latency.as_secs_f64(),
+            shape_str,
             pod_str
         );
     } else {
@@ -223,7 +232,7 @@ pub(super) fn record_usage(
             ),
         };
         info!(
-            "LLM SUCCESS | PID: {} | Model: {} | Transport: {} | Latency: {:.2}s | Tokens: {} (Prompt: {}, Compl: {}{}{}){}",
+            "LLM SUCCESS | PID: {} | Model: {} | Transport: {} | Latency: {:.2}s | Tokens: {} (Prompt: {}, Compl: {}{}{}){}{}",
             ctx.pid,
             model_str,
             transport.as_str(),
@@ -233,6 +242,7 @@ pub(super) fn record_usage(
             usage.completion_tokens,
             thoughts_str,
             cache_str,
+            shape_str,
             pod_str
         );
     }

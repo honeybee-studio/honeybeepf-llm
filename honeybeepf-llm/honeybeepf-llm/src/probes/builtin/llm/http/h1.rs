@@ -287,18 +287,19 @@ impl ProtocolParser for Http11Parser {
 
             // Host+path matches a configured provider; with shape detection on, fall back to a
             // path-only match so an LLM call to a host no entry lists is still tracked.
-            let provider = PROVIDER_REGISTRY
-                .find_provider(&host_header, path)
-                .or_else(|| {
-                    detect_by_shape()
-                        .then(|| PROVIDER_REGISTRY.find_provider_by_path(path))
-                        .flatten()
-                });
+            let by_host = PROVIDER_REGISTRY.find_provider(&host_header, path);
+            let by_shape = by_host.is_none();
+            let provider = by_host.or_else(|| {
+                detect_by_shape()
+                    .then(|| PROVIDER_REGISTRY.find_provider_by_path(path))
+                    .flatten()
+            });
             if let Some(provider) = provider {
                 // The path is logged and the query can carry a credential (Gemini `?key=`).
                 return Some(Detected {
                     path: path.split_once('?').map_or(path, |(p, _)| p).to_string(),
                     record_only: provider.record_only,
+                    by_shape,
                 });
             }
         }

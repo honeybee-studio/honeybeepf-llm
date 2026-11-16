@@ -356,6 +356,7 @@ fn route_event(
                 pid: header.metadata.pid,
                 #[cfg(feature = "k8s")]
                 pod_info: pod_info(),
+                by_shape: false,
             }),
             _ => Outcome::Pending,
         };
@@ -369,6 +370,7 @@ fn route_event(
         pid: header.metadata.pid,
         #[cfg(feature = "k8s")]
         pod_info: pod_info(),
+        by_shape: false,
     };
     stream.handle_fragment(
         LlmDirection::from(header.rw),

@@ -23,6 +23,7 @@ fn detected(path: &str) -> Detected {
     Detected {
         path: path.to_string(),
         record_only: false,
+        by_shape: false,
     }
 }
 
