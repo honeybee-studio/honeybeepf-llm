@@ -37,7 +37,7 @@ builtinProbes:
   llm:
     # Record LLM API calls on every node. Off loads no eBPF program and the agent only idles.
     enabled: true
-    # Also probe executables with OpenSSL built in (official Node.js builds, node: images).
+    # Also probe executables with OpenSSL built in (official Node.js builds, node: images) and Go executables.
     executables: true
     # Experimental. Record OpenAI/Anthropic/Gemini-compatible calls to hosts not listed below, by request path
     # + response usage shape instead of host (new providers, gateways, in-cluster model servers).

@@ -54,8 +54,9 @@ changes a syscall result, drops or redirects a packet, or modifies data.
   `honeybeepf-llm/honeybeepf-llm/src/probes/builtin/llm/mod.rs`, the exec and libssl-open attach points in
   `honeybeepf-llm/honeybeepf-llm/src/probes/mod.rs`, and the eBPF programs under
   `honeybeepf-llm/honeybeepf-llm-ebpf/src/probes/builtin/`. The agent also attaches to a process's own executable when
-  it exports `SSL_read`/`SSL_write` (official Node.js builds), switched by `builtinProbes.llm.executables` (default
-  true). Without kernel BTF the libssl-open watch falls back from fentry to a kprobe.
+  it exports `SSL_read`/`SSL_write` (official Node.js builds), or to Go's `crypto/tls` in a Go 1.20+ executable
+  (`(*Conn).Write` and `Read` entries, each return in `Read`, and `Close`; `probe_go_tls_*` in
+  `.../probes/builtin/llm/gotls.rs`, which read only), switched by `builtinProbes.llm.executables` (default true). Without kernel BTF the libssl-open watch falls back from fentry to a kprobe.
 - **Plaintext programs** load only when a provider sets `plaintext` and the node has cgroup v2 on kernel 5.10 or later;
   otherwise they stay off and the agent logs why (`plaintext::start`, called from
   `honeybeepf-llm/honeybeepf-llm/src/lib.rs`). They attach at the host's cgroup v2 root through the

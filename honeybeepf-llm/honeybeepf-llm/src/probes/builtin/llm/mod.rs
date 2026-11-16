@@ -181,6 +181,56 @@ pub fn attach_probes_to_path(bpf: &mut Ebpf, libssl_path: &str) -> Result<bool> 
     Ok(true)
 }
 
+/// Attach the Go `crypto/tls` probes to the Go executable at `path`: `Ok(None)` if it has no
+/// `crypto/tls` this agent can probe, else the Go version and the number of returns probed in `Read`.
+fn attach_go_tls(bpf: &mut Ebpf, path: &str) -> Result<Option<(String, usize)>> {
+    // An executable whose Go tables cannot be read is left unprobed, not failed: nothing was attached.
+    let targets = match gotls::inspect(path) {
+        Ok(Some(targets)) => targets,
+        Ok(None) => return Ok(None),
+        Err(e) => {
+            info!("Go executable not probed, its function tables could not be read: {path}: {e:#}");
+            return Ok(None);
+        }
+    };
+    let [write, read_enter, read_return, close] = GO_TLS_PROGRAMS;
+    let mut sites = vec![
+        (write, "crypto/tls.(*Conn).Write", targets.write),
+        (read_enter, "crypto/tls.(*Conn).Read", targets.read),
+    ];
+    sites.extend(
+        targets
+            .read_returns
+            .iter()
+            .map(|&off| (read_return, "crypto/tls.(*Conn).Read return", off)),
+    );
+    // Roll back on failure, as for libssl, so a retry does not stack duplicate probes.
+    let mut attached = Vec::with_capacity(sites.len());
+    for (prog, func, offset) in sites {
+        match attach_uprobe(bpf, prog, func, path, offset) {
+            Ok(link) => attached.push((prog, link)),
+            Err(e) => {
+                for (prog, link) in attached {
+                    if let Err(de) = detach_uprobe(bpf, prog, link) {
+                        warn!("Failed to roll back {prog} on {path}: {de}");
+                    }
+                }
+                return Err(e);
+            }
+        }
+    }
+    // Without it a connection's stream is only dropped after CONNECTION_RETENTION_SECS idle.
+    match targets.close {
+        Some(offset) => {
+            if let Err(e) = attach_uprobe(bpf, close, "crypto/tls.(*Conn).Close", path, offset) {
+                warn!("crypto/tls.(*Conn).Close not probed in {path}: {e}");
+            }
+        }
+        None => warn!("crypto/tls.(*Conn).Close not found in {path}"),
+    }
+    Ok(Some((targets.version, targets.read_returns.len())))
+}
+
 /// One path per distinct file not in `known`, preferring host paths over `/proc/<pid>/root`.
 fn unique_new_files<'a>(
     paths: impl IntoIterator<Item = &'a String>,
@@ -247,6 +297,55 @@ impl LlmProbe {
     }
 }
 
+/// The TLS code probed in a main executable.
+enum ExeTls {
+    OpenSsl,
+    /// Go version and the number of returns probed in `(*Conn).Read`.
+    Go(String, usize),
+}
+
+impl LlmProbe {
+    /// Like `attach_new` for main executables: built-in OpenSSL first, then Go `crypto/tls`.
+    fn attach_new_exes<'a, I>(
+        &self,
+        bpf: &mut Ebpf,
+        paths: I,
+    ) -> Vec<(&'a str, FileId, Result<Option<ExeTls>>)>
+    where
+        I: IntoIterator<Item = &'a String> + Clone,
+    {
+        let mut go = HashMap::new();
+        let results = attach_new_files(&self.known_targets, paths, |path| {
+            if attach_probes_to_path(bpf, path)? {
+                return Ok(true);
+            }
+            let found = attach_go_tls(bpf, path)?;
+            let attached = found.is_some();
+            if let Some(info) = found {
+                go.insert(path.to_owned(), info);
+            }
+            Ok(attached)
+        });
+        let mut attached = self
+            .attached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        results
+            .into_iter()
+            .map(|(path, id, result)| {
+                let result = result.map(|ok| {
+                    ok.then(|| {
+                        attached.insert(id);
+                        go.remove(path)
+                            .map_or(ExeTls::OpenSsl, |(v, n)| ExeTls::Go(v, n))
+                    })
+                });
+                (path, id, result)
+            })
+            .collect()
+    }
+}
+
 /// Rounds of picking another path to a file whose chosen path vanished during the attach.
 const ATTACH_ROUNDS: usize = 3;
 
@@ -288,15 +387,20 @@ where
     out
 }
 
-/// Most executables export no SSL functions, so only an attach or an error gets a log line.
-fn log_executable(path: &str, id: FileId, result: Result<bool>) {
+/// Most executables have no TLS code to probe, so only an attach or an error gets a log line.
+fn log_executable(path: &str, id: FileId, result: Result<Option<ExeTls>>) {
     match result {
-        Ok(true) => info!(
+        Ok(Some(ExeTls::OpenSsl)) => info!(
             "Attaching LLM (SSL) probes to executable with built-in OpenSSL: {} (ino {})",
             path,
             id.ino()
         ),
-        Ok(false) => {}
+        Ok(Some(ExeTls::Go(version, returns))) => info!(
+            "Attaching LLM probes to Go executable ({version}, crypto/tls, {returns} Read returns): {} (ino {})",
+            path,
+            id.ino()
+        ),
+        Ok(None) => {}
         Err(e) => warn!("Failed to attach to executable {path}: {e}"),
     }
 }
@@ -326,7 +430,7 @@ impl DynamicProbe for LlmProbe {
         }
 
         let exe = process_info.exe.iter().filter(|_| self.executables);
-        for (path, id, result) in self.attach_new(bpf, exe) {
+        for (path, id, result) in self.attach_new_exes(bpf, exe) {
             log_executable(path, id, result);
         }
         Ok(())
@@ -458,7 +562,7 @@ impl Probe for LlmProbe {
 
         if self.executables {
             let exes = find_executables_all();
-            for (path, id, result) in self.attach_new(bpf, &exes) {
+            for (path, id, result) in self.attach_new_exes(bpf, &exes) {
                 log_executable(path, id, result);
             }
         }
