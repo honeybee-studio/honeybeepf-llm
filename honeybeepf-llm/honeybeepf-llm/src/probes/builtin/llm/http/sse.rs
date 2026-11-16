@@ -67,6 +67,7 @@ fn read_lines(cursor: &mut SseCursor, bytes: &[u8]) {
         // finish the call.
         let is_usage_event = serde_json::from_str::<SseChunkDelta>(data).is_ok_and(|chunk| {
             chunk.has_usage()
+                || (data.contains("\"x_groq\"") && groq_usage(data))
                 || chunk
                     .response
                     .as_ref()
@@ -83,16 +84,31 @@ fn read_lines(cursor: &mut SseCursor, bytes: &[u8]) {
     }
 }
 
+/// Groq streams usage under `x_groq` in the final chunk, and at the top level only with
+/// `stream_options.include_usage`.
+fn groq_usage(data: &str) -> bool {
+    serde_json::from_str::<Value>(data)
+        .is_ok_and(|v| v.pointer("/x_groq/usage").is_some_and(|u| !u.is_null()))
+}
+
 /// A failed interaction ends the call with no usage, as a failed Responses stream does; its status
 /// still has to finish the call. Cancelled or incomplete ones record from the usage they carry.
 fn interaction_failed(interaction: &Value) -> bool {
     interaction.get("status").and_then(Value::as_str) == Some("failed")
 }
 
-/// Merge a usage-bearing event into `acc`, unwrapping Anthropic `message_start`, a Responses event
-/// or a Gemini Interactions event so the merged body carries usage and model at its top level.
+/// Merge a usage-bearing event into `acc`, unwrapping Anthropic `message_start`, a Responses event,
+/// a Gemini Interactions event or Groq's `x_groq` so the merged body carries usage and model at its
+/// top level.
 pub(super) fn merge_usage_event(acc: &mut Option<Value>, mut val: Value) {
-    if val.get("message").is_some_and(|m| m.get("usage").is_some()) {
+    if val.get("usage").is_none_or(Value::is_null)
+        && let Some(usage) = val
+            .pointer_mut("/x_groq/usage")
+            .map(Value::take)
+            .filter(|u| !u.is_null())
+    {
+        val["usage"] = usage;
+    } else if val.get("message").is_some_and(|m| m.get("usage").is_some()) {
         val = val["message"].take();
     } else if is_responses_event(&val) {
         val = val["response"].take();

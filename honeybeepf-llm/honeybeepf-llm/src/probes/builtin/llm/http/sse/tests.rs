@@ -39,6 +39,19 @@ fn cache(info: &UsageInfo) -> (Option<u64>, Option<u64>) {
     (info.cache_read_tokens, info.cache_write_tokens)
 }
 
+// Groq without `stream_options.include_usage`: usage only under `x_groq` in the final chunk.
+const GROQ_SSE: &str = concat!(
+    "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"llama-3.3-70b-versatile\",",
+    "\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}],\"x_groq\":{\"id\":\"req_1\"}}\n\n",
+    "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"llama-3.3-70b-versatile\",",
+    "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
+    "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"llama-3.3-70b-versatile\",",
+    "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],",
+    "\"x_groq\":{\"id\":\"req_1\",\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4,\"total_tokens\":15,",
+    "\"prompt_tokens_details\":{\"cached_tokens\":2}}}}\n\n",
+    "data: [DONE]\n\n",
+);
+
 #[test]
 fn anthropic_sse_merges_message_start_and_delta_usage() {
     let body =
@@ -572,4 +585,39 @@ fn sse_string_response_field_keeps_top_level_usage() {
     );
     let info = Http11Parser.parse_response(&http11_sse(body));
     assert_eq!(tokens(info), Some((5, 3)));
+}
+
+#[test]
+fn groq_sse_reads_usage_from_x_groq() {
+    let info = Http11Parser
+        .parse_response(&http11_sse(GROQ_SSE))
+        .expect("usage");
+    assert_eq!((info.prompt_tokens, info.completion_tokens), (11, 4));
+    assert_eq!(info.cache_read_tokens, Some(2));
+    assert_eq!(info.model.as_deref(), Some("llama-3.3-70b-versatile"));
+}
+
+#[test]
+fn groq_sse_with_include_usage_keeps_the_top_level_usage() {
+    let body = GROQ_SSE.replace(
+        "data: [DONE]",
+        concat!(
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"llama-3.3-70b-versatile\",",
+            "\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":4,\"total_tokens\":15}}\n\n",
+            "data: [DONE]"
+        ),
+    );
+    let info = Http11Parser
+        .parse_response(&http11_sse(&body))
+        .expect("usage");
+    assert_eq!((info.prompt_tokens, info.completion_tokens), (11, 4));
+}
+
+#[test]
+fn groq_sse_without_x_groq_usage_stays_unparsed() {
+    let body = GROQ_SSE.replace("\"usage\":{", "\"usage_absent\":{");
+    assert_eq!(
+        tokens(Http11Parser.parse_response(&http11_sse(&body))),
+        None
+    );
 }
