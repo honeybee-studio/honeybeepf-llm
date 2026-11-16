@@ -22,8 +22,8 @@ repository against a local mock of the provider APIs with fake keys.</sub>
   (arm64 on 5.15 and 6.1 runs too, not yet required to pass).
 
 honeybeepf-llm is a Rust eBPF agent that runs as a DaemonSet. It attaches uprobes to OpenSSL's `SSL_write` and
-`SSL_read`, reads the plaintext HTTP of calls to LLM providers, and exports token usage, request counts and
-latency per Kubernetes namespace and pod over OpenTelemetry.
+`SSL_read` and to Go's `crypto/tls`, reads the plaintext HTTP of calls to LLM providers, and exports token usage,
+request counts and latency per Kubernetes namespace and pod over OpenTelemetry.
 
 ## Quickstart
 
@@ -60,17 +60,48 @@ commands, required capabilities, resources and uninstall are in [docs/install.md
 | Calls it sees | only those routed through it | only instrumented code | every pod on the node |
 | API keys | pass through it | in the app process | never logged (path, model, tokens only) |
 
-## What is supported
+## What it sees
 
-| Dimension | Covered |
-|---|---|
-| Providers | 11 built-in APIs: OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI, Meta; OpenAI-compatible APIs of 25 hosted providers (Groq, DeepSeek, Mistral, Qwen, Kimi, GLM, …) — JSON, streaming (SSE), cache tokens; other OpenAI/Anthropic/Gemini-compatible hosts by request shape (experimental, off by default) |
-| Runtimes | Python, Node.js, curl, anything linked to OpenSSL `libssl`, and Go 1.20+ `crypto/tls` — not rustls, JSSE, GnuTLS, NSS |
-| Protocols | HTTP/1.1 and HTTP/2 — not WebSocket, not HTTP/3 (QUIC) |
-| Transport | HTTPS through OpenSSL or Go `crypto/tls`; in-cluster plain HTTP (Ollama, vLLM) on opt-in |
-| Kernels | Linux 5.10–7.2 and RHEL 8.10 / 9.6 / 9.7 on x86-64, 5.15 and 6.1 on arm64 (not yet required to pass), loaded and attached in CI; token counts checked on 7.0 |
+**Providers.** ✅ means the agent recorded exactly the expected token counts end to end, from the official Python
+and Node.js SDKs and curl calling a TLS mock of the provider's API on Linux 7.0. A blank cell was not checked.
 
-The exact checks, how to add a provider, and plain-HTTP capture are in [docs/providers.md](docs/providers.md).
+| Provider | JSON | Streaming | Cache tokens |
+|---|:-:|:-:|:-:|
+| OpenAI (Chat Completions, Responses API) | ✅ | ✅ | ✅ Chat Completions |
+| Anthropic Messages | ✅ | ✅ | ✅ |
+| Google Gemini | ✅ | ✅ | ✅ |
+| Google Vertex AI (Gemini, Claude) | ✅ | ✅ | ✅ Claude |
+| Azure OpenAI | ✅ | ✅ | |
+| Amazon Bedrock (Converse, InvokeModel) | ✅ | ✅ | ✅ |
+| Meta Model API | ✅ | ✅ | |
+| OpenAI-compatible APIs: Groq, DeepSeek, Mistral, Together, OpenRouter, Qwen, Kimi, GLM, NVIDIA, Hugging Face and [more](docs/providers.md) | | | |
+
+Cost comes from a built-in price table of OpenAI, Anthropic and Gemini models, matched by the model name in the
+response (a dated name such as `claude-sonnet-4-5@20250929` matches its model). Other models get a cost once their
+prices are added (`prices` in the chart values); until then their tokens are counted in
+`llm_unpriced_tokens_total`, not as $0. Embeddings, image and transcription calls are recorded too, with an
+`operation` label. Per-endpoint detail, adding a provider and detecting unlisted hosts by request shape
+(experimental, off by default) are in [docs/providers.md](docs/providers.md).
+
+**Your apps.**
+
+| App or traffic | Seen |
+|---|:-:|
+| Python, Node.js, curl, anything using OpenSSL | ✅ |
+| Go 1.20+ (`crypto/tls`), stripped or not | ✅ |
+| HTTP/1.1 and HTTP/2, streaming included | ✅ |
+| In-cluster plain HTTP (Ollama, vLLM) | ✅ opt-in |
+| Rust rustls, Java (JSSE), GnuTLS, NSS, Go before 1.20 | ❌ |
+| WebSocket, HTTP/3 (QUIC) | ❌ |
+
+To list the workloads in your cluster whose calls are not seen:
+
+```promql
+sum by (target_namespace, target_workload_name, tls) (honeybeepf_llm_llm_tls_coverage_pods{tls!="hooked"}) > 0
+```
+
+**Kernels.** Linux 5.10 to 7.2 and RHEL 8.10 / 9.6 / 9.7 on x86-64, and 5.15 and 6.1 on arm64 (not yet required to
+pass): CI loads and attaches the probes on each.
 
 ## How it works
 
