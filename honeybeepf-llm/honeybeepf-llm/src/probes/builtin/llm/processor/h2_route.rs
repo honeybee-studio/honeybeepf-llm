@@ -67,8 +67,9 @@ impl StreamProcessor {
                 usage,
                 start,
                 midjoin,
+                by_shape,
             } => {
-                record_usage(&usage, start, self.transport, ctx);
+                record_usage(&usage, start, self.transport, &ctx.shaped(by_shape));
                 if midjoin {
                     crate::telemetry::record_h2_midjoin(
                         #[cfg(feature = "k8s")]
@@ -93,8 +94,8 @@ impl StreamProcessor {
             } => {
                 outcome = settle_h2_poll(id, usage.map(|u| *u), state, background, self.transport);
             }
-            http::H2Event::Unparsed { reason } => {
-                outcome = Self::count_unparsed(reason, ctx);
+            http::H2Event::Unparsed { reason, by_shape } => {
+                outcome = Self::count_unparsed(reason, &ctx.shaped(by_shape));
             }
             http::H2Event::Resynced => crate::telemetry::record_h2_resynced(
                 #[cfg(feature = "k8s")]

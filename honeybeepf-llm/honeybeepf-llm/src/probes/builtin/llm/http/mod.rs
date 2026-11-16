@@ -29,11 +29,13 @@ pub use sse_stream::SseStream;
 
 use honeybeepf_llm_core::types::UsageInfo;
 
-/// A matched LLM request: the logged path and whether its provider is record-only (detected but never
-/// parsed for usage, counted under the `agent_session` reason).
+/// A matched LLM request: the logged path, whether its provider is record-only (detected but never
+/// parsed for usage, counted under the `agent_session` reason), and whether only its path matched
+/// (shape detection, host unlisted).
 pub struct Detected {
     pub path: String,
     pub record_only: bool,
+    pub by_shape: bool,
 }
 
 /// Protocol-specific parser interface

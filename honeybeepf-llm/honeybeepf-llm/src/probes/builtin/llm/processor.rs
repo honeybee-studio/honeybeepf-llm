@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use honeybeepf_llm_common::capture_limit;
 use honeybeepf_llm_core::types::{LlmDirection, UsageInfo};
-use log::info;
+use log::{debug, info};
 
 use crate::probes::builtin::llm::background::BackgroundCalls;
 use crate::probes::builtin::llm::http::{self, ProtocolParser};
@@ -50,6 +50,20 @@ pub struct CallContext {
     pub(crate) pid: u32,
     #[cfg(feature = "k8s")]
     pub(crate) pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
+    /// The call was matched by its request path alone (shape detection, host unlisted).
+    pub(crate) by_shape: bool,
+}
+
+impl CallContext {
+    /// The same identity for one call, marked as matched by its path alone or not.
+    pub(crate) fn shaped(&self, by_shape: bool) -> Self {
+        Self {
+            pid: self.pid,
+            #[cfg(feature = "k8s")]
+            pod_info: self.pod_info.clone(),
+            by_shape,
+        }
+    }
 }
 
 /// What one fragment led to.
@@ -159,6 +173,8 @@ pub struct StreamProcessor {
     /// The detected request is a record-only provider (Managed Agents session), so its response is
     /// counted under `agent_session` without reading the running session total.
     record_only: bool,
+    /// The detected request matched by its path alone (shape detection, host unlisted).
+    by_shape: bool,
     /// Capture transport of this connection; a metric label on the calls it records.
     transport: Transport,
 }
@@ -186,6 +202,7 @@ impl StreamProcessor {
             h2_gap_client: H2Gap::None,
             h2_gap_server: H2Gap::None,
             record_only: false,
+            by_shape: false,
             transport: Transport::Tls,
         }
     }
@@ -347,7 +364,7 @@ impl StreamProcessor {
         if skipped.is_none() {
             return Outcome::Pending;
         }
-        Self::count_unparsed(UnparsedReason::CaptureLost, ctx)
+        Self::count_unparsed(UnparsedReason::CaptureLost, &ctx.shaped(self.by_shape))
     }
 
     /// Start over from the request written mid-response, so this Read is parsed as its response.
@@ -407,11 +424,19 @@ impl StreamProcessor {
         } else {
             reason
         };
-        Self::count_unparsed(reason, ctx)
+        Self::count_unparsed(reason, &ctx.shaped(self.by_shape))
     }
 
-    /// Count one LLM call as unparsed, in the metric and the log.
+    /// Count one LLM call as unparsed, in the metric and the log. A call matched by its path alone is
+    /// only an LLM call once its usage shows it, so without usage it is not counted.
     fn count_unparsed(reason: UnparsedReason, ctx: &CallContext) -> Outcome {
+        if ctx.by_shape {
+            debug!(
+                "LLM path match without usage | PID: {} | {}, not an LLM call by its response",
+                ctx.pid, reason
+            );
+            return Outcome::Unparsed(reason);
+        }
         crate::telemetry::record_llm_unparsed(
             reason.as_str(),
             #[cfg(feature = "k8s")]
@@ -500,9 +525,13 @@ impl StreamProcessor {
                             self.state = ProcessorState::ProcessingResponse { start_time, parser };
                             return self.drop_response(UnparsedReason::UsageAbsent, ctx);
                         }
-                        if let Some(outcome) =
-                            self.settle(usage, state, start_time, background, ctx)
-                        {
+                        if let Some(outcome) = self.settle(
+                            usage,
+                            state,
+                            start_time,
+                            background,
+                            &ctx.shaped(self.by_shape),
+                        ) {
                             return outcome;
                         }
                     }
@@ -569,9 +598,11 @@ impl StreamProcessor {
     /// Next state for the request bytes buffered so far.
     fn detect(&mut self, background: &BackgroundCalls, ctx: &CallContext) -> ProcessorState {
         self.record_only = false;
+        self.by_shape = false;
         let (version, path, parser): (&str, String, Box<dyn ProtocolParser>) =
             if let Some(d) = http::Http11Parser.detect_request(&self.write_buf) {
                 self.record_only = d.record_only;
+                self.by_shape = d.by_shape;
                 ("HTTP/1.1", d.path, Box::new(http::Http11Parser))
             } else if let Some(id) = http::Http11Parser::retrieved_response_id(&self.write_buf)
                 .filter(|id| background.contains(id))
@@ -630,6 +661,7 @@ impl StreamProcessor {
         self.h2_gap_client = H2Gap::None;
         self.h2_gap_server = H2Gap::None;
         self.record_only = false;
+        self.by_shape = false;
     }
 }
 

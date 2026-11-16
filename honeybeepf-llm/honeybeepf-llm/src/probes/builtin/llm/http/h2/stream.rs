@@ -64,6 +64,8 @@ pub(super) struct H2Stream {
     /// A record-only provider (Managed Agents session): counted under `agent_session` at its end,
     /// its running session total never read.
     record_only: bool,
+    /// Matched by its request path alone (shape detection, host unlisted).
+    by_shape: bool,
     /// The background Responses id this stream polls (`GET <responses path>/{id}`), if it is a poll.
     poll: Option<Box<str>>,
     /// The model the request path names (Bedrock), for a response that names none.
@@ -81,6 +83,7 @@ impl H2Stream {
             speculative: false,
             status: None,
             record_only,
+            by_shape: false,
             poll: None,
             request_model: None,
         }
@@ -95,11 +98,17 @@ impl H2Stream {
     }
 
     /// A matched stream whose request path may name the model.
-    pub(super) fn open_for(start: Instant, record_only: bool, path: &str) -> Self {
+    pub(super) fn open_for(start: Instant, record_only: bool, by_shape: bool, path: &str) -> Self {
         Self {
             request_model: super::super::request_model::from_path(path),
+            by_shape,
             ..Self::open(start, record_only)
         }
+    }
+
+    /// Whether the stream was matched by its request path alone.
+    pub(super) fn by_shape(&self) -> bool {
+        self.by_shape
     }
 
     /// Whether the matched provider is record-only, so its end is counted without reading usage.
@@ -346,6 +355,7 @@ mod tests {
         let converse = br#"{"output":{"message":{"role":"assistant","content":[{"text":"hi"}]}},"stopReason":"end_turn","usage":{"inputTokens":12,"outputTokens":3,"totalTokens":15}}"#;
         let mut s = H2Stream::open_for(
             Instant::now(),
+            false,
             false,
             "/model/amazon.nova-pro-v1%3A0/converse",
         );

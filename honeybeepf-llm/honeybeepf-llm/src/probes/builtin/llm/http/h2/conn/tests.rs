@@ -40,13 +40,13 @@ fn match_request_detects_provider_posts_and_responses_polls() {
     let openai = block(b"POST", "api.openai.com", "/v1/chat/completions?x=1");
     assert!(matches!(
         m(&openai),
-        Some(Matched::Create { path, record_only: false }) if path == "/v1/chat/completions"
+        Some(Matched::Create { path, record_only: false, by_shape: false }) if path == "/v1/chat/completions"
     ));
     // A Managed Agents session POST is matched as record-only.
     let session = block(b"POST", "api.anthropic.com", "/v1/sessions");
     assert!(matches!(
         m(&session),
-        Some(Matched::Create { path, record_only: true }) if path == "/v1/sessions"
+        Some(Matched::Create { path, record_only: true, by_shape: false }) if path == "/v1/sessions"
     ));
     assert!(m(&block(b"POST", "noise.internal", "/p")).is_none());
     // A background poll: GET /v1/responses/{id} to a provider host, query stripped.
@@ -90,7 +90,7 @@ fn shape_detection_matches_an_unlisted_host_by_path() {
     set_detect_by_shape(true);
     assert!(matches!(
         m(&chat),
-        Some(Matched::Create { path, record_only: false }) if path == "/openai/v1/chat/completions"
+        Some(Matched::Create { path, record_only: false, by_shape: true }) if path == "/openai/v1/chat/completions"
     ));
     // A path that is not an LLM pattern stays unmatched even with the flag on.
     assert!(m(&post(b"/api/data")).is_none());
@@ -210,6 +210,7 @@ fn drive(reads: &[(LlmDirection, Vec<u8>)]) -> (usize, usize, usize) {
             H2Event::Recorded { .. } => rec += 1,
             H2Event::Unparsed {
                 reason: UnparsedReason::ResponseTooLarge,
+                ..
             } => big += 1,
             H2Event::Unparsed { .. } => closed += 1,
             H2Event::Detected { .. }
@@ -297,6 +298,7 @@ fn a_managed_agents_session_stream_is_counted_agent_session_not_recorded() {
             H2Event::Recorded { .. } => recorded += 1,
             H2Event::Unparsed {
                 reason: UnparsedReason::AgentSession,
+                ..
             } => agent += 1,
             _ => {}
         };
@@ -514,6 +516,7 @@ fn a_forgotten_client_tracks_later_responses_and_counts_the_unrecordable() {
             H2Event::Recorded { .. } => rec += 1,
             H2Event::Unparsed {
                 reason: UnparsedReason::HeadersLost,
+                ..
             } => headers_lost += 1,
             _ => {}
         };
@@ -538,6 +541,7 @@ fn a_completed_success_stream_without_usage_counts_usage_absent() {
             H2Event::Recorded { .. } => rec += 1,
             H2Event::Unparsed {
                 reason: UnparsedReason::UsageAbsent,
+                ..
             } => usage_absent += 1,
             _ => {}
         };
@@ -593,9 +597,11 @@ fn an_sse_stream_ending_on_error_counts_stream_error() {
             H2Event::Recorded { .. } => rec += 1,
             H2Event::Unparsed {
                 reason: UnparsedReason::StreamError,
+                ..
             } => stream_error += 1,
             H2Event::Unparsed {
                 reason: UnparsedReason::UsageAbsent,
+                ..
             } => usage_absent += 1,
             _ => {}
         };
@@ -630,6 +636,7 @@ fn an_sse_stream_completing_normally_is_recorded_not_a_stream_error() {
             H2Event::Recorded { .. } => rec += 1,
             H2Event::Unparsed {
                 reason: UnparsedReason::StreamError,
+                ..
             } => stream_error += 1,
             _ => {}
         };

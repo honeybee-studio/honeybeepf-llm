@@ -177,9 +177,16 @@ fn shape_detection_gates_unknown_host_by_path_then_usage() {
     // On: the connection is kept and the request is detected by path alone.
     super::super::set_detect_by_shape(true);
     assert!(!Http11Parser::has_foreign_host(head));
-    assert_eq!(
-        Http11Parser.detect_request(head).map(|d| d.path).as_deref(),
-        Some("/openai/v1/chat/completions")
+    let detected = Http11Parser.detect_request(head).expect("detected by path");
+    assert_eq!(detected.path, "/openai/v1/chat/completions");
+    assert!(detected.by_shape);
+    // A listed host is matched by its host even with the flag on.
+    let listed = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{}";
+    assert!(
+        !Http11Parser
+            .detect_request(listed)
+            .expect("listed")
+            .by_shape
     );
     // Recording still needs the usage fields: present -> read, absent -> nothing, even with the flag on.
     assert_eq!(

@@ -750,6 +750,7 @@ pub fn record_llm_request(
     latency_secs: f64,
     is_error: bool,
     transport: Transport,
+    by_shape: bool,
     #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
 ) {
     if let Some(m) = metrics() {
@@ -764,6 +765,7 @@ pub fn record_llm_request(
                     model,
                     status,
                     attempt,
+                    by_shape,
                     #[cfg(feature = "k8s")]
                     pod_info,
                 )
@@ -772,11 +774,14 @@ pub fn record_llm_request(
     }
 }
 
-/// The model, status and attempt labels of an LLM call, plus the pod target labels when k8s is on.
+/// The model, status and attempt labels of an LLM call, `match="shape"` for a call matched by its
+/// path alone (absent otherwise, so host-matched series keep their labels), and the pod target labels
+/// when k8s is on.
 fn llm_attrs(
     model: &str,
     status: &str,
     attempt: Attempt,
+    by_shape: bool,
     #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
 ) -> Vec<KeyValue> {
     #[allow(unused_mut)]
@@ -785,6 +790,9 @@ fn llm_attrs(
         KeyValue::new("status", status.to_string()),
         KeyValue::new("attempt", attempt.as_str()),
     ];
+    if by_shape {
+        attrs.push(KeyValue::new("match", "shape"));
+    }
     #[cfg(feature = "k8s")]
     push_pod_attrs(&mut attrs, pod_info);
     attrs

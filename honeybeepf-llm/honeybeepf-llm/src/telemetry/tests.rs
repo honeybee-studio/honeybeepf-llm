@@ -441,6 +441,7 @@ fn llm_fallback_attempt_label_separates_declined_tokens_from_served() -> Result<
                 model,
                 status,
                 attempt,
+                false,
                 #[cfg(feature = "k8s")]
                 None,
             )
@@ -1271,4 +1272,23 @@ fn a_rebuild_carries_active_totals_so_no_series_goes_backwards() -> Result<()> {
     shutdown_metrics();
     METRICS.store(None);
     Ok(())
+}
+
+#[test]
+fn shape_matched_calls_carry_match_shape_and_host_matched_calls_no_match_label() {
+    let has_match = |by_shape| {
+        llm_attrs(
+            "m",
+            "success",
+            Attempt::Served,
+            by_shape,
+            #[cfg(feature = "k8s")]
+            None,
+        )
+        .iter()
+        .find(|kv| kv.key.as_str() == "match")
+        .map(|kv| kv.value.as_str().into_owned())
+    };
+    assert_eq!(has_match(true).as_deref(), Some("shape"));
+    assert_eq!(has_match(false), None);
 }
