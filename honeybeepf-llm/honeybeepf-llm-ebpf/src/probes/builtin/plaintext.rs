@@ -16,9 +16,9 @@ use aya_ebpf::{
     programs::{SkBuffContext, SkMsgContext, SockAddrContext, SockOpsContext},
 };
 use honeybeepf_llm_common::{
-    EventMetadata, LlmDirection, LlmEventHeader, LlmStat, MAX_SSL_BUF_SIZE, MAX_SSL_FRAGMENTS,
-    PLAIN_CONNS_ENTRIES, PLAIN_ENDPOINTS_ENTRIES, PLAIN_SOCKS_ENTRIES, PlainFlowKey, capture_limit,
-    plain_endpoint_key, plain_flow_key, plain_stream_id,
+    EventMetadata, LlmDirection, LlmEventHeader, LlmStat, MAX_SSL_BUF_SIZE, PLAIN_CONNS_ENTRIES,
+    PLAIN_ENDPOINTS_ENTRIES, PLAIN_RECV_FRAGMENTS, PLAIN_SOCKS_ENTRIES, PlainFlowKey,
+    plain_capture_limit, plain_endpoint_key, plain_flow_key, plain_stream_id,
 };
 
 use crate::probes::builtin::llm::helpers::count;
@@ -306,35 +306,37 @@ pub fn plaintext_skmsg(ctx: SkMsgContext) -> u32 {
     SK_PASS
 }
 
-/// Emit the receive as up to `MAX_SSL_FRAGMENTS` records so a skb past one bucket is captured whole
-/// instead of marked truncated and dropped; each fragment reads its own `offset` from the skb and
-/// the smallest bucket that fits. `truncated` marks the receive only when it exceeds the Read limit.
+/// Emit a whole skb (up to about 64 KB on loopback or after GRO) as up to `PLAIN_RECV_FRAGMENTS` records:
+/// the first in the smallest bucket that fits, the rest full buckets at their own `offset`. `truncated`
+/// marks only a receive past the plaintext Read limit.
 #[inline(never)]
 fn capture_recv(ctx: &SkBuffContext, meta: &EventMetadata, stream: u64) {
     let size = ctx.len();
     if size == 0 {
         return;
     }
-    let limit = capture_limit(LlmDirection::Read);
+    let limit = plain_capture_limit(LlmDirection::Read);
     let truncated = (size as usize > limit) as u8;
     if truncated != 0 {
         count(LlmStat::PlainRecvTruncated);
     }
-    for i in 0..MAX_SSL_FRAGMENTS {
+    let first = core::cmp::min(size as usize, MAX_SSL_BUF_SIZE);
+    let sent = if first <= PLAIN_BUCKET_SMALL {
+        emit_recv::<PLAIN_BUCKET_SMALL>(ctx, meta, size, 0, truncated, stream)
+    } else if first <= PLAIN_BUCKET_MED {
+        emit_recv::<PLAIN_BUCKET_MED>(ctx, meta, size, 0, truncated, stream)
+    } else {
+        emit_recv::<MAX_SSL_BUF_SIZE>(ctx, meta, size, 0, truncated, stream)
+    };
+    if !sent {
+        return;
+    }
+    for i in 1..PLAIN_RECV_FRAGMENTS {
         let offset = i * MAX_SSL_BUF_SIZE;
-        if i > 0 && (offset >= size as usize || offset >= limit) {
+        if offset >= size as usize || offset >= limit {
             return;
         }
-        let offset = offset as u32;
-        let to_read = core::cmp::min(size.saturating_sub(offset) as usize, MAX_SSL_BUF_SIZE);
-        let sent = if to_read <= PLAIN_BUCKET_SMALL {
-            emit_recv::<PLAIN_BUCKET_SMALL>(ctx, meta, size, offset, truncated, stream)
-        } else if to_read <= PLAIN_BUCKET_MED {
-            emit_recv::<PLAIN_BUCKET_MED>(ctx, meta, size, offset, truncated, stream)
-        } else {
-            emit_recv::<MAX_SSL_BUF_SIZE>(ctx, meta, size, offset, truncated, stream)
-        };
-        if !sent {
+        if !emit_recv::<MAX_SSL_BUF_SIZE>(ctx, meta, size, offset as u32, truncated, stream) {
             return;
         }
     }

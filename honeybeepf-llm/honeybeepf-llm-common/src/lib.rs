@@ -4,6 +4,9 @@ pub const MAX_SSL_BUF_SIZE: usize = 4096;
 /// Events one SSL call is split into; 4 x 4 KB covers a full 16 KB TLS record.
 pub const MAX_SSL_FRAGMENTS: usize = 4;
 pub const MAX_SSL_CAPTURE: usize = MAX_SSL_BUF_SIZE * MAX_SSL_FRAGMENTS;
+/// Events one plaintext receive is split into: the receive is one skb, up to about 64 KB on
+/// loopback or after GRO, so 16 x 4 KB covers it.
+pub const PLAIN_RECV_FRAGMENTS: usize = 16;
 
 /// Key into the plaintext endpoint map: destination IPv4 and port in network byte order, so the
 /// kernel (`remote_ip4` is already network order, port via [`sock_ops_remote_port`]) and userspace
@@ -212,6 +215,14 @@ impl From<u8> for LlmDirection {
 pub fn capture_limit(dir: LlmDirection) -> usize {
     match dir {
         LlmDirection::Read => MAX_SSL_CAPTURE,
+        _ => MAX_SSL_BUF_SIZE,
+    }
+}
+
+/// Bytes the plaintext programs capture of one call: a whole receive skb, the first bucket of a send.
+pub fn plain_capture_limit(dir: LlmDirection) -> usize {
+    match dir {
+        LlmDirection::Read => MAX_SSL_BUF_SIZE * PLAIN_RECV_FRAGMENTS,
         _ => MAX_SSL_BUF_SIZE,
     }
 }

@@ -1,5 +1,7 @@
 use super::*;
-use honeybeepf_llm_common::{MAX_SSL_BUF_SIZE, MAX_SSL_FRAGMENTS};
+use honeybeepf_llm_common::{
+    MAX_SSL_BUF_SIZE, MAX_SSL_FRAGMENTS, PLAIN_RECV_FRAGMENTS, plain_capture_limit,
+};
 
 const REQUEST: &[u8] = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\nContent-Type: application/json\r\nContent-Length: 27\r\n\r\n{\"model\":\"t\",\"messages\":[]}";
 
@@ -146,13 +148,13 @@ fn plain_recv_one_bucket(p: &mut StreamProcessor, bg: &mut BackgroundCalls, skb:
     )
 }
 
-/// The receive the way the fixed `capture_recv` emits it: up to MAX_SSL_FRAGMENTS records of at most
-/// MAX_SSL_BUF_SIZE, each at its own offset, truncated only when the skb exceeds the Read limit.
+/// The receive the way `capture_recv` emits it: up to PLAIN_RECV_FRAGMENTS records of at most
+/// MAX_SSL_BUF_SIZE, each at its own offset, truncated only when the skb exceeds the plaintext Read limit.
 fn plain_recv_skb(p: &mut StreamProcessor, bg: &mut BackgroundCalls, skb: &[u8]) -> Vec<Outcome> {
-    let limit = capture_limit(LlmDirection::Read);
+    let limit = plain_capture_limit(LlmDirection::Read);
     let truncated = skb.len() > limit;
     let mut out = Vec::new();
-    for i in 0..MAX_SSL_FRAGMENTS {
+    for i in 0..PLAIN_RECV_FRAGMENTS {
         let offset = i * MAX_SSL_BUF_SIZE;
         if i > 0 && (offset >= skb.len() || offset >= limit) {
             break;
@@ -186,10 +188,27 @@ fn plaintext_large_response_in_one_skb_records_only_when_fragmented() {
 
     // Fixed: the skb is split into fragments, so the whole response reaches the parser and records.
     let mut p = StreamProcessor::new();
+    p.set_transport(Transport::Plain);
     let mut bg = BackgroundCalls::default();
     send_with(&mut p, &mut bg, LlmDirection::Write, REQUEST, None);
     let out = plain_recv_skb(&mut p, &mut bg, &resp);
     assert_eq!(out.last(), Some(&Outcome::Recorded), "fragmented: {out:?}");
+}
+
+#[test]
+fn plaintext_response_past_16_kb_in_one_skb_records() {
+    // A non-streamed response from a model server on the same node: one loopback skb past the
+    // 16 KB a TLS read can carry, with usage at its end.
+    let resp: Vec<u8> = h1_response(40000).concat();
+    assert!(resp.len() > MAX_SSL_BUF_SIZE * MAX_SSL_FRAGMENTS);
+    assert!(resp.len() <= plain_capture_limit(LlmDirection::Read));
+    let mut p = StreamProcessor::new();
+    p.set_transport(Transport::Plain);
+    let mut bg = BackgroundCalls::default();
+    send_with(&mut p, &mut bg, LlmDirection::Write, REQUEST, None);
+    let out = plain_recv_skb(&mut p, &mut bg, &resp);
+    assert_eq!(out.last(), Some(&Outcome::Recorded), "{out:?}");
+    assert!(unparsed(&out).is_empty(), "{out:?}");
 }
 
 #[test]
