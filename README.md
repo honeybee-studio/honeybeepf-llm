@@ -16,7 +16,8 @@ repository against a local mock of the provider APIs with fake keys.</sub>
 - **~53 µs of agent CPU per LLM call** at 200 calls/s, 32 MB RSS plus 19 MB of BPF maps, and −6.7% throughput at
   ~11k calls/s, measured with and without the agent in v0.3.0 ([benchmark](docs/benchmark.md)).
 - **11 built-in provider APIs** — OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI, Meta — plus the
-  OpenAI-compatible APIs of Groq, DeepSeek, Together, Fireworks, OpenRouter, Mistral and Cerebras.
+  OpenAI-compatible APIs of 25 hosted providers, among them Groq, DeepSeek, Mistral, Together, OpenRouter, Qwen, Kimi,
+  GLM, NVIDIA and Hugging Face ([list](docs/providers.md)).
 - **10 kernels in CI** — Linux 5.10 through 7.2 and RHEL 8.10 / 9.6 / 9.7, probes loaded and attached on x86-64
   (arm64 on 5.15 and 6.1 runs too, not yet required to pass).
 
@@ -63,7 +64,7 @@ commands, required capabilities, resources and uninstall are in [docs/install.md
 
 | Dimension | Covered |
 |---|---|
-| Providers | 11 built-in APIs: OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI, Meta; OpenAI-compatible Groq, DeepSeek, Together, Fireworks, OpenRouter, Mistral, Cerebras — JSON, streaming (SSE), cache tokens; other OpenAI/Anthropic/Gemini-compatible hosts by request shape (experimental, off by default) |
+| Providers | 11 built-in APIs: OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI, Meta; OpenAI-compatible APIs of 25 hosted providers (Groq, DeepSeek, Mistral, Qwen, Kimi, GLM, …) — JSON, streaming (SSE), cache tokens; other OpenAI/Anthropic/Gemini-compatible hosts by request shape (experimental, off by default) |
 | Runtimes | Python, Node.js, curl, anything linked to OpenSSL `libssl` — not Go `crypto/tls`, rustls, JSSE, GnuTLS, NSS |
 | Protocols | HTTP/1.1 and HTTP/2 — not WebSocket, not HTTP/3 (QUIC) |
 | Transport | HTTPS through OpenSSL; in-cluster plain HTTP (Ollama, vLLM) on opt-in |
