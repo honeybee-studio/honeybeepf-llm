@@ -1,5 +1,6 @@
 //! Log setup: `RUST_LOG` picks the levels and `LOG_FORMAT` the format; audit events stay on unless `RUST_LOG` names them.
 
+use std::io::IsTerminal;
 use tracing_subscriber::EnvFilter;
 
 /// How each log line is written.
@@ -43,7 +44,10 @@ pub fn init(verbose: bool) {
     let rust_log = std::env::var("RUST_LOG").ok();
     let format = LogFormat::parse(std::env::var("LOG_FORMAT").ok().as_deref());
     let filter = filter(rust_log.as_deref(), verbose);
-    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    // Colour only on a terminal: in kubectl logs or a log pipeline the escape codes split field names.
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(std::io::stdout().is_terminal());
     if format == Ok(LogFormat::Json) {
         builder
             .json()
