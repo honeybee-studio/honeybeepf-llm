@@ -92,6 +92,7 @@ nav:
       - Install: install.md
       - Verify the image and chart: verify.md
       - Build from source: build.md
+      - Run without Kubernetes: run-binary.md
   - Concepts:
       - How it works: how-it-works.md
       - What is supported: providers.md
