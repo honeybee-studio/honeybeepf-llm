@@ -15,6 +15,7 @@ code or the CI workflows and describes the chart's defaults unless an option is 
 | Host filesystem? | Only the cgroup tree, read-only. `/proc/<pid>/root` still reaches other filesystems through `hostPID`. |
 | Reads plaintext? | Yes, in memory only, until a connection is known not to be an LLM call ([Data handling](#3-data-handling)). |
 | What leaves the node? | OTLP metrics and log lines. Never request or response bodies, headers or keys. |
+| What did it do? | Audit events log every library and executable it attached to, plaintext capture and the providers and prices it loaded, as JSON with `LOG_FORMAT=json` ([Logs](guides/logs.md)). |
 | Listening ports? | None. |
 | In the request path? | No proxy, but the uprobes run in the application's thread on every `SSL_read`/`SSL_write` ([Failure behaviour](#5-failure-behaviour)). |
 | Image? | Chainguard `glibc-dynamic`: glibc, libgcc and CA certificates, no shell or package manager; no known vulnerabilities in a Trivy scan when built. |

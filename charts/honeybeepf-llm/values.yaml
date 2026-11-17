@@ -32,6 +32,9 @@ serviceAccount:
   name: ""
 
 rustLog: "info"
+# "text" for people, "json" for one JSON object per line (a log pipeline or SIEM). Audit events, what the
+# agent attached to and which providers, prices and plaintext capture it runs with, have target "audit".
+logFormat: "text"
 
 builtinProbes:
   llm:

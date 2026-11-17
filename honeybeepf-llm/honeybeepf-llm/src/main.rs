@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use aya::include_bytes_aligned;
 use clap::Parser;
-use tracing_subscriber::{self, EnvFilter};
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -25,16 +24,9 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Initialize the logging system.
-    // It prioritizes the RUST_LOG environment variable.
-    // If RUST_LOG is not set, it defaults to 'info' when --verbose is used,
-    // otherwise it defaults to 'warn' to reduce noise.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(if opt.verbose { "info" } else { "warn" })),
-        )
-        .init();
+    // RUST_LOG picks the levels (else info with --verbose, warn without) and LOG_FORMAT text or json.
+    honeybeepf_llm::logging::init(opt.verbose);
+    honeybeepf_llm::audit::startup(env!("CARGO_PKG_VERSION"));
 
     // Load agent settings from environment variables or a .env file.
     let settings = honeybeepf_llm::settings::Settings::new().context("Failed to load settings")?;

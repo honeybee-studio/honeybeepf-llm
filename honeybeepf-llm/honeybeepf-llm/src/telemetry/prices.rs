@@ -2,7 +2,6 @@
 
 use arc_swap::ArcSwapOption;
 use honeybeepf_llm_core::pricing::PriceTable;
-use log::info;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -69,12 +68,11 @@ pub(super) fn reload_prices(prices: &ArcSwapOption<Prices>, file: &mut PriceFile
         // Back to the contents already loaded, after a rejected file in between.
         Ok((table, _)) if table.version() == current.table.version() => {}
         Ok((table, o)) => {
-            info!(
-                "Custom prices reloaded: price table {} -> {}, replaced [{}], added [{}]",
+            crate::audit::prices_reloaded(
                 current.table.version(),
                 table.version(),
-                o.replaced.join(", "),
-                o.added.join(", ")
+                &o.replaced,
+                &o.added,
             );
             prices.store(Some(Arc::new(Prices::new(table))));
         }
@@ -106,18 +104,16 @@ pub(super) fn load_prices(custom: Option<&str>) -> Option<Prices> {
             return None;
         }
     };
+    let mut changed = (Vec::new(), Vec::new());
     if let Some(json) = custom {
         match table.merge_custom(json) {
-            Ok(o) => info!(
-                "Custom prices: replaced [{}], added [{}]",
-                o.replaced.join(", "),
-                o.added.join(", ")
-            ),
+            Ok(o) => changed = (o.replaced, o.added),
             Err(e) => log::warn!("Custom price table rejected, using built-in prices only: {e}"),
         }
     }
+    crate::audit::prices_loaded(table.version(), &changed.0, &changed.1);
     for s in table.sources() {
-        info!(
+        log::debug!(
             "Price table {}: {} prices from {} (checked {})",
             table.version(),
             s.provider,

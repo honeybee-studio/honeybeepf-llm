@@ -40,15 +40,14 @@ impl Settings {
     pub fn new() -> Result<Self, ConfigError> {
         dotenvy::dotenv().ok();
 
-        // Debug: print relevant environment variables
         for (key, value) in std::env::vars() {
             if key.starts_with("BUILTIN") || key.starts_with("RUST_LOG") {
-                eprintln!("ENV: {key}={value}");
+                log::debug!("ENV: {key}={value}");
             }
         }
 
         let settings = Self::from_vars(std::env::vars().collect())?;
-        eprintln!("Parsed settings: {settings:?}");
+        log::debug!("Parsed settings: {settings:?}");
         Ok(settings)
     }
 

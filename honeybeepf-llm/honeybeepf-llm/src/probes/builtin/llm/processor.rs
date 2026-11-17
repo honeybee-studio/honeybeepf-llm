@@ -452,9 +452,18 @@ impl StreamProcessor {
         #[cfg(not(feature = "k8s"))]
         let pod_str = "";
 
-        info!(
+        // A response whose request was never seen is mostly another gRPC stream on a joined connection.
+        let level = if matches!(reason, UnparsedReason::HeadersLost) {
+            log::Level::Debug
+        } else {
+            log::Level::Info
+        };
+        log::log!(
+            level,
             "LLM UNPARSED | PID: {} | {}, not recorded{}",
-            ctx.pid, reason, pod_str
+            ctx.pid,
+            reason,
+            pod_str
         );
         Outcome::Unparsed(reason)
     }
@@ -632,7 +641,7 @@ impl StreamProcessor {
         #[cfg(not(feature = "k8s"))]
         let pod_str = "";
 
-        info!(
+        debug!(
             "[LLM] Detected {}: {} (PID: {}){}",
             version, path, ctx.pid, pod_str
         );

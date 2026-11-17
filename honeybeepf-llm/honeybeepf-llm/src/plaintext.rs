@@ -15,7 +15,7 @@ use honeybeepf_llm_core::providers::ProviderRegistry;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{Api, Client, api::ListParams};
-use log::{debug, info, warn};
+use log::{debug, warn};
 
 use crate::probes::{IdentityResolver, shutdown_flag};
 
@@ -314,12 +314,12 @@ pub fn configured_specs() -> Vec<EndpointSpec> {
 
 /// Gate on cgroup v2 + kernel 5.10, attach the socket programs, start the parser, fill the endpoint
 /// map, and run the reconcile driver; a failure after the sockops attach undoes it. Returns Err
-/// (logged as disabled) when the node cannot support it.
+/// (logged as disabled) when the node cannot support it, else the cgroup the programs attach at.
 pub async fn start(
     bpf: &mut aya::Ebpf,
     specs: Vec<EndpointSpec>,
     resolver: IdentityResolver,
-) -> Result<()> {
+) -> Result<std::path::PathBuf> {
     use aya::programs::{CgroupAttachMode, CgroupSockAddr, SkMsg, SkSkb, SockOps};
 
     if !KernelVersion::current().is_ok_and(|v| v >= KernelVersion::new(5, 10, 0)) {
@@ -327,7 +327,6 @@ pub async fn start(
     }
     let cgroup = cgroup_v2_root().context("no cgroup v2 hierarchy (pure cgroup v1 node)")?;
     let cgroup_fd = std::fs::File::open(&cgroup)?;
-    info!("Plaintext programs attach at cgroup {}", cgroup.display());
 
     // Verify every program before attaching any: a verifier rejection then leaves nothing attached.
     {
@@ -390,10 +389,10 @@ pub async fn start(
     )?;
     let client = Client::try_default().await?;
     let Some(resolver) = Resolver::new(specs) else {
-        return Ok(());
+        return Ok(cgroup);
     };
     tokio::spawn(resolver.run(client, MapEndpointSink::new(map)));
-    Ok(())
+    Ok(cgroup)
 }
 
 /// Attach the sk_msg (send) and sk_skb (receive) programs to the sockhash of watched sockets and

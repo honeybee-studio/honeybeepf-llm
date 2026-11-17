@@ -45,6 +45,8 @@ ruzstd = { version = "0.9", default-features = false, features = ["std"] }
 procfs = { version = "0.18", default-features = false }
 regex = "1"
 tracing-subscriber.workspace = true
+# Audit events carry named fields, which the log crate cannot.
+tracing = "0.1"
 
 # OpenTelemetry dependencies for metrics export
 # Metrics over gRPC only: the defaults would add traces, logs and an HTTP exporter with reqwest.
