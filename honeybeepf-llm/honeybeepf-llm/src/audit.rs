@@ -21,7 +21,8 @@ pub fn attach(kind: &str, path: &str, ino: u64, detail: &str) {
 
 /// A library or executable that has TLS code could not be probed.
 pub fn attach_failed(path: &str, error: &dyn Display) {
-    warn!(target: TARGET, event = "attach_failed", path, error = %error, "LLM probes not attached");
+    let error = error.to_string();
+    warn!(target: TARGET, event = "attach_failed", path, error = error.as_str(), "LLM probes not attached");
 }
 
 /// Plaintext capture is on: socket programs attached at `cgroup` for `endpoints` configured endpoints.
@@ -31,7 +32,8 @@ pub fn plaintext_capture_on(cgroup: &str, endpoints: usize) {
 
 /// Plaintext capture was configured but stays off.
 pub fn plaintext_capture_off(reason: &dyn Display) {
-    warn!(target: TARGET, event = "plaintext_capture", enabled = false, reason = %reason, "Plaintext capture disabled");
+    let reason = reason.to_string();
+    warn!(target: TARGET, event = "plaintext_capture", enabled = false, reason = reason.as_str(), "Plaintext capture disabled");
 }
 
 /// The provider set the probe runs with; `summary` is the line people read.
@@ -42,13 +44,13 @@ pub fn providers_loaded(summary: &str, providers: &str, entries: usize, config_h
 /// The price table costs are computed with, and what a user price file changed in it.
 pub fn prices_loaded(version: &str, replaced: &[String], added: &[String]) {
     let (replaced, added) = (replaced.join(","), added.join(","));
-    info!(target: TARGET, event = "prices_loaded", version, replaced, added, "Price table {version} loaded");
+    info!(target: TARGET, event = "prices_loaded", version, replaced, added, "Price table loaded");
 }
 
 /// A user price file changed while running and was taken.
 pub fn prices_reloaded(from: &str, to: &str, replaced: &[String], added: &[String]) {
     let (replaced, added) = (replaced.join(","), added.join(","));
-    info!(target: TARGET, event = "prices_reloaded", from, to, replaced, added, "Price table {from} -> {to}");
+    info!(target: TARGET, event = "prices_reloaded", from, to, replaced, added, "Price table reloaded");
 }
 
 #[cfg(test)]
@@ -103,11 +105,22 @@ mod tests {
     }
 
     #[test]
-    fn a_newline_in_a_path_cannot_forge_a_log_line() {
+    fn a_newline_in_a_value_cannot_forge_a_log_line() {
         let forged = "/tmp/x\n2026-01-01T00:00:00Z  INFO audit: fake";
         for json in [false, true] {
-            let out = capture(json, || attach_failed(forged, &"denied"));
-            assert_eq!(out.lines().count(), 1, "{out}");
+            for out in [
+                capture(json, || attach_failed(forged, &"denied")),
+                capture(json, || attach_failed("/tmp/x", &forged)),
+                capture(json, || plaintext_capture_off(&forged)),
+            ] {
+                assert_eq!(out.lines().count(), 1, "{out}");
+            }
         }
+    }
+
+    #[test]
+    fn text_values_are_quoted_so_a_reason_reads_as_one_field() {
+        let out = capture(false, || plaintext_capture_off(&"kernel older than 5.10"));
+        assert!(out.contains(r#"reason="kernel older than 5.10""#), "{out}");
     }
 }
