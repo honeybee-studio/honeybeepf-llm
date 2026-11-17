@@ -1,0 +1,2 @@
+# Pins for the docs site build; `pip-compile --generate-hashes docs/requirements.in` writes requirements.txt.
+mkdocs-material==9.8.0

@@ -47,6 +47,7 @@ terraform.rc
 # Helm prints this after install; it is a chart template, not notes.
 !charts/*/templates/NOTES.txt
 !requirements.txt
+!requirements-*.txt
 *.log
 *.json
 *.tar
