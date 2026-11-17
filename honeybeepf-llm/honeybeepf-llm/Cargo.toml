@@ -47,9 +47,10 @@ regex = "1"
 tracing-subscriber.workspace = true
 
 # OpenTelemetry dependencies for metrics export
-opentelemetry = { version = "0.33", features = ["metrics"] }
-opentelemetry_sdk = { version = "0.33", features = ["rt-tokio", "metrics"] }
-opentelemetry-otlp = { version = "0.33", features = ["metrics", "grpc-tonic", "tls-ring", "tls-roots"] }
+# Metrics over gRPC only: the defaults would add traces, logs and an HTTP exporter with reqwest.
+opentelemetry = { version = "0.33", default-features = false, features = ["metrics", "internal-logs"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["rt-tokio", "metrics", "internal-logs"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["metrics", "grpc-tonic", "tls-ring", "tls-roots", "internal-logs"] }
 # TLS settings for the OTLP exporter (same tonic as opentelemetry-otlp)
 tonic = { version = "0.14", default-features = false, features = ["tls-ring", "tls-native-roots"] }
 
@@ -61,7 +62,7 @@ futures = { version = "0.3", optional = true }
 [dev-dependencies]
 serial_test = "4.0.1"
 # Tests read metrics through a manual reader, which the SDK only exports behind this feature.
-opentelemetry_sdk = { version = "0.33", features = ["experimental_metrics_custom_reader"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["experimental_metrics_custom_reader"] }
 
 [build-dependencies]
 # Not used by build.rs; a change here or in honeybeepf-llm-common reruns build.rs, rebuilding the eBPF object.
