@@ -41,7 +41,7 @@ billed. Some providers send streaming usage only with `stream_options.include_us
 it is counted under `llm_responses_unparsed_total{reason="usage_absent"}`.
 
 `builtinProbes.llm.providers` in `values.yaml` describes providers by host, path and usage fields, in the format of
-the [built-in list](../honeybeepf-llm/honeybeepf-llm-core/src/providers/default_providers.json). They are added to the
+the [built-in list](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/honeybeepf-llm/honeybeepf-llm-core/src/providers/default_providers.json). They are added to the
 built-in providers; a provider with a built-in name (`openai`, `anthropic`, `gemini`, `bedrock`, matched exactly)
 replaces every built-in entry of that name, so an `openai` entry must also cover the Responses API and an
 `anthropic` entry Claude on Vertex AI. Usage is read by matching the response's fields, not its host, with the
@@ -137,7 +137,7 @@ undici 8), so the official OpenAI and Anthropic Node SDKs now record with no cha
 **Kernels:** CI loads and attaches the probes and records exact token counts (OpenAI JSON, streaming and gzip,
 and Anthropic with a cache read, against a local mock) on 5.10, 5.15, 6.1, 6.6, 6.12, 6.18 and 7.2, on the
 RHEL 8.10 (4.18), 9.6 and 9.7 (5.14) kernels, and on 5.15 and 6.1 on arm64
-([kernel matrix](../.github/workflows/kernel-matrix.yml)); other RHEL minor releases are not tested. The full
+([kernel matrix](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/.github/workflows/kernel-matrix.yml)); other RHEL minor releases are not tested. The full
 provider and runtime tables above are checked on Linux 7.0.
 
 **Overhead:** CPU, memory, latency and accuracy under load are measured in [docs/benchmark.md](benchmark.md).

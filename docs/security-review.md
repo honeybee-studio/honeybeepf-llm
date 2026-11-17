@@ -7,7 +7,7 @@ and cost metrics over OTLP. It is not a proxy and does not change the data or th
 
 Every statement below is drawn from the chart, the code or the CI workflows, with the file named inline, and it
 describes the chart's defaults unless an option is named. Where something has not been tested, it says so. Section 8
-lists the known gaps in one place. To report a suspected vulnerability, follow [`SECURITY.md`](../SECURITY.md) (GitHub
+lists the known gaps in one place. To report a suspected vulnerability, follow [`SECURITY.md`](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/SECURITY.md) (GitHub
 private vulnerability reporting).
 
 ## At a glance

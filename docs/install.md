@@ -49,7 +49,7 @@ An `https://` endpoint is verified against the CA in `caSecret` if set, else the
 ```
 
 The agent needs `hostPID` and the `BPF`, `PERFMON`, `SYS_ADMIN`, `SYS_PTRACE`, `NET_ADMIN` and `SYS_RESOURCE` capabilities, and requests 50m CPU / 128Mi per node (limits 1 CPU / 1Gi); see
-[`values.yaml`](../charts/honeybeepf-llm/values.yaml).
+[`values.yaml`](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/charts/honeybeepf-llm/values.yaml).
 
 Two of those capabilities are only needed on older kernels. The chart grants them so one install works on every node;
 if all your nodes run a newer kernel, you can remove them:
@@ -98,7 +98,7 @@ docker buildx imagetools inspect ghcr.io/honeybee-studio/honeybeepf-llm:X.Y.Z --
 ## Building from source
 
 Requires the nightly toolchain with `rust-src` and `bpf-linker`; see the
-[prerequisites](../honeybeepf-llm/docs/BINARY_DEPLOYMENT.md#-prerequisites).
+[prerequisites](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/honeybeepf-llm/docs/BINARY_DEPLOYMENT.md#-prerequisites).
 
 ```bash
 cd honeybeepf-llm
@@ -106,4 +106,4 @@ cargo +nightly build --release --package honeybeepf-llm --features k8s
 ```
 
 The `k8s` feature adds the pod labels and is not enabled by default; the Docker image is built with it. Without
-Kubernetes, see [running the binary](../honeybeepf-llm/docs/BINARY_DEPLOYMENT.md).
+Kubernetes, see [running the binary](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/honeybeepf-llm/docs/BINARY_DEPLOYMENT.md).

@@ -1,7 +1,7 @@
 # Alerts
 
 The chart ships Prometheus alert rules for two questions: is a team spending more than it should, and can the numbers
-be trusted. They are in [`charts/honeybeepf-llm/templates/_alerts.tpl`](../charts/honeybeepf-llm/templates/_alerts.tpl)
+be trusted. They are in [`charts/honeybeepf-llm/templates/_alerts.tpl`](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/charts/honeybeepf-llm/templates/_alerts.tpl)
 and reach Prometheus in one of three ways:
 
 - **Prometheus Operator** (kube-prometheus-stack and similar): set `alerts.prometheusRule.enabled=true` and, if the
@@ -67,5 +67,5 @@ the alert asks a person to check which it is. `llm_responses_unparsed_total` has
 ## Tests
 
 `ci/test-alerts.sh` runs in CI. It checks the rules and their annotation templates with `promtool`, runs the unit
-tests in [`tests/alerts/rules.test.yml`](../tests/alerts/rules.test.yml) (each rule has a case that must fire and one
+tests in [`tests/alerts/rules.test.yml`](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/tests/alerts/rules.test.yml) (each rule has a case that must fire and one
 that must not), and fails when the copy in the bundled Prometheus chart differs from the chart's defaults.
