@@ -1,0 +1,31 @@
+name: Image scan
+
+# Scans the published image for known vulnerabilities in its OS packages, the same scan Artifact Hub shows,
+# and reports them under Security → Code scanning. Daily, because new advisories arrive without any change here.
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    name: Trivy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/honeybee-studio/honeybeepf-llm:latest
+          scanners: vuln
+          format: sarif
+          output: trivy.sarif
+
+      - uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        with:
+          sarif_file: trivy.sarif
+          category: trivy-image
