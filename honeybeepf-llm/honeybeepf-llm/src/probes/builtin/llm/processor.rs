@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use honeybeepf_llm_common::capture_limit;
+use honeybeepf_llm_common::{capture_limit, plain_capture_limit};
 use honeybeepf_llm_core::types::{LlmDirection, UsageInfo};
 use log::{debug, info};
 
@@ -236,7 +236,11 @@ impl StreamProcessor {
         ctx: &CallContext,
     ) -> Outcome {
         let end = offset.saturating_add(data.len() as u32);
-        let complete = end as usize >= (len as usize).min(capture_limit(direction));
+        let limit = match self.transport {
+            Transport::Tls => capture_limit(direction),
+            Transport::Plain => plain_capture_limit(direction),
+        };
+        let complete = end as usize >= (len as usize).min(limit);
         // The kernel sends a call's fragments in order and stops at the first with no ringbuf room.
         let out_of_order = offset != self.frag_next;
 

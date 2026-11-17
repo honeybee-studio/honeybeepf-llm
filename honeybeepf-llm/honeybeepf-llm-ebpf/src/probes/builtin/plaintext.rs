@@ -16,9 +16,9 @@ use aya_ebpf::{
     programs::{SkBuffContext, SkMsgContext, SockAddrContext, SockOpsContext},
 };
 use honeybeepf_llm_common::{
-    EventMetadata, LlmDirection, LlmEventHeader, LlmStat, MAX_SSL_BUF_SIZE, MAX_SSL_FRAGMENTS,
-    PLAIN_CONNS_ENTRIES, PLAIN_ENDPOINTS_ENTRIES, PLAIN_SOCKS_ENTRIES, PlainFlowKey, capture_limit,
-    plain_endpoint_key, plain_flow_key, plain_stream_id,
+    EventMetadata, LlmDirection, LlmEventHeader, LlmStat, MAX_SSL_BUF_SIZE, PLAIN_CONNS_ENTRIES,
+    PLAIN_ENDPOINTS_ENTRIES, PLAIN_RECV_CAPTURE, PLAIN_SOCKS_ENTRIES, PlainFlowKey,
+    plain_capture_limit, plain_endpoint_key, plain_flow_key, plain_stream_id,
 };
 
 use crate::probes::builtin::llm::helpers::count;
@@ -30,6 +30,9 @@ pub const PLAIN_RINGBUF_MIN: u32 = 4096;
 /// takes a small ring slot. Largest is `MAX_SSL_BUF_SIZE`; a write is captured only up to it.
 const PLAIN_BUCKET_SMALL: usize = 512;
 const PLAIN_BUCKET_MED: usize = 2048;
+/// Receive-only buckets past one SSL buffer, so a large skb is one record up to `PLAIN_RECV_CAPTURE`.
+const PLAIN_BUCKET_16K: usize = 16 * 1024;
+const PLAIN_BUCKET_32K: usize = 32 * 1024;
 
 #[map]
 pub static PLAIN_ENDPOINTS: HashMap<u64, u8> =
@@ -191,22 +194,20 @@ fn emit_send<const N: usize>(ctx: &SkMsgContext, meta: &EventMetadata, size: u32
     slot.submit(0);
 }
 
-/// Copy one receive fragment at `offset` into PLAIN_EVENTS; mirrors `emit_send` but reads from the
-/// (possibly non-linear) skb with the bounded `bpf_skb_load_bytes` helper, so no pull is needed.
-/// Returns false when the slot or read fails, so the caller stops emitting further fragments.
+/// Copy the receive's first `N` bytes into one PLAIN_EVENTS record; mirrors `emit_send` but reads from
+/// the (possibly non-linear) skb with the bounded `bpf_skb_load_bytes` helper, so no pull is needed.
 #[inline(always)]
 fn emit_recv<const N: usize>(
     ctx: &SkBuffContext,
     meta: &EventMetadata,
     size: u32,
-    offset: u32,
     truncated: u8,
     stream: u64,
-) -> bool {
+) {
     // The mask below needs a power-of-two bucket to bound the copy length.
     const { assert!(N.is_power_of_two()) };
     let Some(mut slot) = PLAIN_EVENTS.reserve::<PlainEvent<N>>(0) else {
-        return false;
+        return;
     };
     // SAFETY: the slot is reserved for a PlainEvent<N>; every header field is set before submit.
     let ev = unsafe { &mut *slot.as_mut_ptr() };
@@ -216,16 +217,16 @@ fn emit_recv<const N: usize>(
         size,
         LlmDirection::Read,
         truncated,
-        offset,
+        0,
         stream,
     );
-    // This fragment's bytes, capped to the bucket (the dispatch already keeps it <= N).
-    let n = core::cmp::min(size.saturating_sub(offset) as usize, N);
+    // The receive's bytes, capped to the bucket (the dispatch already keeps it <= N).
+    let n = core::cmp::min(size as usize, N);
     // bpf_skb_load_bytes rejects a zero-length read, so bail on an empty fragment.
     if n == 0 {
         ev.header.buf_filled = 0;
         slot.discard(0);
-        return false;
+        return;
     }
     // Clamp to [1, N] in asm so the compiler cannot fold the mask back into a branch. The old
     // verifier (5.10) reads the length as [1, N] from the AND with a constant, which it trusts, not
@@ -248,7 +249,7 @@ fn emit_recv<const N: usize>(
     let loaded = unsafe {
         bpf_skb_load_bytes(
             ctx.as_ptr(),
-            offset,
+            0,
             ev.buf.as_mut_ptr() as *mut core::ffi::c_void,
             len as u32,
         )
@@ -256,11 +257,10 @@ fn emit_recv<const N: usize>(
     if loaded != 0 {
         ev.header.buf_filled = 0;
         slot.discard(0);
-        return false;
+        return;
     }
     ev.header.buf_filled = 1;
     slot.submit(0);
-    true
 }
 
 /// Linearize the send's first bytes and emit them in the smallest bucket that fits.
@@ -306,37 +306,33 @@ pub fn plaintext_skmsg(ctx: SkMsgContext) -> u32 {
     SK_PASS
 }
 
-/// Emit the receive as up to `MAX_SSL_FRAGMENTS` records so a skb past one bucket is captured whole
-/// instead of marked truncated and dropped; each fragment reads its own `offset` from the skb and
-/// the smallest bucket that fits. `truncated` marks the receive only when it exceeds the Read limit.
+/// Emit the receive as one record in the smallest bucket that holds it, up to `PLAIN_RECV_CAPTURE` (a
+/// whole skb on loopback or after GRO): one reserve and one copy per skb, with no loop for the verifier.
+/// `truncated` marks only a receive past that limit.
 #[inline(never)]
 fn capture_recv(ctx: &SkBuffContext, meta: &EventMetadata, stream: u64) {
     let size = ctx.len();
     if size == 0 {
         return;
     }
-    let limit = capture_limit(LlmDirection::Read);
+    let limit = plain_capture_limit(LlmDirection::Read);
     let truncated = (size as usize > limit) as u8;
     if truncated != 0 {
         count(LlmStat::PlainRecvTruncated);
     }
-    for i in 0..MAX_SSL_FRAGMENTS {
-        let offset = i * MAX_SSL_BUF_SIZE;
-        if i > 0 && (offset >= size as usize || offset >= limit) {
-            return;
-        }
-        let offset = offset as u32;
-        let to_read = core::cmp::min(size.saturating_sub(offset) as usize, MAX_SSL_BUF_SIZE);
-        let sent = if to_read <= PLAIN_BUCKET_SMALL {
-            emit_recv::<PLAIN_BUCKET_SMALL>(ctx, meta, size, offset, truncated, stream)
-        } else if to_read <= PLAIN_BUCKET_MED {
-            emit_recv::<PLAIN_BUCKET_MED>(ctx, meta, size, offset, truncated, stream)
-        } else {
-            emit_recv::<MAX_SSL_BUF_SIZE>(ctx, meta, size, offset, truncated, stream)
-        };
-        if !sent {
-            return;
-        }
+    let len = core::cmp::min(size as usize, limit);
+    if len <= PLAIN_BUCKET_SMALL {
+        emit_recv::<PLAIN_BUCKET_SMALL>(ctx, meta, size, truncated, stream);
+    } else if len <= PLAIN_BUCKET_MED {
+        emit_recv::<PLAIN_BUCKET_MED>(ctx, meta, size, truncated, stream);
+    } else if len <= MAX_SSL_BUF_SIZE {
+        emit_recv::<MAX_SSL_BUF_SIZE>(ctx, meta, size, truncated, stream);
+    } else if len <= PLAIN_BUCKET_16K {
+        emit_recv::<PLAIN_BUCKET_16K>(ctx, meta, size, truncated, stream);
+    } else if len <= PLAIN_BUCKET_32K {
+        emit_recv::<PLAIN_BUCKET_32K>(ctx, meta, size, truncated, stream);
+    } else {
+        emit_recv::<PLAIN_RECV_CAPTURE>(ctx, meta, size, truncated, stream);
     }
 }
 

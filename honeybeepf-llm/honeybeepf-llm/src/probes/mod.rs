@@ -14,7 +14,7 @@ use aya::{
     maps::{HashMap as AyaHashMap, MapData, RingBuf},
     programs::{FEntry, KProbe, TracePoint, UProbe, uprobe::UProbeLinkId},
 };
-use honeybeepf_llm_common::{ExecEvent, LibOpenEvent, LlmEventHeader};
+use honeybeepf_llm_common::{ExecEvent, LibOpenEvent, LlmEventHeader, MAX_SSL_BUF_SIZE};
 use std::os::unix::io::AsRawFd;
 
 use log::{info, warn};
@@ -251,7 +251,9 @@ fn parse_llm_record(item: &[u8]) -> Option<(&LlmEventHeader, &[u8])> {
     // (its widest field is u64); `LlmEventHeader: aya::Pod` (repr(C), every byte pattern valid) and the
     // length is checked, so the header is reborrowed in place.
     let header: &LlmEventHeader = unsafe { &*(item.as_ptr() as *const LlmEventHeader) };
-    let end = H + header.payload_len();
+    // One SSL buffer bounds the payload, or the record itself when larger (plaintext receives up to
+    // 64 KB), so a record shorter than its claimed payload is still dropped.
+    let end = H + header.payload_len((item.len() - H).max(MAX_SSL_BUF_SIZE));
     item.get(H..end).map(|payload| (header, payload))
 }
 
@@ -425,7 +427,7 @@ pub fn setup_lib_open_watch(bpf: &mut Ebpf) -> Result<(LibOpenQueue, ExecNotify,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use honeybeepf_llm_common::{LlmEvent, MAX_SSL_BUF_SIZE};
+    use honeybeepf_llm_common::LlmEvent;
 
     const H: usize = std::mem::size_of::<LlmEventHeader>();
 
