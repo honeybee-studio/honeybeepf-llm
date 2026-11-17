@@ -169,7 +169,7 @@ will appear in Grafana.
 
 ### Option 3 — Helm values (for the HoneybeePF chart)
 
-See [`charts/honeybeepf-llm/values.yaml`](../../charts/honeybeepf-llm/values.yaml)
+See [`charts/honeybeepf-llm/values.yaml`](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/charts/honeybeepf-llm/values.yaml)
 for the Helm-based deployment. Dashboards can be shipped alongside the chart
 by rendering a ConfigMap from these JSON files.
 
@@ -218,5 +218,5 @@ grep -c VictoriaMetrics docs/grafana/*.json   # should be 0 for both
 
 ## License
 
-These dashboards are distributed under the [Apache License 2.0](../../LICENSE),
+These dashboards are distributed under the [Apache License 2.0](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/LICENSE),
 the same license as the rest of the HoneybeePF project.

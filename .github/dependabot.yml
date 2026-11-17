@@ -32,3 +32,17 @@ updates:
     labels:
       - dependencies
       - ci
+  # Keeps the pinned MkDocs packages of the docs site current.
+  - package-ecosystem: pip
+    directory: /docs
+    schedule:
+      interval: weekly
+    groups:
+      docs:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: docs
+    labels:
+      - dependencies
+      - documentation

@@ -165,7 +165,7 @@ sum by (target_namespace, target_workload_name) (rate(honeybeepf_llm_llm_cost_us
 
 ## Grafana
 
-Two dashboards ship in [`docs/grafana/`](grafana/): **LLM Cost Observability**
+Two dashboards ship in [`docs/grafana/`](grafana/README.md): **LLM Cost Observability**
 ([`honeybeepf-cost.json`](grafana/honeybeepf-cost.json)) and **Security & Compliance**
 ([`honeybeepf-security.json`](grafana/honeybeepf-security.json)); the security dashboard needs the file-access
 probe, which the chart does not turn on (`BUILTIN_PROBES__FILESYSTEM__FILE_ACCESS` on the agent). Import them in Grafana

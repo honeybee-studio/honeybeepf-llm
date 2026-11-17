@@ -1,7 +1,7 @@
 # Overhead benchmark
 
 What the agent costs on a node, measured by a script anyone can rerun:
-[`tests/benchmark/overhead/overhead.py`](../tests/benchmark/overhead/overhead.py).
+[`tests/benchmark/overhead/overhead.py`](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/tests/benchmark/overhead/overhead.py).
 Results from each release are added below and old ones are kept, so changes over time stay visible.
 
 ## Method
