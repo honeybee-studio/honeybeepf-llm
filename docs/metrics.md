@@ -31,6 +31,9 @@ prefix. Cost metrics are on [Cost and prices](cost.md).
 |---|---|
 | `model` | the model the response names; if none (Gemini Decisions, Bedrock Converse), the request's top-level `model` or the model ID in a Bedrock `/model/{id}/...` path (an inference profile ARN is left out); with neither, `unknown` |
 | `transport` | `tls`, or `plain` for a call captured at the socket ([plain HTTP](guides/plaintext.md)); on requests, tokens and latency only |
+| `operation` | `chat` or `embeddings`; on requests, tokens and latency |
+| `modality` | `text`, `image`, `audio` or `video`, on tokens; text is what remains after the others |
+| `attempt` | `served`, or `declined` for an earlier fallback attempt the provider billed but routed away from (tokens and cost, no request count); see [Cost and prices](cost.md#attempt-served-or-declined) |
 | `match` | `shape` for a call to an unlisted host matched by its [shape](guides/detect-by-shape.md); absent for a call matched by its host, so `{match!="shape"}` keeps only those |
 
 The collector and Prometheus add labels of their own, such as `k8s_pod_name`, `k8s_node_name` and `namespace`: those
