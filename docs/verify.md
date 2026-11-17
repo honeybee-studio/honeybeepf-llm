@@ -1,6 +1,6 @@
-# Verify the image and chart
+# Verify the image, chart and binaries
 
-Images built from `main`, release images and the release chart are signed with keyless
+Images built from `main`, release images, the release chart and the release binaries are signed with keyless
 [cosign](https://docs.sigstore.dev/cosign/) by the GitHub Actions workflow that built them, and the images carry an SBOM
 and build provenance.
 
@@ -18,6 +18,17 @@ cosign verify ghcr.io/honeybee-studio/honeybeepf-llm:X.Y.Z \
 cosign verify ghcr.io/honeybee-studio/charts/honeybeepf-llm:X.Y.Z \
   --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER"
 docker buildx imagetools inspect ghcr.io/honeybee-studio/honeybeepf-llm:X.Y.Z --format '{{ json .SBOM }}'
+```
+
+## Binaries
+
+From v0.4.0, each release archive has a `.sigstore.json` bundle next to it:
+
+```bash
+NAME=honeybeepf-llm-X.Y.Z-linux-amd64.tar.gz
+curl -LO https://github.com/honeybee-studio/honeybeepf-llm/releases/download/vX.Y.Z/$NAME.sigstore.json
+cosign verify-blob $NAME --bundle $NAME.sigstore.json \
+  --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER"
 ```
 
 The [security review](security-review.md#7-supply-chain) covers the rest of the supply chain: pinned actions, the

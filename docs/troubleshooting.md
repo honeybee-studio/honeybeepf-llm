@@ -78,7 +78,7 @@ out of totals, for example with `{match!="shape"}`.
 ## `cosign verify` says `no signatures found`
 
 The signatures use cosign 3's bundle format; use cosign 3 or later. Releases before 0.3.1 are not fully signed. See
-[Verify the image and chart](verify.md).
+[Verify the image, chart and binaries](verify.md).
 
 ## Still stuck?
 
