@@ -119,6 +119,19 @@ make build
 make test
 ```
 
+### Fuzzing
+
+The parsers that read other processes' traffic have [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) targets in
+`honeybeepf-llm/fuzz`: `h2_frames`, `hpack`, `chunked` and `usage`. CI runs each for a minute when they or
+`honeybeepf-llm-core` change, and for ten minutes weekly. To run one locally:
+
+```bash
+cargo install cargo-fuzz --locked
+cd honeybeepf-llm && cargo +nightly fuzz run usage -- -max_total_time=60
+```
+
+A new parser that reads untrusted bytes should get a target there too.
+
 ### Releasing
 
 The agent, its image and the `honeybeepf-llm` chart share one version.

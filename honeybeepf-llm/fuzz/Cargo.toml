@@ -1,0 +1,46 @@
+[package]
+name = "honeybeepf-llm-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.12"
+honeybeepf-llm-core = { path = "../honeybeepf-llm-core" }
+serde_json = "1"
+
+# Its own workspace, so the fuzz build and its lock file stay out of the agent's.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "h2_frames"
+path = "fuzz_targets/h2_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hpack"
+path = "fuzz_targets/hpack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunked"
+path = "fuzz_targets/chunked.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "usage"
+path = "fuzz_targets/usage.rs"
+test = false
+doc = false
+bench = false
