@@ -1,226 +1,91 @@
-# HoneybeePF Grafana Dashboards
+# Grafana dashboards
 
-Pre-built Grafana dashboards for visualizing metrics exported by the
-HoneybeePF eBPF agent via OpenTelemetry → Prometheus.
+Two dashboards ship with honeybeepf-llm. They read the agent's metrics from Prometheus or any compatible backend.
 
-![LLM Cost Observability dashboard on the demo cluster: token usage, requests and latency by namespace, pod and workload; estimated spend per workload and per model in USD; and Cost-Waste Signals showing the measured cost of refused fallback attempts and the estimated savings from prompt caching, across team-a, team-b and team-c](../images/grafana.png)
+| Dashboard | Shows | Needs |
+|---|---|---|
+| [LLM Cost Observability](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/docs/grafana/honeybeepf-cost.json) | LLM traffic, tokens, latency and cost by team, workload, pod and model | the agent's default metrics |
+| [Security & Compliance](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/docs/grafana/honeybeepf-security.json) | file access by process and pod, next to LLM calls | the file-access probe, which the chart does not turn on (`BUILTIN_PROBES__FILESYSTEM__FILE_ACCESS=true`) |
 
-The LLM Cost Observability dashboard on the [demo](../demo.md) cluster: a mock provider and fake keys.
+## LLM Cost Observability
 
-## Dashboards
+| Section | Panels |
+|---|---|
+| External LLM API | requests, tokens (prompt and completion) and latency p50/p95/p99 by team and model; token share; 5-minute totals |
+| On-Premise LLM | the same for [plain-HTTP model servers](../guides/plaintext.md) (`transport="plain"`), by namespace and workload |
+| Cost-Waste Signals | the billed cost of refused fallback attempts; prompt cache hit rate; the most caching could save |
+| Cost (estimate) | spend per workload and per model, and the total, in USD |
+| LLM Usage Detail & Data Quality | tokens by `modality` and `operation`; tokens with no price; calls seen but not recorded |
 
-| File | Title | Panels | Focus |
-|------|-------|:------:|-------|
-| [`honeybeepf-cost.json`](./honeybeepf-cost.json) | HoneybeePF — LLM Cost Observability | 24 | LLM API traffic, token usage, latency, cost attribution by team / pod / model |
-| [`honeybeepf-security.json`](./honeybeepf-security.json) | HoneybeePF — Security & Compliance | 11 | File access monitoring, LLM ↔ file-access correlation, per-process auditing |
+Filters at the top: **Datasource**, **Team**, **Workload**, **Pod** and **Model**.
 
-### Cost Observability (`honeybeepf-cost.json`)
+??? example "See the whole dashboard"
+    ![LLM Cost Observability dashboard on the demo cluster: token usage, requests and latency by namespace, pod and workload; estimated spend per workload and per model in USD; and Cost-Waste Signals showing the measured cost of refused fallback attempts and the estimated savings from prompt caching, across team-a, team-b and team-c](../images/grafana.png)
 
-Five sections — **External LLM API**, **On-Premise LLM**, **Cost-Waste Signals**, **Cost (estimate)**, and **LLM Usage Detail & Data Quality** — with:
+    On the [demo](../demo.md) cluster: a mock provider and fake keys.
 
-- Requests / minute (by team, by model)
-- Token usage / minute (prompt vs completion, by team, by model)
-- Token share pie chart
-- Latency p50 / p95 / p99
-- 5-minute summary stats (total requests, total tokens, active probes)
-- Per-pod token usage and p95 latency
-- Top 10 pods by token usage
-- Fallback refusal cost per workload (`attempt="declined"`, **measured**), prompt cache hit rate per pod / model, and an **upper-bound** estimate of the input cost caching could save
-- Estimated spend per workload and per model, and a total, in USD from the price table (`llm_cost_usd_total` summed over all `cost_type` and all `attempt`)
-- Token usage / minute by `modality` (text / image / audio / video)
-- Requests and token usage / minute by `operation` (`chat` / `embeddings`)
-- Unpriced tokens / minute by `reason` — tokens the price table could not price, the spend the cost panels miss
-- Unparsed responses / minute by `reason`, with `agent_session` and `usage_absent` shown muted (counted on purpose, not dropped calls)
+!!! info "Measured and estimated"
+    - **Measured**: the refused fallback cost (`attempt="declined"`) is what the provider billed.
+    - **Estimated**: spend is tokens times the [price table](../cost.md), not an invoice. A model with no price is
+      missing from it and shows in the unpriced panel instead.
+    - **Leads, not losses**: the cache panels assume every input token is a repeated prefix, so the savings figure is
+      a ceiling, and a low hit rate means waste only where prompts really repeat.
 
-The **Cost-Waste Signals** section mixes one measured panel and two estimates, labelled as such. The refusal-cost panel is a real billed amount (`attempt="declined"`). The two cache panels are leads for human review, not measured losses: they are computed only from counters, so a low cache hit rate flags waste only where the prompt prefix actually repeats, which the agent cannot see, and the savings figure assumes every input token is a repeated cacheable prefix, priced at each model's own cache-read rate, so it is a ceiling. Each panel says so in its description.
+## Security & Compliance
 
-The **Cost (estimate)** section sums `llm_cost_usd_total` over every `cost_type` and every `attempt` (served and the separately-billed declined fallback attempts) by workload and by model. It is an estimate from the built-in price table, not an invoice; an unpriced model is absent here and counted in `llm_unpriced_tokens_total` instead.
+| Section | Panels |
+|---|---|
+| File Access Overview | events per minute, by namespace; the 10 files opened most |
+| Correlation & Hot Paths | file access next to LLM calls; access by path |
+| Summary (last 5 minutes) | events, distinct files, active probes |
 
-Template variables: `$datasource`, `$team`, `$pod`, `$model`.
+Filters: **Datasource** and **Process**. It reads `honeybeepf_llm_file_access_events_total` (`filename`, `flags`,
+`process`, `cgroup_id`, `target_namespace`, `target_pod_name`) and `honeybeepf_llm_active_probes` (`probe`).
 
-### Security & Compliance (`honeybeepf-security.json`)
+## Install
 
-Three sections:
+=== "Grafana UI"
 
-- **File Access Overview** — events / minute, by namespace, top 10 accessed files
-- **Correlation & Hot Paths** — LLM ↔ file-access correlation, file access by path
-- **Summary (Last 5 Minutes)** — total events, unique files accessed, active probes
+    1. In Grafana, open **Dashboards → New → Import**.
+    2. **Upload JSON file**: [`honeybeepf-cost.json`](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/docs/grafana/honeybeepf-cost.json)
+       or [`honeybeepf-security.json`](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/docs/grafana/honeybeepf-security.json).
+    3. Pick your Prometheus data source, then **Import**.
 
-Template variables: `$datasource`, `$process`.
+=== "ConfigMap and sidecar"
 
-## Required Metrics
+    With the Grafana Helm chart's dashboard sidecar (`sidecar.dashboards.enabled=true`), a labelled ConfigMap is
+    loaded within a minute:
 
-These dashboards expect the following Prometheus metrics exported by the
-HoneybeePF agent. The agent emits them via OTLP to an OpenTelemetry
-Collector, which forwards them to Prometheus.
+    ```bash
+    kubectl -n monitoring create configmap honeybeepf-dashboards \
+      --from-file=docs/grafana/honeybeepf-cost.json \
+      --from-file=docs/grafana/honeybeepf-security.json
+    kubectl -n monitoring label configmap honeybeepf-dashboards grafana_dashboard=1
+    ```
 
-### LLM metrics
+    The [demo](../demo.md) sets Grafana up this way.
 
-| Metric | Type | Labels |
-|--------|------|--------|
-| `honeybeepf_llm_llm_requests_total` | Counter | `model`, `status`, `operation` (chat / embeddings), `transport` (tls / plain), `target_namespace`, `target_pod_name` |
-| `honeybeepf_llm_llm_tokens_total` | Counter | `model`, `status`, `token_type` (prompt / completion), `modality` (text / image / audio / video; text is the remainder), `operation` (chat / embeddings), `transport` (tls / plain), `target_namespace`, `target_pod_name` |
-| `honeybeepf_llm_llm_cache_read_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
-| `honeybeepf_llm_llm_cache_write_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of prompt tokens) |
-| `honeybeepf_llm_llm_reasoning_tokens_total` | Counter | `model`, `status`, `target_namespace`, `target_pod_name` (subset of completion tokens) |
-| `honeybeepf_llm_llm_cost_usd_total` | Counter (USD) | `model`, `status`, `cost_type` (input / cache_read / cache_write / output), `price_table_version`, `target_namespace`, `target_pod_name` |
-| `honeybeepf_llm_llm_cache_savings_ceiling_usd_total` | Counter (USD) | `model`, `status`, `cache_price` (known / assumed_free), `price_table_version`, `target_namespace`, `target_pod_name` — upper bound on what caching the uncached input could save (estimate) |
-| `honeybeepf_llm_llm_unpriced_tokens_total` | Counter | `model`, `status`, `reason` (unknown_model / missing_price / unsupported_modifier / inconsistent_usage), `price_table_version`, `target_namespace`, `target_pod_name` |
-| `honeybeepf_llm_llm_latency_seconds_bucket` | Histogram | `model`, `status`, `operation` (chat / embeddings), `transport` (tls / plain), `target_namespace`, `target_pod_name` |
+## Data source
 
-Every per-call LLM metric (`llm_requests_total`, `llm_tokens_total`, the cache/reasoning subsets, `llm_cost_usd_total`, `llm_cache_savings_ceiling_usd_total`, `llm_unpriced_tokens_total`, `llm_latency_seconds`) also carries `attempt` (`served` / `declined`). It is `served` for the call the provider returned; `declined` marks an earlier server-side fallback attempt that the provider billed but routed away from (Anthropic fallback, #152/#154). A declined attempt adds its billed tokens and cost but no request count, so `sum(...)` over a metric is unchanged, while `attempt="declined"` isolates the cost of refused attempts per pod. Every series now carries the label; `declined` series appear only for models that show up in a fallback, so for non-fallback traffic the label is a constant `served` and adds no series.
+- Any Prometheus-compatible backend works: Prometheus, Thanos, Mimir, VictoriaMetrics or Cortex. Pick it in the
+  **Datasource** filter; the default name is `Prometheus`.
+- Rate panels use a 1-minute **Min step**, matching the bundled Prometheus's 1-minute scrape. If yours scrapes less
+  often, raise the step to match, or the panels show **No data**; if more often, you can lower it.
+- The namespace, pod and workload labels need the agent's `k8s` build, which the image uses.
 
-`llm_requests_total`, `llm_tokens_total` and `llm_latency_seconds` also carry `transport`: `tls` for a call captured from the OpenSSL uprobes, `plain` for one captured at the socket layer on an in-cluster plaintext (non-TLS) endpoint. It is constant per call, so `sum(...)` is unchanged and `transport="plain"` isolates on-premise plaintext traffic (the On-Premise LLM section). The cost, cache and unpriced metrics do not carry it.
+The metrics and their labels are in [Metrics](../metrics.md) and [Cost and prices](../cost.md).
 
-Every LLM metric that has `target_pod_name` also has `target_workload_kind` and `target_workload_name`: the pod's owner, with a ReplicaSet resolved to its Deployment or Argo Rollout and a Job to its CronJob (`Pod` and the pod name for a pod without an owner, `unattributed` when the owner cannot be named). The workload is fixed by the pod, so these labels add no series (except a Job pod relabelled with its CronJob after a failed lookup). The cost dashboard groups the On-Premise panels by namespace and workload; the **Workload** and **Pod** variables drill down.
+??? note "Changing a dashboard"
+    1. Edit it in Grafana, then **Share → Export**, turn on **Export for sharing externally** and **Save to file**
+       over the JSON in `docs/grafana/`.
+    2. Check it:
 
-Cost comes from the built-in price table (`honeybeepf-llm-core/src/prices.json`; every provider entry names its pricing page and the date it was checked). A call the table cannot price is counted in `llm_unpriced_tokens_total`, never as $0, so compare the two before trusting a total. Prices are the providers' first-party list prices: the price is chosen by model name, not by host, so Azure OpenAI, Bedrock, Vertex AI and regional endpoints (such as OpenAI data residency, +10%) are priced as the first-party API. Per-request tool fees (web search) and audio input prices are not included.
+        ```bash
+        jq -e . docs/grafana/honeybeepf-cost.json > /dev/null && echo ok
+        grep -c VictoriaMetrics docs/grafana/*.json   # 0 for both
+        ```
 
-To use negotiated or self-hosted prices, set `builtinProbes.llm.prices` in the chart (or point `LLM_PRICES_CONFIG_FILE` at a file) to a table in the same format. Each model listed there replaces the whole built-in entry (list its tiers, speed and geo prices too) or adds a new one. A provider's `price_multiplier` multiplies its prices: `0.8` means you pay 80% of the list price (a 20% discount). It applies to every built-in price of that provider, not to the models the file lists. A provider with only a multiplier still needs `source`, `checked` and `models: {}`. The file goes through the same checks as the built-in table; if it is rejected, the agent logs a warning and keeps the built-in prices. With a user table loaded, `price_table_version` reads `<built-in version>+custom-<hash of the file>`, and the startup log lists the replaced and added models. The chart mounts the table as a file (`LLM_PRICES_CONFIG_FILE`), which the agent rereads every 10 seconds: after `helm upgrade` or a ConfigMap edit, the new prices and version apply without a restart once the kubelet refreshes the volume (about a minute). A changed file that fails the checks is logged and the previous prices stay. Turning `prices` on or off changes the DaemonSet, so that one upgrade restarts the pods. Inline `LLM_PRICES_CONFIG` without the file is read at startup only.
+    3. Every `"uid"` under a `"datasource"` must be `"${datasource}"`, not a fixed name, or the dashboard breaks on
+       other Grafanas.
 
-#### Example
-
-```mermaid
-flowchart LR
-  B["Built-in table<br/>prices.json"] --> M["Merge per model"]
-  U["User table<br/>builtinProbes.llm.prices"] -->|"same checks"| M
-  M --> T["Merged table<br/>version 2026-10-26+custom-hash"]
-  U -.->|"rejected"| W["Warning in the log,<br/>built-in table only"]
-```
-
-```yaml
-builtinProbes:
-  llm:
-    prices:
-      version: "acme-2026-10"
-      providers:
-        - name: "openai"
-          source: "our contract"
-          checked: "2026-10-01"
-          price_multiplier: 0.8
-          models:
-            gpt-5: {input: 1.0, output: 8.0, cache_read: 0.1}
-        - name: "vllm"
-          source: "internal"
-          checked: "2026-10-01"
-          models:
-            my-vllm-llama: {input: 0.1, output: 0.2}
-```
-
-With the built-in table `2026-10-26`, this gives (USD per million tokens, input / output / cache read):
-
-| Model | Built-in price | Merged price | Why |
-|---|---|---|---|
-| `gpt-4o` | 2.50 / 10.00 / 1.25 | 2.00 / 8.00 / 1.00 | × 0.8 |
-| `gpt-5-mini` | 0.25 / 2.00 / 0.025 | 0.20 / 1.60 / 0.02 | × 0.8 (flex and priority tiers too) |
-| `gpt-5` | 1.25 / 10.00 / 0.125 | 1.00 / 8.00 / 0.10 | Set in the file; no multiplier, and no flex or priority price unless listed |
-| `my-vllm-llama` | none (`unknown_model`) | 0.10 / 0.20 / none | Added |
-| `claude-sonnet-4-5` | 3.00 / 15.00 / 0.30 | 3.00 / 15.00 / 0.30 | Other provider, unchanged |
-
-To check it, look for `Custom prices: replaced [gpt-5], added [my-vllm-llama]` in the agent log, and for `price_table_version="2026-10-26+custom-<hash>"` on `honeybeepf_llm_llm_cost_usd_total`. Unknown models should drop out under the new version:
-
-```promql
-sum by (model, price_table_version) (increase(honeybeepf_llm_llm_unpriced_tokens_total{reason="unknown_model"}[1h]))
-```
-
-### Security / file-access metrics
-
-| Metric | Type | Labels |
-|--------|------|--------|
-| `honeybeepf_llm_file_access_events_total` | Counter | `filename`, `flags`, `process`, `cgroup_id`, `target_namespace`, `target_pod_name` |
-
-### Agent metrics
-
-| Metric | Type | Labels |
-|--------|------|--------|
-| `honeybeepf_llm_active_probes` | Gauge | `probe` |
-
-> **Note:** `target_namespace` and `target_pod_name` labels are only populated
-> when the agent is built with the `k8s` feature flag (the Docker image uses
-> this by default).
-
-## Installation
-
-### Option 1 — Import via Grafana UI (simplest)
-
-1. Open Grafana → **Dashboards → New → Import**
-2. Click **Upload JSON file** and select one of the files in this directory
-3. When prompted, choose your Prometheus data source (the dashboards default
-   to a data source named `Prometheus`)
-4. Click **Import**
-
-Repeat for both dashboards.
-
-### Option 2 — ConfigMap + Grafana sidecar (Kubernetes)
-
-If your Grafana is configured with the
-[`grafana-sidecar-dashboards`](https://github.com/kiwigrid/k8s-sidecar)
-pattern (as in the official Grafana Helm chart with
-`sidecar.dashboards.enabled=true`), create a labeled ConfigMap and the
-sidecar will pick up the dashboards automatically:
-
-```bash
-kubectl -n monitoring create configmap honeybeepf-dashboards \
-  --from-file=docs/grafana/honeybeepf-cost.json \
-  --from-file=docs/grafana/honeybeepf-security.json
-
-kubectl -n monitoring label configmap honeybeepf-dashboards \
-  grafana_dashboard=1
-```
-
-Within a minute the sidecar will discover the ConfigMap, and both dashboards
-will appear in Grafana.
-
-### Option 3 — Helm values (for the HoneybeePF chart)
-
-See [`charts/honeybeepf-llm/values.yaml`](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/charts/honeybeepf-llm/values.yaml)
-for the Helm-based deployment. Dashboards can be shipped alongside the chart
-by rendering a ConfigMap from these JSON files.
-
-## Data Source Configuration
-
-Both dashboards use a `$datasource` template variable so they work with any
-Prometheus-compatible backend:
-
-- Prometheus
-- Thanos
-- Mimir
-- VictoriaMetrics
-- Cortex
-
-The default data source name is `Prometheus`. If your data source has a
-different name, select it from the **Datasource** dropdown at the top of
-the dashboard after import.
-
-Rate panels use `$__rate_interval` with a 1m **Min step**, which matches the
-1m scrape interval of `charts/honeybeepf-llm-prometheus`. Without that step,
-and with no Scrape interval set on the data source, Grafana assumes 15s, the
-window shrinks to 1m and holds fewer than two samples, and the panels show
-No data. The step overrides the data source's Scrape interval, so if your
-Prometheus scrapes less often than 1m, raise it to match; if more often, you
-can lower it.
-
-## Updating the dashboards
-
-If you modify a dashboard inside Grafana and want to save the changes back:
-
-1. Open the dashboard
-2. Click the **Share** icon → **Export** tab
-3. Enable **Export for sharing externally**
-4. Click **Save to file** and overwrite the corresponding JSON here
-5. Run a quick sanity check:
-
-```bash
-jq -e . docs/grafana/honeybeepf-cost.json > /dev/null && echo ok
-grep -c VictoriaMetrics docs/grafana/*.json   # should be 0 for both
-```
-
-> **Important:** Before committing an updated JSON, make sure every
-> `"uid": "..."` under any `"datasource"` field is set to `"${datasource}"`
-> — not a hardcoded data source name. Hardcoded UIDs make the dashboard
-> unusable on anyone else's Grafana instance.
-
-## License
-
-These dashboards are distributed under the [Apache License 2.0](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/LICENSE),
-the same license as the rest of the HoneybeePF project.
+The dashboards are under the [Apache License 2.0](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/LICENSE).
