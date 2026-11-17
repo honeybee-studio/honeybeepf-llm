@@ -113,6 +113,8 @@ pub struct TracepointConfig<'a> {
 pub const POLL_INTERVAL_MS: u64 = 10;
 /// How long (ms) a ring-buffer reader blocks in poll() before re-checking the shutdown flag.
 const POLL_WAIT_MS: libc::c_int = 1000;
+/// Most records a reader takes in one pass, so a ring that never empties under load still beats the heartbeat.
+const DRAIN_BATCH: usize = 1024;
 const MAX_EXEC_QUEUE_SIZE: usize = 1024;
 
 /// Shared queue of PIDs from exec events.
@@ -175,9 +177,9 @@ where
     Ok(())
 }
 
-/// Drive a ring reader on its own blocking thread, not a tokio worker. Under load: drain, then sleep
-/// 10 ms so it wakes per batch, not per event. Idle: block on the ring fd with poll(), so no CPU. Every pass
-/// beats the liveness heartbeat, so a reader stuck in its handler stops it.
+/// Drive a ring reader on its own blocking thread, not a tokio worker: up to `DRAIN_BATCH` records a pass,
+/// a 10 ms pause after a partial batch, and poll() on the ring fd when idle. Every pass beats the liveness
+/// heartbeat, so a reader stuck in its handler stops it while one that is merely busy does not.
 fn spawn_ring_loop(
     name: &str,
     mut ring_buf: RingBuf<MapData>,
@@ -189,29 +191,52 @@ fn spawn_ring_loop(
     tokio::task::spawn_blocking(move || {
         while !shutdown.load(Ordering::Relaxed) {
             beat.beat();
-            if drain(&mut ring_buf) > 0 {
-                std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
-            } else {
-                let mut pfd = libc::pollfd {
-                    fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                // SAFETY: one valid pollfd for the duration of the call; poll reads fd/events, writes revents.
-                // The timeout bounds how long an idle reader waits before re-checking the shutdown flag.
-                unsafe {
-                    libc::poll(&mut pfd, 1, POLL_WAIT_MS);
+            match next_pass(drain(&mut ring_buf)) {
+                Pass::Again => {}
+                Pass::Pause => std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS)),
+                Pass::Wait => {
+                    let mut pfd = libc::pollfd {
+                        fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: one valid pollfd for the duration of the call; poll reads fd/events, writes revents.
+                    // The timeout bounds how long an idle reader waits before re-checking the shutdown flag.
+                    unsafe {
+                        libc::poll(&mut pfd, 1, POLL_WAIT_MS);
+                    }
                 }
             }
         }
     });
 }
 
-/// Read every fixed-size record waiting in the ring in place, handing each to `handler` without
-/// copying it out; returns how many were drained (0 means the ring was empty).
+/// What a ring reader does after a pass that took `drained` records.
+#[derive(Debug, PartialEq)]
+enum Pass {
+    /// The batch was full, so more is waiting: take it now.
+    Again,
+    /// Some records: wait a moment so the next pass takes a batch, not one record.
+    Pause,
+    /// The ring was empty: block on its fd until something arrives.
+    Wait,
+}
+
+fn next_pass(drained: usize) -> Pass {
+    match drained {
+        0 => Pass::Wait,
+        n if n >= DRAIN_BATCH => Pass::Again,
+        _ => Pass::Pause,
+    }
+}
+
+/// Read up to `DRAIN_BATCH` fixed-size records waiting in the ring in place, handing each to `handler`
+/// without copying it out; returns how many were drained (0 means the ring was empty).
 fn drain_ring<T: aya::Pod>(ring_buf: &mut RingBuf<MapData>, handler: &mut impl FnMut(&T)) -> usize {
     let mut drained = 0;
-    while let Some(item) = ring_buf.next() {
+    while drained < DRAIN_BATCH
+        && let Some(item) = ring_buf.next()
+    {
         drained += 1;
         if item.len() >= std::mem::size_of::<T>() {
             // SAFETY: BPF ring-buffer records are 8-byte aligned and `T: aya::Pod` (repr(C), every byte
@@ -223,14 +248,16 @@ fn drain_ring<T: aya::Pod>(ring_buf: &mut RingBuf<MapData>, handler: &mut impl F
     drained
 }
 
-/// Drain SSL records, handing each as (header, payload) borrowed in place; returns how many were
-/// drained. A record too short for its header, or shorter than the payload the header claims, is dropped.
+/// Drain up to `DRAIN_BATCH` SSL records, handing each as (header, payload) borrowed in place; returns how
+/// many were drained. A record too short for its header, or shorter than the payload it claims, is dropped.
 fn drain_var(
     ring_buf: &mut RingBuf<MapData>,
     handler: &mut impl FnMut(&LlmEventHeader, &[u8]),
 ) -> usize {
     let mut drained = 0;
-    while let Some(item) = ring_buf.next() {
+    while drained < DRAIN_BATCH
+        && let Some(item) = ring_buf.next()
+    {
         drained += 1;
         if let Some((header, payload)) = parse_llm_record(&item) {
             handler(header, payload);
@@ -430,6 +457,14 @@ mod tests {
     use honeybeepf_llm_common::LlmEvent;
 
     const H: usize = std::mem::size_of::<LlmEventHeader>();
+
+    #[test]
+    fn a_full_batch_is_read_again_at_once_so_a_busy_reader_keeps_beating() {
+        assert_eq!(next_pass(0), Pass::Wait);
+        assert_eq!(next_pass(1), Pass::Pause);
+        assert_eq!(next_pass(DRAIN_BATCH - 1), Pass::Pause);
+        assert_eq!(next_pass(DRAIN_BATCH), Pass::Again);
+    }
 
     fn event(data: &[u8], offset: u32, len: u32) -> LlmEvent {
         let mut ev = LlmEvent::default();
