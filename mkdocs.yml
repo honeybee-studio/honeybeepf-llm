@@ -90,7 +90,7 @@ nav:
       - Quickstart: quickstart.md
       - Try the demo: demo.md
       - Install: install.md
-      - Verify the image and chart: verify.md
+      - Verify the image, chart and binaries: verify.md
       - Build from source: build.md
       - Run without Kubernetes: run-binary.md
   - Concepts:

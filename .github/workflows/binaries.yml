@@ -1,0 +1,96 @@
+name: Binaries
+
+# Host binaries for running without Kubernetes, linked against glibc 2.28 so they run on RHEL 8 and every newer
+# distribution. A release calls this to build, sign and attach them; a pull request that changes it only builds.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Release version, X.Y.Z
+        type: string
+        required: true
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/binaries.yml'
+      - '.github/requirements/requirements.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Binary (${{ matrix.arch }})
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      # Keyless cosign signs each archive with the job's OIDC token.
+      id-token: write
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+    env:
+      VERSION: ${{ inputs.version || 'dev' }}
+      ARCH: ${{ matrix.arch }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: nightly-2026-04-30
+          components: rust-src
+          targets: ${{ matrix.target }}
+
+      - name: Install bpf-linker, zig and cargo-zigbuild
+        run: |
+          cargo install bpf-linker --locked --version 0.10.3
+          cargo install cargo-zigbuild --locked --version 0.24.0
+          python3 -m pip install --user --require-hashes -r .github/requirements/requirements.txt
+
+      - name: Build
+        working-directory: honeybeepf-llm
+        run: cargo zigbuild --release -p honeybeepf-llm --target "$TARGET.2.28"
+
+      - name: Check the glibc it needs
+        run: |
+          bin=honeybeepf-llm/target/$TARGET/release/honeybeepf-llm
+          need=$(objdump -T "$bin" | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1)
+          echo "needs $need"
+          [ "$need" = GLIBC_2.28 ] || { echo "::error::$bin needs $need, not GLIBC_2.28"; exit 1; }
+
+      - name: Package
+        run: |
+          name="honeybeepf-llm-$VERSION-linux-$ARCH"
+          mkdir -p "dist/$name"
+          install -m 0755 "honeybeepf-llm/target/$TARGET/release/honeybeepf-llm" "dist/$name/"
+          cp LICENSE NOTICE "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+
+      - name: Install cosign
+        if: inputs.version != ''
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign
+        if: inputs.version != ''
+        run: |
+          name="honeybeepf-llm-$VERSION-linux-$ARCH.tar.gz"
+          cosign sign-blob --yes --bundle "dist/$name.sigstore.json" "dist/$name"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: binary-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/*.sigstore.json
+          if-no-files-found: error
+          retention-days: 7

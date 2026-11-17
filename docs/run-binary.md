@@ -5,16 +5,35 @@ the metrics carry no namespace, pod or workload labels.
 
 ## 1. Get the binary
 
-[Build it](build.md) for a Linux host, then copy it to the server:
+=== "Download a release"
 
-=== "scp"
+    From v0.4.0, each [release](https://github.com/honeybee-studio/honeybeepf-llm/releases) has binaries for amd64 and
+    arm64 that run on glibc 2.28 or later: RHEL 8, Ubuntu 20.04, Debian 11 and every newer distribution.
+
+    ```bash
+    VERSION=X.Y.Z ARCH=amd64            # or arm64
+    NAME=honeybeepf-llm-$VERSION-linux-$ARCH
+    curl -LO https://github.com/honeybee-studio/honeybeepf-llm/releases/download/v$VERSION/$NAME.tar.gz
+    curl -LO https://github.com/honeybee-studio/honeybeepf-llm/releases/download/v$VERSION/$NAME.tar.gz.sha256
+    sha256sum -c $NAME.tar.gz.sha256
+    tar xzf $NAME.tar.gz
+    sudo install -m 0755 $NAME/honeybeepf-llm /usr/local/bin/honeybeepf-llm
+    ```
+
+    To check that the archive was built by this repository's release workflow, see
+    [Verify the image, chart and binaries](verify.md#binaries).
+
+=== "Build and copy with scp"
+
+    [Build it](build.md) for a Linux host, then copy it to the server:
+
 
     ```bash
     scp target/release/honeybeepf-llm <user>@<server>:/tmp/
     ssh <user>@<server> 'sudo install -m 0755 /tmp/honeybeepf-llm /usr/local/bin/honeybeepf-llm'
     ```
 
-=== "xtask deploy"
+=== "Build with xtask deploy"
 
     Builds, copies and installs to `/usr/local/bin/honeybeepf-llm` (`--path` to change it):
 
@@ -22,7 +41,7 @@ the metrics carry no namespace, pod or workload labels.
     cargo +nightly xtask deploy --host <user>@<server> --release
     ```
 
-=== "Tarball"
+=== "Build a tarball"
 
     ```bash
     cargo +nightly xtask package --output dist
