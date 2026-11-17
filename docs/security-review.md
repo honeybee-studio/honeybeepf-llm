@@ -281,7 +281,7 @@ returning at once for destinations that are not watched. On kernel 7.0 that meas
   using the job's GitHub OIDC token (`id-token: write`, granted only to those jobs and the chart job); `release.yml`
   signs the chart it pushes the same way. The signing identity is the workflow file on this repository, so `cosign
   verify --certificate-identity-regexp '^https://github.com/honeybee-studio/honeybeepf-llm/\.github/workflows/'
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com` checks an image (`docs/install.md` has the
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com` checks an image ([verify](verify.md) has the
   commands). Images and charts published before this was added are not signed.
 - **Binary fixture provenance.** `ci/check-binary-provenance.sh`, run from `docker-publish.yml`, checks that every
   binary test fixture in the repository carries a documented sha256 and regeneration command. This is a check on the

@@ -83,7 +83,12 @@ validation:
 nav:
   - Home: index.md
   - Get started:
+      - Quickstart: quickstart.md
+      - Try the demo: demo.md
       - Install: install.md
+      - Verify the image and chart: verify.md
+      - Build from source: build.md
+  - Concepts:
       - What is supported: providers.md
   - Reference:
       - Metrics: metrics.md

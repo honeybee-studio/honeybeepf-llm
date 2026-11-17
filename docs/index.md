@@ -15,7 +15,7 @@ hide:
 <p class="hb-sub">Your provider sends one total. honeybeepf-llm shows which namespace, pod and model spent it, without
 touching your apps.</p>
 
-[Install with Helm :material-arrow-right:](install.md){ .md-button .md-button--primary }
+[Quickstart :material-arrow-right:](quickstart.md){ .md-button .md-button--primary }
 [GitHub :fontawesome-brands-github:](https://github.com/honeybee-studio/honeybeepf-llm){ .md-button }
 
 <p class="hb-meta">Open source, Apache-2.0 · eBPF DaemonSet for Kubernetes · OpenTelemetry metrics</p>

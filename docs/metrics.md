@@ -70,7 +70,7 @@ Each becomes `target_pod_label_<name>` on every LLM metric, with characters othe
 replaced by `_` (`app.kubernetes.io/version` → `target_pod_label_app_kubernetes_io_version`). A pod without the
 label gets none. Each label multiplies the series by its distinct values, so the list is empty by default.
 
-The Quickstart's Prometheus is the `honeybeepf-llm-prometheus-server` service (port 80) in the `honeybeepf`
+The [bundled Prometheus](install.md) is the `honeybeepf-llm-prometheus-server` service (port 80) in the `honeybeepf`
 namespace. Tokens per minute by namespace:
 
 ```promql

@@ -206,6 +206,6 @@ jobs:
             "" \
             "Chart: \`helm install honeybeepf-llm $CHART_REPO/honeybeepf-llm --version $VERSION\`" \
             "" \
-            "The image and the chart are signed with keyless cosign; see docs/install.md to verify them." >notes.md
+            "The image and the chart are signed with keyless cosign; see docs/verify.md to verify them." >notes.md
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "honeybeepf-llm $VERSION" --notes-file notes.md --generate-notes
