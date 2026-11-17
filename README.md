@@ -6,6 +6,7 @@
 [![Kernel Matrix](https://github.com/honeybee-studio/honeybeepf-llm/actions/workflows/kernel-matrix.yml/badge.svg?branch=main)](https://github.com/honeybee-studio/honeybeepf-llm/actions/workflows/kernel-matrix.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/honeybeepf-llm)](https://artifacthub.io/packages/search?repo=honeybeepf-llm)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/honeybee-studio/honeybeepf-llm/badge)](https://scorecard.dev/viewer/?uri=github.com/honeybee-studio/honeybeepf-llm)
 [![Docs](https://img.shields.io/badge/docs-honeybee--studio.github.io-e8a317)](https://honeybee-studio.github.io/honeybeepf-llm/)
 
 **[Documentation](https://honeybee-studio.github.io/honeybeepf-llm/)** · [Quickstart](https://honeybee-studio.github.io/honeybeepf-llm/quickstart/) · [How it works](https://honeybee-studio.github.io/honeybeepf-llm/how-it-works/) ·

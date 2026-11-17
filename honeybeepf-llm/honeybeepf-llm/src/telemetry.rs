@@ -3,7 +3,7 @@
 //! Exports eBPF metrics collected by honeybeepf-llm to OpenTelemetry Collector.
 //!
 //! ## Metrics Categories
-//! - **Filesystem**: File access auditing
+//! - **LLM**: requests, tokens, latency and cost per pod, workload and model
 //!
 //! ## OTLP Endpoint Priority
 //! 1. Helm values (injected via environment variables)
@@ -97,9 +97,6 @@ static PROVIDER_CONFIG: OnceLock<Vec<KeyValue>> = OnceLock::new();
 
 /// honeybeepf-llm metrics collection
 pub struct HoneyBeeMetrics {
-    pub process_exit_total: Counter<u64>,
-    pub process_lifetime_seconds: Histogram<f64>,
-    pub file_access_events: Counter<u64>,
     pub llm_requests_total: Counter<u64>,
     pub llm_tokens_total: Counter<u64>,
     pub llm_cache_read_tokens_total: Counter<u64>,
@@ -175,21 +172,6 @@ impl HoneyBeeMetrics {
         let (llm_cost_usd_total, llm_cache_savings_ceiling_usd_total, llm_unpriced_tokens_total) =
             Self::cost_counters(meter);
         Self {
-            file_access_events: meter
-                .u64_counter("file_access_events")
-                .with_description("Number of monitored file access events")
-                .with_unit("events")
-                .build(),
-            process_exit_total: meter
-                .u64_counter("process_exit")
-                .with_description("Total number of process exits")
-                .build(),
-            process_lifetime_seconds: meter
-                .f64_histogram("process_lifetime_seconds")
-                .with_description("Process lifetime in seconds")
-                .with_unit("s")
-                .build(),
-
             // === LLM ===
             llm_requests_total: meter
                 .u64_counter("llm_requests_total")
@@ -274,8 +256,6 @@ impl HoneyBeeMetrics {
 
     fn counter_u64(&self, name: &str) -> Option<&Counter<u64>> {
         Some(match name {
-            "file_access_events" => &self.file_access_events,
-            "process_exit_total" => &self.process_exit_total,
             "llm_requests_total" => &self.llm_requests_total,
             "llm_tokens_total" => &self.llm_tokens_total,
             "llm_cache_read_tokens_total" => &self.llm_cache_read_tokens_total,
@@ -716,33 +696,6 @@ pub fn record_active_probe(probe_name: &str, count: u64) {
     }
 }
 
-pub fn record_file_access_event(
-    filename: &str,
-    flags: &str,
-    comm: &str,
-    cgroup_id: u64,
-    #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
-) {
-    if let Some(m) = metrics() {
-        #[allow(unused_mut)]
-        let mut attrs = vec![
-            KeyValue::new("filename", filename.to_string()),
-            KeyValue::new("flags", flags.to_string()),
-            KeyValue::new("process", comm.to_string()),
-            KeyValue::new("cgroup_id", cgroup_id as i64),
-        ];
-
-        #[cfg(feature = "k8s")]
-        if let Some(pod) = pod_info {
-            attrs.push(KeyValue::new("target.namespace", pod.namespace.clone()));
-            attrs.push(KeyValue::new("target.pod.name", pod.pod_name.clone()));
-        }
-
-        m.budget.note("file_access_events", &attrs, 1u64.into());
-        m.file_access_events.add(1, &attrs);
-    }
-}
-
 // Record LLM request metrics
 pub fn record_llm_request(
     usage: &UsageInfo,
@@ -874,19 +827,6 @@ pub fn shutdown_metrics() {
         } else {
             info!("OpenTelemetry metrics shutdown complete");
         }
-    }
-}
-
-pub fn record_process_exit(cause: &str, exit_code: u32, lifetime_secs: f64, cgroup_id: u64) {
-    if let Some(m) = metrics() {
-        let attrs = [
-            KeyValue::new("cause", cause.to_string()),
-            KeyValue::new("exit_code", exit_code.to_string()),
-            KeyValue::new("cgroup_id", cgroup_id.to_string()),
-        ];
-        m.budget.note("process_exit_total", &attrs, 1u64.into());
-        m.process_exit_total.add(1, &attrs);
-        m.process_lifetime_seconds.record(lifetime_secs, &attrs);
     }
 }
 

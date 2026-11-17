@@ -62,22 +62,23 @@ spec:
 
           # The agent rewrites the heartbeat every 10 s only while its ring readers and discovery loop keep
           # turning, so a stale file means a hung agent. Startup allows up to 5 minutes for the BPF load and attach.
+          # The image has no shell, so the agent checks the file's age itself.
           startupProbe:
             exec:
-              command: ["test", "-f", "/run/honeybeepf/heartbeat"]
+              command: ["/usr/local/bin/honeybeepf-llm", "--check-heartbeat"]
             periodSeconds: 5
-            # The default 1 s timeout can expire on a busy node before the shell even starts.
+            # The default 1 s timeout can expire on a busy node before the check even starts.
             timeoutSeconds: 5
             failureThreshold: 60
           livenessProbe:
             exec:
-              command: ["sh", "-c", "[ $(( $(date +%s) - $(stat -c %Y /run/honeybeepf/heartbeat) )) -lt 60 ]"]
+              command: ["/usr/local/bin/honeybeepf-llm", "--check-heartbeat"]
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
             exec:
-              command: ["sh", "-c", "[ $(( $(date +%s) - $(stat -c %Y /run/honeybeepf/heartbeat) )) -lt 60 ]"]
+              command: ["/usr/local/bin/honeybeepf-llm", "--check-heartbeat"]
             periodSeconds: 15
             timeoutSeconds: 5
           env:
