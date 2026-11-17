@@ -8,11 +8,22 @@ struct Opt {
     /// Enable verbose output (sets log level to INFO)
     #[clap(short, long)]
     verbose: bool,
+
+    /// Exit 0 if the heartbeat file was rewritten in the last 60 s, else 1 (the chart's probes; the image has no shell)
+    #[clap(long)]
+    check_heartbeat: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let opt = Opt::parse();
+    if opt.check_heartbeat {
+        std::process::exit(if honeybeepf_llm::health::heartbeat_is_fresh() {
+            0
+        } else {
+            1
+        });
+    }
 
     // Initialize the logging system.
     // It prioritizes the RUST_LOG environment variable.
