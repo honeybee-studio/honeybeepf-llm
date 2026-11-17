@@ -41,7 +41,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install MkDocs
-        run: pip install --no-deps -r docs/requirements.txt
+        run: pip install --require-hashes -r docs/requirements.txt
 
       # --strict fails on a link to a missing page or heading.
       - name: Build

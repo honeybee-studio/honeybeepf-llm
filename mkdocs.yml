@@ -5,8 +5,10 @@ repo_url: https://github.com/honeybee-studio/honeybeepf-llm
 repo_name: honeybee-studio/honeybeepf-llm
 edit_uri: edit/main/docs/
 docs_dir: docs
-# Pins for the docs build in CI, not a page.
-exclude_docs: requirements.txt
+# Pins for the docs build in CI, not pages.
+exclude_docs: |
+  requirements.in
+  requirements.txt
 copyright: Apache License 2.0
 
 theme:
