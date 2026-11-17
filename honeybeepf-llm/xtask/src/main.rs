@@ -278,9 +278,14 @@ fn install_service(host: &str, config: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Capabilities the agent needs, as the chart grants them: NET_ADMIN before Linux 6.9, SYS_RESOURCE before 5.11.
+const AGENT_CAPABILITIES: &str =
+    "CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_NET_ADMIN CAP_SYS_RESOURCE";
+
 fn generate_systemd_service(config: Option<&str>) -> String {
+    // The binary attaches no probe unless BUILTIN_PROBES__LLM is set; an EnvironmentFile line comes later and wins.
     let env_line = config
-        .map(|c| format!("EnvironmentFile={}", c))
+        .map(|c| format!("EnvironmentFile=-{}", c))
         .unwrap_or_default();
 
     format!(
@@ -293,17 +298,18 @@ Type=simple
 ExecStart=/usr/local/bin/honeybeepf-llm
 Restart=on-failure
 RestartSec=5
-{}
+Environment=BUILTIN_PROBES__LLM=true
+Environment=RUST_LOG=info
+{env_line}
 
 # Security hardening
 NoNewPrivileges=no
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_BPF CAP_PERFMON CAP_NET_ADMIN
-AmbientCapabilities=CAP_SYS_ADMIN CAP_BPF CAP_PERFMON CAP_NET_ADMIN
+CapabilityBoundingSet={AGENT_CAPABILITIES}
+AmbientCapabilities={AGENT_CAPABILITIES}
 
 [Install]
 WantedBy=multi-user.target
-"#,
-        env_line
+"#
     )
 }
 
@@ -416,4 +422,51 @@ echo "   Start with: sudo systemctl start honeybeepf-llm"
     println!("✅ Package created: {}", tarball.display());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_turns_the_llm_probe_on_without_a_config_file() {
+        let unit = generate_systemd_service(None);
+        assert!(
+            unit.contains("Environment=BUILTIN_PROBES__LLM=true\n"),
+            "{unit}"
+        );
+        assert!(unit.contains("Environment=RUST_LOG=info\n"), "{unit}");
+    }
+
+    #[test]
+    fn service_config_file_comes_after_the_defaults_so_it_can_override_them() {
+        let unit = generate_systemd_service(Some("/etc/honeybeepf-llm/honeybeepf-llm.env"));
+        let defaults = unit.find("Environment=BUILTIN_PROBES__LLM=true").unwrap();
+        let file = unit
+            .find("EnvironmentFile=-/etc/honeybeepf-llm/honeybeepf-llm.env")
+            .unwrap();
+        assert!(defaults < file, "{unit}");
+    }
+
+    #[test]
+    fn service_keeps_every_capability_the_chart_grants() {
+        let unit = generate_systemd_service(None);
+        for cap in [
+            "BPF",
+            "PERFMON",
+            "SYS_ADMIN",
+            "SYS_PTRACE",
+            "NET_ADMIN",
+            "SYS_RESOURCE",
+        ] {
+            for key in ["CapabilityBoundingSet=", "AmbientCapabilities="] {
+                let line = unit.lines().find(|l| l.starts_with(key)).unwrap();
+                assert!(
+                    line.split_whitespace()
+                        .any(|c| c.ends_with(&format!("CAP_{cap}"))),
+                    "{key} lacks CAP_{cap}"
+                );
+            }
+        }
+    }
 }
