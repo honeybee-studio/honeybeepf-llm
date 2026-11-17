@@ -17,6 +17,7 @@ code or the CI workflows and describes the chart's defaults unless an option is 
 | What leaves the node? | OTLP metrics and log lines. Never request or response bodies, headers or keys. |
 | Listening ports? | None. |
 | In the request path? | No proxy, but the uprobes run in the application's thread on every `SSL_read`/`SSL_write` ([Failure behaviour](#5-failure-behaviour)). |
+| Image? | Chainguard `glibc-dynamic`: glibc, libgcc and CA certificates, no shell or package manager; no known vulnerabilities in a Trivy scan when built. |
 | Signed? | Images (with SBOM and provenance) and the release chart, by keyless cosign, from 0.3.1 ([Supply chain](#7-supply-chain)). |
 
 ## 1. Kernel hooks
@@ -29,14 +30,10 @@ Every program only reads or observes: none changes a syscall result, drops or re
 | LLM, Go | `probe_go_tls_*` | `crypto/tls` `(*Conn).Write`, `Read`, each return of `Read`, and `Close` in Go 1.20+ executables | the same limits | yes (`builtinProbes.llm.executables`) |
 | LLM, discovery | `probe_exec`, `probe_ssl_task_exit`, `probe_lib_open_fentry` (kprobe fallback without BTF) | `sched_process_exec`, `sched_process_exit`, `do_sys_openat2` | pid, `comm`, thread id, opened path | yes |
 | Plaintext | `plaintext_connect4`, `plaintext_sockops`, `plaintext_skmsg`, `plaintext_skskb` | the host's cgroup v2 root and a sockhash | up to 4 KB of a send and 64 KB of a receive on watched sockets | only when a provider sets `plaintext` |
-| Process lifecycle | `honeybeepf_llm_group_exit`, `honeybeepf_llm_process_exit`, `honeybeepf_llm_oom_mark_victim` | `do_group_exit`, `acct_collect`, `oom:mark_victim` | pid, exit code, `comm`, cgroup id, times | no (`BUILTIN_PROBES__PROCESS_LIFECYCLE`) |
-| File access | `sys_enter_openat` | the `openat` syscall | the opened path, matched against at most 128 watched paths | no (`BUILTIN_PROBES__FILESYSTEM__FILE_ACCESS`) |
 
 - **Plaintext programs** act only on sockets to the configured endpoints. `plaintext_connect4` always allows the
   connect and the data programs always return `SK_PASS`; `sk_msg` may linearize a message before copying it, and the
   bytes delivered are unchanged. They need cgroup v2 and Linux 5.10+, else they stay off with a log line.
-- **Process lifecycle**, when on, exports `process_exit` and `process_lifetime_seconds` and logs the process `comm`.
-- **File access**, when on, reads paths, not contents, exports `file_access_events` and logs each open at info level.
 
 <details markdown>
 <summary>Every program, one by one</summary>
@@ -53,10 +50,6 @@ Every program only reads or observes: none changes a syscall result, drops or re
 | `probe_ssl_task_exit` | tracepoint | `sched:sched_process_exit` | clear an exiting thread's in-flight state | thread id |
 | `probe_exec` | tracepoint | `sched:sched_process_exec` | attach SSL probes to new processes | pid, `comm` |
 | `probe_lib_open_fentry` / `probe_lib_open` | fentry, kprobe fallback | `do_sys_openat2` | notice a `libssl.so*` open before its first SSL call | the opened path |
-| `honeybeepf_llm_group_exit` | kprobe | `do_group_exit` | mark an exiting process group | pid/tgid |
-| `honeybeepf_llm_process_exit` | kprobe | `acct_collect` | report a process exit (needs `CONFIG_BSD_PROCESS_ACCT`) | pid/tgid, exit code, `comm`, cgroup id, times |
-| `honeybeepf_llm_oom_mark_victim` | tracepoint | `oom:mark_victim` | attribute an OOM kill | the victim pid |
-| `sys_enter_openat` | tracepoint | `openat` | record opens of watched paths | the opened path |
 | `plaintext_connect4` | cgroup connect4 | host cgroup v2 root | note the task connecting to a watched endpoint | destination IPv4 and port, pid, cgroup |
 | `plaintext_sockops` | sock_ops | host cgroup v2 root | add a watched socket to the sockhash; end its stream on close | the socket 4-tuple |
 | `plaintext_skmsg` | sk_msg | the plaintext sockhash | copy each send | up to 4 KB |
@@ -64,8 +57,7 @@ Every program only reads or observes: none changes a syscall result, drops or re
 
 Where in the code: the uprobe table in `honeybeepf-llm/honeybeepf-llm/src/probes/builtin/llm/mod.rs` and `gotls.rs`,
 the exec and libssl-open attach points in `src/probes/mod.rs`, the eBPF programs under
-`honeybeepf-llm/honeybeepf-llm-ebpf/src/probes/builtin/`, plaintext in `src/plaintext.rs`, file access in
-`src/probes/builtin/file_access.rs`. If `/host/sys/fs/cgroup` is not a cgroup2 mount, the plaintext programs fall back
+`honeybeepf-llm/honeybeepf-llm-ebpf/src/probes/builtin/`, plaintext in `src/plaintext.rs`. If `/host/sys/fs/cgroup` is not a cgroup2 mount, the plaintext programs fall back
 to the agent's own `/sys/fs/cgroup` and see only the agent pod; the log names the path.
 
 </details>
@@ -179,7 +171,7 @@ plaintext capture off, no OTLP export.
 | Chart | requests 50m CPU and 128Mi, limits 1 CPU and 1Gi |
 
 - **Kernel memory is fixed by the map sizes**: ring buffers of 8 MB for TLS, 4 MB for plaintext when on (4 KB off), 1 MB
-  each for process exit and file access and 64 KB each for exec and libssl opens, plus hash maps of up to 65,536 entries.
+  64 KB each for exec and libssl opens, plus hash maps of up to 65,536 entries.
   The extra memory with plaintext on has not been measured.
 - **User-space memory is bounded per connection, not per node.** Each open connection can hold 8 MB of request and 16 MB
   of response (32 MB for HTTP/2), freed after 5 minutes idle. Many concurrent large calls can reach the 1Gi limit and
@@ -204,10 +196,10 @@ agent falls behind, the kernel drops events at the ring buffer (`reserve_fail`) 
 | Event | What happens |
 |---|---|
 | Crash or OOM kill | the kubelet restarts it; metrics stop until it is back; nothing is pinned, so the programs detach |
-| Fatal at startup: loading the BPF object, creating a map (a missing capability, or memlock too low before 5.11), attaching the exec tracepoint, file-access attach errors (more than 128 paths included), process-lifecycle attach errors other than a missing hook | the pod goes into CrashLoopBackOff; applications are unaffected |
-| One library fails to attach, no libssl yet (the agent waits), the task-exit tracepoint or libssl-open watch fails, plaintext capture fails, a lifecycle hook the kernel lacks | logged and skipped |
+| Fatal at startup: loading the BPF object, creating a map (a missing capability, or memlock too low before 5.11), attaching the exec tracepoint | the pod goes into CrashLoopBackOff; applications are unaffected |
+| One library fails to attach, no libssl yet (the agent waits), the task-exit tracepoint or libssl-open watch fails, plaintext capture fails | logged and skipped |
 | An error after programs attach | a shutdown flag stops the reader threads and the process exits with an error line |
-| The agent hangs | `/run/honeybeepf/heartbeat` is rewritten every 10 s only while every reader loop made progress in 30 s; liveness and readiness fail when it is 60 s old and the kubelet restarts the agent. A startup probe allows 5 minutes for the BPF load and attach |
+| The agent hangs | `/run/honeybeepf/heartbeat` is rewritten every 10 s only while every reader loop made progress in 30 s; the probes run `honeybeepf-llm --check-heartbeat`, which fails when it is 60 s old, and the kubelet restarts the agent. A reader takes at most 1,024 records a pass and beats each pass, so a busy agent keeps beating. A startup probe allows 5 minutes for the BPF load and attach |
 
 - **Plaintext capture**, when on, also runs `connect4` on every IPv4 connect and `sock_ops` on every TCP setup on the
   node. On kernel 7.0 that measured about 60 ns per run, 0.6 µs per loopback connection, and no change in connection
@@ -232,8 +224,9 @@ agent falls behind, the kernel drops events at the ring buffer (`reserve_fail`) 
 | | |
 |---|---|
 | GitHub Actions | pinned to full commit SHAs; Dependabot proposes minor and patch updates weekly |
-| Base images | build `rustlang/rust:nightly-trixie` and runtime `debian:trixie-slim`, pinned by digest, updated weekly by Dependabot. `bpf-linker` is pinned; apt packages and `cargo-chef` are not |
-| Dependencies | `cargo audit` on every `Cargo.toml`/`Cargo.lock` change and weekly on `main`; fails on a vulnerability advisory. No `cargo deny` and no image scan in CI |
+| Base images | build `rustlang/rust:nightly-trixie` and runtime `cgr.dev/chainguard/glibc-dynamic` (no shell or package manager; `USER 0:0` because it defaults to a non-root uid), pinned by digest, updated weekly by Dependabot. `bpf-linker` is pinned; apt packages and `cargo-chef` are not |
+| Dependencies | `cargo audit` on every `Cargo.toml`/`Cargo.lock` change and weekly on `main`; fails on a vulnerability advisory. No `cargo deny` |
+| Scanning | Trivy on every image CI builds, failing on a high or critical vulnerability that has a fix, and daily on `latest`, reported under Security; CodeQL (Rust, Python, Actions) through GitHub's default setup; OpenSSF Scorecard weekly, behind the README badge; secret scanning with push protection |
 | Workflow tokens | `contents: read` by default; image and chart jobs get `packages: write`, the release job `contents: write` |
 | Images | `ghcr.io/honeybee-studio/honeybeepf-llm`: `latest` and `sha-<commit>` from `main`, `X.Y.Z` and `X.Y` from release tags. The same repository holds `pr-<number>` images and a `buildcache` tag, so deploy a release tag or digest |
 | Signing | keyless cosign on every pushed image (with SBOM and provenance) and on the release chart, from 0.3.1. [Verify](verify.md) has the commands |
@@ -260,4 +253,4 @@ the workflow writes only from `main`.
 | The agent container runs AppArmor-unconfined; no narrower profile is provided | [2](#2-privileges) |
 | HTTP/2 and non-HTTP TLS in probed processes reach the agent's memory unfiltered | [3](#3-data-handling) |
 | User-space memory has no node-wide cap, so heavy concurrent traffic can OOM-kill the agent | [4](#4-resource-use-per-node) |
-| CI does not scan the published image, and images before 0.3.1 are not signed | [7](#7-supply-chain) |
+| Images before 0.3.1 are not signed | [7](#7-supply-chain) |
