@@ -47,7 +47,7 @@ and the [security review](security-review.md#2-privileges).
 ## Does it work without Kubernetes?
 
 Yes, as a binary on a Linux host, built without the `k8s` feature; the metrics then carry no namespace, pod or
-workload labels. See [Build from source](build.md).
+workload labels. See [Run without Kubernetes](run-binary.md).
 
 ## Where do I report a bug or ask for a provider?
 
