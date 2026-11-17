@@ -150,16 +150,16 @@ wait "$AGENT_PID" 2>/dev/null || true
 kill "$MOCK_PID" 2>/dev/null || true
 
 cat /tmp/boot.log
+sed -i -E 's/\x1b\[[0-9;]*m//g' /tmp/boot.log
 
 # A working kprobe fallback logs the fentry error it replaced; that line is not a failure.
-if grep -v 'libssl open watch: kprobe' /tmp/boot.log | grep -qiE 'panicked|FATAL|verifier|failed to attach|failed to load|failed to create map|drop capability'; then
+if grep -v 'libssl open watch: kprobe' /tmp/boot.log | grep -qiE 'panicked|FATAL|verifier|failed to attach|event="attach_failed"|failed to load|failed to create map|drop capability'; then
   echo "::error::BPF load/attach failure on $(uname -r)"
   exit 1
 fi
 
-grep -qE 'Attaching LLM \(SSL\) probes to detected library' /tmp/boot.log
+grep -qE 'event="attach" kind="libssl"' /tmp/boot.log
 grep -qE 'Active probe registered: llm' /tmp/boot.log
-grep -qE '\[LLM\] Detected HTTP' /tmp/boot.log
 
 # Tokens, not only detection: each call above must be recorded with the mock's exact counts.
 plain=$(sed -E 's/\x1b\[[0-9;]*m//g' /tmp/boot.log)
@@ -175,5 +175,5 @@ fi
 # never silently; a verifier rejection of its programs is already caught by the failure grep above.
 grep -qE 'Plaintext capture (enabled|disabled)' /tmp/boot.log
 if grep -qE 'Plaintext capture disabled' /tmp/boot.log; then
-  grep -qE 'Plaintext capture disabled: (kernel older than 5\.10|no cgroup v2)' /tmp/boot.log
+  grep -qE 'Plaintext capture disabled .*reason="(kernel older than 5\.10|no cgroup v2)' /tmp/boot.log
 fi

@@ -51,6 +51,7 @@ a Collector and the Grafana cost dashboard, and covers uninstall.
 | `builtinProbes.llm.providers` | `[]` | More providers by host, path and usage fields, incl. in-cluster plain HTTP |
 | `builtinProbes.llm.detectByShape` | `false` | Experimental: record OpenAI-shaped calls to hosts no provider lists |
 | `alerts.prometheusRule.enabled`, `alerts.budgets` | off, `{}` | Spend, budget and capture-health alerts as a PrometheusRule ([alerts](https://honeybee-studio.github.io/honeybeepf-llm/alerts/)) |
+| `logFormat` | `text` | `json` writes one JSON object per line; audit events have target `audit` ([logs](https://honeybee-studio.github.io/honeybeepf-llm/guides/logs/)) |
 | `resources` | 50m / 128Mi requested | Sized from the benchmark |
 
 <!-- --8<-- [end:values] -->

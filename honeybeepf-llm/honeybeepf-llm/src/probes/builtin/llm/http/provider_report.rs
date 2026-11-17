@@ -93,7 +93,7 @@ pub fn report_provider_config() {
         .unwrap_or_default();
 
     let (info, warnings) = config_messages(&names, registry.providers.len(), &hash, &notes);
-    log::info!("{info}");
+    crate::audit::providers_loaded(&info, &names.join(","), registry.providers.len(), &hash);
     for warning in warnings {
         log::warn!("{warning}");
     }

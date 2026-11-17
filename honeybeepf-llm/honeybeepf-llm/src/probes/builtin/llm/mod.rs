@@ -26,6 +26,7 @@ use log::debug;
 use log::{info, warn};
 use processor::{CallContext, Outcome, StreamProcessor};
 
+use crate::audit;
 use crate::telemetry::Transport;
 use regex::Regex;
 
@@ -45,7 +46,7 @@ pub use crate::probes::{
 // Timing constants
 const CLEANUP_INTERVAL_SECS: u64 = 30; // How often to run cleanup
 const CONNECTION_RETENTION_SECS: u64 = 300; // Keep idle connections for 5 minutes
-const STATS_LOG_INTERVAL_SECS: u64 = 10; // How often to log event counters (only when changed)
+const STATS_LOG_INTERVAL_SECS: u64 = 60; // How often to log event counters (only when changed)
 
 /// Kernel-side event pipeline counters (LLM_STATS map), set once when the probe attaches.
 static EVENT_STATS: OnceLock<PerCpuArray<MapData, u64>> = OnceLock::new();
@@ -390,18 +391,17 @@ where
 /// Most executables have no TLS code to probe, so only an attach or an error gets a log line.
 fn log_executable(path: &str, id: FileId, result: Result<Option<ExeTls>>) {
     match result {
-        Ok(Some(ExeTls::OpenSsl)) => info!(
-            "Attaching LLM (SSL) probes to executable with built-in OpenSSL: {} (ino {})",
+        Ok(Some(ExeTls::OpenSsl)) => {
+            audit::attach("exe_openssl", path, id.ino(), "built-in OpenSSL")
+        }
+        Ok(Some(ExeTls::Go(version, returns))) => audit::attach(
+            "exe_go",
             path,
-            id.ino()
-        ),
-        Ok(Some(ExeTls::Go(version, returns))) => info!(
-            "Attaching LLM probes to Go executable ({version}, crypto/tls, {returns} Read returns): {} (ino {})",
-            path,
-            id.ino()
+            id.ino(),
+            &format!("{version}, crypto/tls, {returns} Read returns"),
         ),
         Ok(None) => {}
-        Err(e) => warn!("Failed to attach to executable {path}: {e}"),
+        Err(e) => audit::attach_failed(path, &e),
     }
 }
 
@@ -416,16 +416,14 @@ impl DynamicProbe for LlmProbe {
         });
         for (path, id, result) in self.attach_new(bpf, ssl_libs) {
             match result {
-                Ok(true) => info!(
-                    "[Re-discovery] New SSL library found: {} (PID: {}, ino {})",
+                Ok(true) => audit::attach(
+                    "libssl",
                     path,
-                    process_info.pid,
-                    id.ino()
+                    id.ino(),
+                    &format!("loaded later, PID {}", process_info.pid),
                 ),
-                Ok(false) => warn!(
-                    "[Re-discovery] Failed to attach to {path}: SSL_read/SSL_write not exported"
-                ),
-                Err(e) => warn!("[Re-discovery] Failed to attach to {path}: {e}"),
+                Ok(false) => audit::attach_failed(path, &"SSL_read/SSL_write not exported"),
+                Err(e) => audit::attach_failed(path, &e),
             }
         }
 
@@ -550,13 +548,9 @@ impl Probe for LlmProbe {
         let ssl_libs = targets.iter().filter(|path| !path.contains("libcrypto"));
         for (path, id, result) in self.attach_new(bpf, ssl_libs) {
             match result {
-                Ok(true) => info!(
-                    "Attaching LLM (SSL) probes to detected library: {} (ino {})",
-                    path,
-                    id.ino()
-                ),
-                Ok(false) => warn!("Failed to attach to {path}: SSL_read/SSL_write not exported"),
-                Err(e) => warn!("Failed to attach to {path}: {e}"),
+                Ok(true) => audit::attach("libssl", path, id.ino(), ""),
+                Ok(false) => audit::attach_failed(path, &"SSL_read/SSL_write not exported"),
+                Err(e) => audit::attach_failed(path, &e),
             }
         }
 

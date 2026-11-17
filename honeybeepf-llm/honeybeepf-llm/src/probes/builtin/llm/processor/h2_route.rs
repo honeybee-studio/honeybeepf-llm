@@ -26,7 +26,7 @@ impl StreamProcessor {
         if !http::looks_like_http2(&client) {
             return None;
         }
-        info!("[LLM] Detected HTTP/2 (mid-stream join) (PID: {})", ctx.pid);
+        debug!("[LLM] Detected HTTP/2 (mid-stream join) (PID: {})", ctx.pid);
         self.write_buf = Vec::new();
         self.state = ProcessorState::Http2(Box::new(http::H2Conn::new_midjoin()));
         self.h2_gap_client = H2Gap::Resync;
@@ -58,7 +58,7 @@ impl StreamProcessor {
                 let pod_str = fmt_pod(ctx.pod_info.as_ref());
                 #[cfg(not(feature = "k8s"))]
                 let pod_str = "";
-                info!(
+                debug!(
                     "[LLM] Detected HTTP/2: {} (PID: {}){}",
                     path, ctx.pid, pod_str
                 );

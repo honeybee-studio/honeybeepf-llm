@@ -53,7 +53,7 @@ With the built-in table `2026-10-26`, the example above gives (USD per million t
 
 ## Check it
 
-- The agent log names what changed: `Custom prices: replaced [gpt-5], added [my-vllm-llama]`.
+- The agent log names what changed, in the `prices_loaded` audit event: `replaced="gpt-5" added="my-vllm-llama"` ([logs](logs.md)).
 - `price_table_version` on the cost metrics becomes `<built-in version>+custom-<hash>`, so a price change shows as a
   new series.
 - Models that had no price should stop counting as unpriced:

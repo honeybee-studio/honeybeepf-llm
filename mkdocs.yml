@@ -106,6 +106,7 @@ nav:
       - Self-hosted models over plain HTTP: guides/plaintext.md
       - Detect unlisted hosts by shape: guides/detect-by-shape.md
       - Compare workload variants: guides/pod-labels.md
+      - Logs and audit events: guides/logs.md
       - Budgets and alerts: alerts.md
       - Grafana dashboards: grafana/README.md
   - Reference:

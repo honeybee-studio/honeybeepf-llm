@@ -1,4 +1,6 @@
+pub mod audit;
 pub mod health;
+pub mod logging;
 pub mod settings;
 pub mod telemetry;
 
@@ -172,10 +174,12 @@ impl HoneyBeeEngine {
         {
             let specs = plaintext::configured_specs();
             if !specs.is_empty() {
-                let resolver = self.resolver.clone();
+                let (resolver, endpoints) = (self.resolver.clone(), specs.len());
                 match plaintext::start(&mut self.bpf, specs, resolver).await {
-                    Ok(()) => info!("Plaintext capture enabled"),
-                    Err(e) => warn!("Plaintext capture disabled: {e}"),
+                    Ok(cgroup) => {
+                        audit::plaintext_capture_on(&cgroup.display().to_string(), endpoints)
+                    }
+                    Err(e) => audit::plaintext_capture_off(&format!("{e:#}")),
                 }
             }
         }
