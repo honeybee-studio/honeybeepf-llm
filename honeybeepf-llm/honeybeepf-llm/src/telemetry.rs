@@ -3,7 +3,7 @@
 //! Exports eBPF metrics collected by honeybeepf-llm to OpenTelemetry Collector.
 //!
 //! ## Metrics Categories
-//! - **Filesystem**: File access auditing
+//! - **LLM**: requests, tokens, latency and cost per pod, workload and model
 //!
 //! ## OTLP Endpoint Priority
 //! 1. Helm values (injected via environment variables)
