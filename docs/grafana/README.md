@@ -3,6 +3,10 @@
 Pre-built Grafana dashboards for visualizing metrics exported by the
 HoneybeePF eBPF agent via OpenTelemetry → Prometheus.
 
+![LLM Cost Observability dashboard on the demo cluster: token usage, requests and latency by namespace, pod and workload; estimated spend per workload and per model in USD; and Cost-Waste Signals showing the measured cost of refused fallback attempts and the estimated savings from prompt caching, across team-a, team-b and team-c](../images/grafana.png)
+
+The LLM Cost Observability dashboard on the [demo](../demo.md) cluster: a mock provider and fake keys.
+
 ## Dashboards
 
 | File | Title | Panels | Focus |

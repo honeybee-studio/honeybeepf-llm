@@ -11,10 +11,7 @@
 **[Documentation](https://honeybee-studio.github.io/honeybeepf-llm/)** · [Quickstart](https://honeybee-studio.github.io/honeybeepf-llm/quickstart/) · [How it works](https://honeybee-studio.github.io/honeybeepf-llm/how-it-works/) ·
 [What is supported](https://honeybee-studio.github.io/honeybeepf-llm/providers/) · [FAQ](https://honeybee-studio.github.io/honeybeepf-llm/faq/)
 
-![LLM Cost Observability dashboard on the demo cluster: token usage, requests and latency by namespace, pod and workload; estimated spend per workload and per model in USD; and Cost-Waste Signals showing the measured cost of refused fallback attempts and the estimated savings from prompt caching, across team-a, team-b and team-c](docs/images/grafana.png)
-
-<sub>The bundled LLM Cost Observability dashboard on a single-node k3s cluster, built from the charts in this
-repository against a local mock of the provider APIs with fake keys.</sub>
+![honeybeepf-llm: your LLM bill, split by team. A receipt of LLM calls with a subtotal per team: team-b $1.96, team-a $0.85, team-c $0.17, total $2.98](docs/assets/og.png)
 
 - **No app code changed.** SDKs keep calling the real provider; nothing to import, wrap or redeploy.
 - **Off the request path.** ~53 µs of agent CPU per LLM call at 200 calls/s, 32 MB RSS plus 19 MB of BPF maps, and
