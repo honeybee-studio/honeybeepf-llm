@@ -58,9 +58,10 @@ RUN --mount=type=cache,id=cargo-registry-${TARGETARCH},target=/usr/local/cargo/r
     cargo build --release --features k8s --package honeybeepf-llm --target $TARGET_TRIPLE && \
     cp target/$TARGET_TRIPLE/release/honeybeepf-llm /app/honeybeepf-llm-bin
 
-# The agent links only glibc, libm and libgcc_s, which distroless cc ships with CA certificates and nothing else:
-# no shell or package manager, and none of the OS packages a slim Debian image carries.
-FROM gcr.io/distroless/cc-debian13@sha256:809d04afa1be033c441f76bb0051878c342fb76d0ea236bc6dc94b655fa0fbd6 AS runtime
+# The agent links only glibc, libm and libgcc_s. This image holds those and CA certificates, rebuilt daily: no shell,
+# package manager, libstdc++ or OpenSSL. It defaults to uid 65532; the agent's capabilities need uid 0, as before.
+FROM cgr.dev/chainguard/glibc-dynamic@sha256:2c362104c7f7adc37e6bdc87451450ff3834871a6268d930815cbe561493f947 AS runtime
+USER 0:0
 WORKDIR /app
 COPY --from=builder /app/honeybeepf-llm-bin /usr/local/bin/honeybeepf-llm
 
