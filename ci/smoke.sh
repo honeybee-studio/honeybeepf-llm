@@ -18,10 +18,41 @@ openssl req -x509 -newkey rsa:2048 -keyout /tmp/key.pem -out /tmp/cert.pem \
   -days 1 -nodes -subj "/CN=mock" 2>/dev/null
 
 cat > /tmp/mock.py <<'PY'
-import http.server, ssl, socketserver
+# Answers like the providers with known token counts: OpenAI JSON, OpenAI SSE, gzip-encoded OpenAI JSON
+# (X-Smoke-Gzip) and Anthropic Messages with a cache read.
+import gzip, http.server, json, ssl, socketserver
+OPENAI = {"id": "c1", "object": "chat.completion", "model": "gpt-4o",
+          "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+          "usage": {"prompt_tokens": 11, "completion_tokens": 4, "total_tokens": 15}}
+ANTHROPIC = {"id": "m1", "type": "message", "role": "assistant", "model": "claude-test",
+             "content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn",
+             "usage": {"input_tokens": 25, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 0,
+                       "output_tokens": 15}}
+def sse(events):
+    return b"".join(b"data: " + json.dumps(e).encode() + b"\n\n" for e in events) + b"data: [DONE]\n\n"
 class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
     def do_POST(self):
-        self.send_response(401); self.send_header('Content-Length','0'); self.end_headers()
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        ctype, enc = "application/json", None
+        if self.path.endswith("/messages"):
+            data = json.dumps(ANTHROPIC).encode()
+        elif body.get("stream"):
+            ctype = "text/event-stream"
+            chunk = {"id": "c1", "object": "chat.completion.chunk", "model": "gpt-4o"}
+            data = sse([dict(chunk, choices=[{"index": 0, "delta": {"content": "hi"}}]),
+                        dict(chunk, choices=[], usage=OPENAI["usage"])])
+        else:
+            data = json.dumps(OPENAI).encode()
+        if self.headers.get("X-Smoke-Gzip"):
+            data, enc = gzip.compress(data), "gzip"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        if enc:
+            self.send_header("Content-Encoding", enc)
+        self.end_headers()
+        self.wfile.write(data)
     def log_message(self, *_): pass
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 ctx.load_cert_chain('/tmp/cert.pem', '/tmp/key.pem')
@@ -91,16 +122,19 @@ AGENT_PID=$!
 # ~5s for BPF program load + verifier, ~3s for libssl scan / uprobe attach
 sleep 8
 
-for url in \
-  'https://api.openai.com/v1/chat/completions' \
-  'https://api.anthropic.com/v1/messages' \
-  'https://generativelanguage.googleapis.com/v1beta/models'; do
-  curl -sk --http1.1 --max-time 5 -X POST "$url" \
+# One call per case the token check below expects: OpenAI JSON, SSE and gzip, then Anthropic with a cache read.
+call() {
+  curl -sk --http1.1 --max-time 5 -X POST "$1" \
     -H 'Authorization: Bearer fake-test-key' \
     -H 'Content-Type: application/json' \
-    -d '{"model":"test","messages":[{"role":"user","content":"hi"}]}' \
+    "${@:3}" -d "$2" \
     -o /dev/null -w 'curl %{url_effective} -> %{http_code}\n' || true
-done
+}
+CHAT='{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
+call https://api.openai.com/v1/chat/completions "$CHAT"
+call https://api.openai.com/v1/chat/completions '{"model":"gpt-4o","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}'
+call https://api.openai.com/v1/chat/completions "$CHAT" -H 'X-Smoke-Gzip: 1'
+call https://api.anthropic.com/v1/messages '{"model":"claude-test","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}'
 
 sleep 3
 
@@ -126,6 +160,16 @@ fi
 grep -qE 'Attaching LLM \(SSL\) probes to detected library' /tmp/boot.log
 grep -qE 'Active probe registered: llm' /tmp/boot.log
 grep -qE '\[LLM\] Detected HTTP' /tmp/boot.log
+
+# Tokens, not only detection: each call above must be recorded with the mock's exact counts.
+plain=$(sed -E 's/\x1b\[[0-9;]*m//g' /tmp/boot.log)
+openai=$(grep -c 'LLM SUCCESS .*Model: gpt-4o .*Tokens: 15 (Prompt: 11, Compl: 4)' <<<"$plain" || true)
+anthropic=$(grep -c 'LLM SUCCESS .*Model: claude-test .*Tokens: 140 (Prompt: 125, Compl: 15, Cache read: 100, Cache write: 0)' <<<"$plain" || true)
+echo "token check: openai $openai/3 (json, sse, gzip), anthropic $anthropic/1"
+if [ "$openai" -ne 3 ] || [ "$anthropic" -ne 1 ]; then
+  echo "::error::token counts not recorded as expected on $(uname -r)"
+  exit 1
+fi
 
 # Plaintext capture must either enable (cgroup v2 + kernel 5.10+) or disable with a gate reason,
 # never silently; a verifier rejection of its programs is already caught by the failure grep above.

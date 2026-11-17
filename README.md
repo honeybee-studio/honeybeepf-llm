@@ -18,8 +18,8 @@ repository against a local mock of the provider APIs with fake keys.</sub>
 - **11 built-in provider APIs** — OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI, Meta — plus the
   OpenAI-compatible APIs of 25 hosted providers, among them Groq, DeepSeek, Mistral, Together, OpenRouter, Qwen, Kimi,
   GLM, NVIDIA and Hugging Face ([list](docs/providers.md)).
-- **10 kernels in CI** — Linux 5.10 through 7.2 and RHEL 8.10 / 9.6 / 9.7, probes loaded and attached on x86-64
-  (arm64 on 5.15 and 6.1 runs too, not yet required to pass).
+- **12 kernels in CI** — Linux 5.10 through 7.2 and RHEL 8.10 / 9.6 / 9.7 on x86-64, 5.15 and 6.1 on arm64: probes
+  loaded and attached, and token counts checked on each.
 
 honeybeepf-llm is a Rust eBPF agent that runs as a DaemonSet. It attaches uprobes to OpenSSL's `SSL_write` and
 `SSL_read` and to Go's `crypto/tls`, reads the plaintext HTTP of calls to LLM providers, and exports token usage,
@@ -100,8 +100,8 @@ To list the workloads in your cluster whose calls are not seen:
 sum by (target_namespace, target_workload_name, tls) (honeybeepf_llm_llm_tls_coverage_pods{tls!="hooked"}) > 0
 ```
 
-**Kernels.** Linux 5.10 to 7.2 and RHEL 8.10 / 9.6 / 9.7 on x86-64, and 5.15 and 6.1 on arm64 (not yet required to
-pass): CI loads and attaches the probes on each.
+**Kernels.** Linux 5.10 to 7.2 and RHEL 8.10 / 9.6 / 9.7 on x86-64, and 5.15 and 6.1 on arm64: CI loads and attaches
+the probes on each and checks the token counts of OpenAI and Anthropic calls against a local mock.
 
 ## How it works
 

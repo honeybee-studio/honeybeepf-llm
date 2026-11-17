@@ -156,9 +156,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     # Public arm64 runners expose no /dev/kvm, so the guest runs under slow TCG
-    # emulation (the "Report KVM" step confirms this per run). The lanes are
-    # non-blocking until a green run lets us make them required and update the README.
-    continue-on-error: true
+    # emulation (the "Report KVM" step confirms this per run); the lanes are required.
     strategy:
       fail-fast: false
       matrix:

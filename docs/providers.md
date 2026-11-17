@@ -134,9 +134,10 @@ to the later poll that carries its usage over HTTP/2 as well as HTTP/1.1. Node.j
 undici 8), so the official OpenAI and Anthropic Node SDKs now record with no change, checked with Node.js 26.13.0,
 `openai` 7.39.0 and `@anthropic-ai/sdk` 0.135.0, JSON and streaming.
 
-**Kernels:** CI loads and attaches the probes and detects an LLM request on 5.10, 5.15, 6.1, 6.6, 6.12, 6.18
-and 7.2, and on the RHEL 8.10 (4.18), 9.6 and 9.7 (5.14) kernels
-([kernel matrix](../.github/workflows/kernel-matrix.yml)); other RHEL minor releases are not tested. Token counts
-are checked on Linux 7.0 (the tables above).
+**Kernels:** CI loads and attaches the probes and records exact token counts (OpenAI JSON, streaming and gzip,
+and Anthropic with a cache read, against a local mock) on 5.10, 5.15, 6.1, 6.6, 6.12, 6.18 and 7.2, on the
+RHEL 8.10 (4.18), 9.6 and 9.7 (5.14) kernels, and on 5.15 and 6.1 on arm64
+([kernel matrix](../.github/workflows/kernel-matrix.yml)); other RHEL minor releases are not tested. The full
+provider and runtime tables above are checked on Linux 7.0.
 
 **Overhead:** CPU, memory, latency and accuracy under load are measured in [docs/benchmark.md](benchmark.md).
