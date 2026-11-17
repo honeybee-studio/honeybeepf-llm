@@ -4,9 +4,8 @@ pub const MAX_SSL_BUF_SIZE: usize = 4096;
 /// Events one SSL call is split into; 4 x 4 KB covers a full 16 KB TLS record.
 pub const MAX_SSL_FRAGMENTS: usize = 4;
 pub const MAX_SSL_CAPTURE: usize = MAX_SSL_BUF_SIZE * MAX_SSL_FRAGMENTS;
-/// Events one plaintext receive is split into: the receive is one skb, up to about 64 KB on
-/// loopback or after GRO, so 16 x 4 KB covers it.
-pub const PLAIN_RECV_FRAGMENTS: usize = 16;
+/// A plaintext receive is one skb, up to about 64 KB on loopback or after GRO, captured in one record.
+pub const PLAIN_RECV_CAPTURE: usize = 64 * 1024;
 
 /// Key into the plaintext endpoint map: destination IPv4 and port in network byte order, so the
 /// kernel (`remote_ip4` is already network order, port via [`sock_ops_remote_port`]) and userspace
@@ -222,7 +221,7 @@ pub fn capture_limit(dir: LlmDirection) -> usize {
 /// Bytes the plaintext programs capture of one call: a whole receive skb, the first bucket of a send.
 pub fn plain_capture_limit(dir: LlmDirection) -> usize {
     match dir {
-        LlmDirection::Read => MAX_SSL_BUF_SIZE * PLAIN_RECV_FRAGMENTS,
+        LlmDirection::Read => PLAIN_RECV_CAPTURE,
         _ => MAX_SSL_BUF_SIZE,
     }
 }
@@ -246,17 +245,14 @@ pub struct LlmEventHeader {
 }
 
 impl LlmEventHeader {
-    /// Payload bytes this fragment carries in `buf`, from the capture window; 0 when `buf_filled` is 0.
-    pub fn payload_len(&self) -> usize {
+    /// Payload bytes this fragment carries in a buffer of `capacity` bytes, from the capture window;
+    /// 0 when `buf_filled` is 0.
+    pub fn payload_len(&self, capacity: usize) -> usize {
         if self.buf_filled == 0 {
             return 0;
         }
         let avail = self.len.saturating_sub(self.offset) as usize;
-        if avail < MAX_SSL_BUF_SIZE {
-            avail
-        } else {
-            MAX_SSL_BUF_SIZE
-        }
+        if avail < capacity { avail } else { capacity }
     }
 }
 
@@ -284,7 +280,7 @@ impl Default for LlmEvent {
 impl LlmEvent {
     /// The payload bytes in `buf`, sized by the header's capture window.
     pub fn payload(&self) -> &[u8] {
-        &self.buf[..self.header.payload_len()]
+        &self.buf[..self.header.payload_len(self.buf.len())]
     }
 }
 
@@ -466,5 +462,23 @@ mod tests {
                 PLAIN_CONNS_ENTRIES
             ),
         );
+    }
+
+    #[test]
+    fn payload_len_is_bounded_by_the_buffer_it_is_read_from() {
+        let header = |len, offset| LlmEventHeader {
+            len,
+            offset,
+            buf_filled: 1,
+            ..LlmEventHeader::default()
+        };
+        // A 30 KB plaintext receive in one record: the 32 KB bucket bounds it, not one SSL buffer.
+        assert_eq!(header(30 * 1024, 0).payload_len(32 * 1024), 30 * 1024);
+        // An SSL call past one buffer: each 4 KB fragment carries one buffer.
+        assert_eq!(
+            header(40 * 1024, 4096).payload_len(MAX_SSL_BUF_SIZE),
+            MAX_SSL_BUF_SIZE
+        );
+        assert_eq!(LlmEventHeader::default().payload_len(MAX_SSL_BUF_SIZE), 0);
     }
 }
