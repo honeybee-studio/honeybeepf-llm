@@ -58,9 +58,10 @@ RUN --mount=type=cache,id=cargo-registry-${TARGETARCH},target=/usr/local/cargo/r
     cargo build --release --features k8s --package honeybeepf-llm --target $TARGET_TRIPLE && \
     cp target/$TARGET_TRIPLE/release/honeybeepf-llm /app/honeybeepf-llm-bin
 
-FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS runtime
-RUN --mount=type=cache,target=/var/cache/apt \
-    apt-get update && apt-get install -y libelf1 ca-certificates
+# The agent links only glibc, libm and libgcc_s. This image holds those and CA certificates, rebuilt daily: no shell,
+# package manager, libstdc++ or OpenSSL. It defaults to uid 65532; the agent's capabilities need uid 0, as before.
+FROM cgr.dev/chainguard/glibc-dynamic@sha256:2c362104c7f7adc37e6bdc87451450ff3834871a6268d930815cbe561493f947 AS runtime
+USER 0:0
 WORKDIR /app
 COPY --from=builder /app/honeybeepf-llm-bin /usr/local/bin/honeybeepf-llm
 
