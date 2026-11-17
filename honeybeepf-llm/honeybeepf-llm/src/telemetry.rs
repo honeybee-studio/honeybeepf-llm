@@ -577,14 +577,15 @@ fn build_provider(endpoint: &str) -> Result<SdkMeterProvider> {
         .build()
         .context("Failed to create OTLP metric exporter")?;
 
-    let reader = PeriodicReader::builder(exporter, opentelemetry_sdk::runtime::Tokio)
+    let reader = PeriodicReader::builder(exporter)
         .with_interval(Duration::from_secs(METRIC_EXPORT_INTERVAL_SECS))
         .build();
 
-    let resource = Resource::default().merge(&Resource::new(vec![
-        KeyValue::new("service.name", "honeybeepf-llm"),
-        KeyValue::new("telemetry.sdk.language", "rust"),
-    ]));
+    // The default detectors keep the SDK attributes and OTEL_RESOURCE_ATTRIBUTES (node and pod names).
+    let resource = Resource::builder()
+        .with_service_name("honeybeepf-llm")
+        .with_attribute(KeyValue::new("telemetry.sdk.language", "rust"))
+        .build();
 
     Ok(SdkMeterProvider::builder()
         .with_reader(reader)

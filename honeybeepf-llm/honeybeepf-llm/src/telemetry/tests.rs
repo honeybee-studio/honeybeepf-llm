@@ -1,11 +1,10 @@
 use super::prices::reload_prices;
 use super::*;
 use opentelemetry::metrics::MeterProvider;
-use opentelemetry_sdk::metrics::data::{self, ResourceMetrics};
+use opentelemetry_sdk::error::OTelSdkResult;
+use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics};
 use opentelemetry_sdk::metrics::reader::MetricReader;
-use opentelemetry_sdk::metrics::{
-    InstrumentKind, ManualReader, MetricResult, Pipeline, Temporality,
-};
+use opentelemetry_sdk::metrics::{InstrumentKind, ManualReader, Pipeline, Temporality};
 use serial_test::serial;
 
 #[cfg(feature = "k8s")]
@@ -118,18 +117,115 @@ impl MetricReader for SharedReader {
     fn register_pipeline(&self, pipeline: std::sync::Weak<Pipeline>) {
         self.0.register_pipeline(pipeline);
     }
-    fn collect(&self, rm: &mut ResourceMetrics) -> MetricResult<()> {
+    fn collect(&self, rm: &mut ResourceMetrics) -> OTelSdkResult {
         self.0.collect(rm)
     }
-    fn force_flush(&self) -> MetricResult<()> {
+    fn force_flush(&self) -> OTelSdkResult {
         self.0.force_flush()
     }
-    fn shutdown(&self) -> MetricResult<()> {
-        self.0.shutdown()
+    fn shutdown_with_timeout(&self, timeout: std::time::Duration) -> OTelSdkResult {
+        self.0.shutdown_with_timeout(timeout)
     }
     fn temporality(&self, kind: InstrumentKind) -> Temporality {
         self.0.temporality(kind)
     }
+}
+
+/// One series of a collected metric.
+#[derive(Debug)]
+struct Point<T> {
+    attributes: Vec<KeyValue>,
+    value: T,
+}
+
+#[derive(Debug)]
+struct HistPoint {
+    attributes: Vec<KeyValue>,
+    bounds: Vec<f64>,
+    bucket_counts: Vec<u64>,
+}
+
+#[derive(Debug)]
+struct Series<P> {
+    data_points: Vec<P>,
+}
+
+/// The metrics a reader collected, copied out of the SDK's types by name.
+#[derive(Default)]
+struct Collected {
+    sums_u64: HashMap<String, Series<Point<u64>>>,
+    sums_f64: HashMap<String, Series<Point<f64>>>,
+    gauges_u64: HashMap<String, Series<Point<u64>>>,
+    histograms_f64: HashMap<String, Series<HistPoint>>,
+}
+
+impl Collected {
+    fn sum_u64(&self, name: &str) -> Option<&Series<Point<u64>>> {
+        self.sums_u64.get(name)
+    }
+    fn sum_f64(&self, name: &str) -> Option<&Series<Point<f64>>> {
+        self.sums_f64.get(name)
+    }
+    fn gauge_u64(&self, name: &str) -> Option<&Series<Point<u64>>> {
+        self.gauges_u64.get(name)
+    }
+    fn histogram_f64(&self, name: &str) -> Option<&Series<HistPoint>> {
+        self.histograms_f64.get(name)
+    }
+}
+
+fn collect(reader: &SharedReader) -> Result<Collected> {
+    let mut rm = ResourceMetrics::default();
+    reader.collect(&mut rm)?;
+    let mut out = Collected::default();
+    for m in rm.scope_metrics().flat_map(|s| s.metrics()) {
+        let name = m.name().to_string();
+        match m.data() {
+            AggregatedMetrics::U64(MetricData::Sum(sum)) => {
+                let data_points = sum
+                    .data_points()
+                    .map(|p| Point {
+                        attributes: p.attributes().cloned().collect(),
+                        value: p.value(),
+                    })
+                    .collect();
+                out.sums_u64.insert(name, Series { data_points });
+            }
+            AggregatedMetrics::F64(MetricData::Sum(sum)) => {
+                let data_points = sum
+                    .data_points()
+                    .map(|p| Point {
+                        attributes: p.attributes().cloned().collect(),
+                        value: p.value(),
+                    })
+                    .collect();
+                out.sums_f64.insert(name, Series { data_points });
+            }
+            AggregatedMetrics::U64(MetricData::Gauge(gauge)) => {
+                let data_points = gauge
+                    .data_points()
+                    .map(|p| Point {
+                        attributes: p.attributes().cloned().collect(),
+                        value: p.value(),
+                    })
+                    .collect();
+                out.gauges_u64.insert(name, Series { data_points });
+            }
+            AggregatedMetrics::F64(MetricData::Histogram(hist)) => {
+                let data_points = hist
+                    .data_points()
+                    .map(|p| HistPoint {
+                        attributes: p.attributes().cloned().collect(),
+                        bounds: p.bounds().collect(),
+                        bucket_counts: p.bucket_counts().collect(),
+                    })
+                    .collect();
+                out.histograms_f64.insert(name, Series { data_points });
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 #[test]
@@ -141,17 +237,10 @@ fn provider_config_info_is_one_series_with_the_config_labels() -> Result<()> {
         .build();
     register_provider_config_info(&provider.meter("test"), &LABELS);
     let collect = || -> Result<Vec<(u64, Vec<String>)>> {
-        let mut rm = ResourceMetrics {
-            resource: Resource::empty(),
-            scope_metrics: vec![],
-        };
-        reader.collect(&mut rm)?;
+        let rm = collect(&reader)?;
         Ok(rm
-            .scope_metrics
-            .iter()
-            .flat_map(|s| &s.metrics)
-            .filter(|m| m.name == "llm_provider_config_info")
-            .filter_map(|m| m.data.as_any().downcast_ref::<data::Gauge<u64>>())
+            .gauge_u64("llm_provider_config_info")
+            .into_iter()
             .flat_map(|g| &g.data_points)
             .map(|p| {
                 let mut labels: Vec<String> = p
@@ -195,17 +284,9 @@ fn llm_latency_uses_second_scale_buckets() -> Result<()> {
         metrics.llm_latency_seconds.record(secs, &[]);
     }
 
-    let mut rm = ResourceMetrics {
-        resource: Resource::empty(),
-        scope_metrics: vec![],
-    };
-    reader.collect(&mut rm)?;
+    let rm = collect(&reader)?;
     let hist = rm
-        .scope_metrics
-        .iter()
-        .flat_map(|s| &s.metrics)
-        .find(|m| m.name == "llm_latency_seconds")
-        .and_then(|m| m.data.as_any().downcast_ref::<data::Histogram<f64>>())
+        .histogram_f64("llm_latency_seconds")
         .context("llm_latency_seconds histogram not collected")?;
     let point = &hist.data_points[0];
 
@@ -243,18 +324,10 @@ fn llm_reasoning_tokens_are_a_subset_and_skip_errors() -> Result<()> {
     metrics.record_llm(&usage, 1.0, false, Transport::Tls, vec![]);
     metrics.record_llm(&usage, 1.0, true, Transport::Tls, vec![]);
 
-    let mut rm = ResourceMetrics {
-        resource: Resource::empty(),
-        scope_metrics: vec![],
-    };
-    reader.collect(&mut rm)?;
+    let rm = collect(&reader)?;
     let total = |name: &str| -> Result<u64> {
         let sum = rm
-            .scope_metrics
-            .iter()
-            .flat_map(|s| &s.metrics)
-            .find(|m| m.name == name)
-            .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
+            .sum_u64(name)
             .with_context(|| format!("{name} counter not collected"))?;
         Ok(sum.data_points.iter().map(|p| p.value).sum())
     };
@@ -288,30 +361,21 @@ fn llm_tokens_split_by_modality_with_text_as_the_remainder() -> Result<()> {
     };
     metrics.record_llm(&usage, 1.0, false, Transport::Tls, vec![]);
 
-    let mut rm = ResourceMetrics {
-        resource: Resource::empty(),
-        scope_metrics: vec![],
-    };
-    reader.collect(&mut rm)?;
+    let rm = collect(&reader)?;
     let attr = |a: &[KeyValue], k: &str| {
         a.iter()
             .find(|kv| kv.key.as_str() == k)
             .map(|kv| kv.value.to_string())
     };
     let by = |token_type: &str, modality: &str| -> u64 {
-        rm.scope_metrics
-            .iter()
-            .flat_map(|s| &s.metrics)
-            .find(|m| m.name == "llm_tokens_total")
-            .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
-            .map_or(0, |sum| {
-                sum.data_points
-                    .iter()
-                    .filter(|p| attr(&p.attributes, "token_type").as_deref() == Some(token_type))
-                    .filter(|p| attr(&p.attributes, "modality").as_deref() == Some(modality))
-                    .map(|p| p.value)
-                    .sum()
-            })
+        rm.sum_u64("llm_tokens_total").map_or(0, |sum| {
+            sum.data_points
+                .iter()
+                .filter(|p| attr(&p.attributes, "token_type").as_deref() == Some(token_type))
+                .filter(|p| attr(&p.attributes, "modality").as_deref() == Some(modality))
+                .map(|p| p.value)
+                .sum()
+        })
     };
     // text is the remainder, and the modality series sum back to each total.
     let prompt = (
@@ -368,17 +432,9 @@ fn llm_fallback_bills_each_attempt_under_its_model_without_a_second_request() ->
         },
     );
 
-    let mut rm = ResourceMetrics {
-        resource: Resource::empty(),
-        scope_metrics: vec![],
-    };
-    reader.collect(&mut rm)?;
+    let rm = collect(&reader)?;
     let points = |name: &str| -> Vec<(Vec<(String, String)>, u64)> {
-        rm.scope_metrics
-            .iter()
-            .flat_map(|s| &s.metrics)
-            .find(|m| m.name == name)
-            .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
+        rm.sum_u64(name)
             .map(|sum| {
                 sum.data_points
                     .iter()
@@ -448,11 +504,7 @@ fn llm_fallback_attempt_label_separates_declined_tokens_from_served() -> Result<
         },
     );
 
-    let mut rm = ResourceMetrics {
-        resource: Resource::empty(),
-        scope_metrics: vec![],
-    };
-    reader.collect(&mut rm)?;
+    let rm = collect(&reader)?;
     let get = |key: &str, attrs: &[KeyValue]| {
         attrs
             .iter()
@@ -461,19 +513,14 @@ fn llm_fallback_attempt_label_separates_declined_tokens_from_served() -> Result<
     };
     // Prompt tokens by attempt: served carries the served call, declined the fallback attempt.
     let prompt_by_attempt = |want: &str| -> u64 {
-        rm.scope_metrics
-            .iter()
-            .flat_map(|s| &s.metrics)
-            .find(|m| m.name == "llm_tokens_total")
-            .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
-            .map_or(0, |sum| {
-                sum.data_points
-                    .iter()
-                    .filter(|p| get("token_type", &p.attributes).as_deref() == Some("prompt"))
-                    .filter(|p| get("attempt", &p.attributes).as_deref() == Some(want))
-                    .map(|p| p.value)
-                    .sum()
-            })
+        rm.sum_u64("llm_tokens_total").map_or(0, |sum| {
+            sum.data_points
+                .iter()
+                .filter(|p| get("token_type", &p.attributes).as_deref() == Some("prompt"))
+                .filter(|p| get("attempt", &p.attributes).as_deref() == Some(want))
+                .map(|p| p.value)
+                .sum()
+        })
     };
     // Distinct series, so a dashboard can read a declined attempt's tokens on their own
     // rather than summed into the served call to the same model.
@@ -482,11 +529,7 @@ fn llm_fallback_attempt_label_separates_declined_tokens_from_served() -> Result<
     // The declined attempt's cost lands on its own attempt="declined" row, not inside
     // the served model's cost.
     let cost_attempts: std::collections::BTreeSet<String> = rm
-        .scope_metrics
-        .iter()
-        .flat_map(|s| &s.metrics)
-        .find(|m| m.name == "llm_cost_usd_total")
-        .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<f64>>())
+        .sum_f64("llm_cost_usd_total")
         .map(|sum| {
             sum.data_points
                 .iter()
@@ -536,17 +579,9 @@ fn llm_suppressed_fallback_attempt_records_tokens_but_no_cost() -> Result<()> {
         },
     );
 
-    let mut rm = ResourceMetrics {
-        resource: Resource::empty(),
-        scope_metrics: vec![],
-    };
-    reader.collect(&mut rm)?;
+    let rm = collect(&reader)?;
     let models = |name: &str| -> Vec<String> {
-        rm.scope_metrics
-            .iter()
-            .flat_map(|s| &s.metrics)
-            .find(|m| m.name == name)
-            .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<f64>>())
+        rm.sum_f64(name)
             .map(|sum| {
                 sum.data_points
                     .iter()
@@ -580,17 +615,9 @@ fn llm_unparsed_calls_are_counted_by_reason() -> Result<()> {
     metrics.record_unparsed("next_request", pod());
     metrics.record_unparsed("next_request", pod());
 
-    let mut rm = ResourceMetrics {
-        resource: Resource::empty(),
-        scope_metrics: vec![],
-    };
-    reader.collect(&mut rm)?;
+    let rm = collect(&reader)?;
     let sum = rm
-        .scope_metrics
-        .iter()
-        .flat_map(|s| &s.metrics)
-        .find(|m| m.name == "llm_responses_unparsed_total")
-        .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
+        .sum_u64("llm_responses_unparsed_total")
         .context("llm_responses_unparsed_total counter not collected")?;
     let mut points: Vec<(Vec<String>, u64)> = sum
         .data_points
@@ -652,11 +679,7 @@ fn llm_operation_label_is_on_requests_tokens_latency_only() -> Result<()> {
     metrics.record_llm(&chat, 1.0, false, Transport::Tls, vec![]);
     metrics.record_llm(&embeddings, 1.0, false, Transport::Tls, vec![]);
 
-    let mut rm = ResourceMetrics {
-        resource: Resource::empty(),
-        scope_metrics: vec![],
-    };
-    reader.collect(&mut rm)?;
+    let rm = collect(&reader)?;
     let label = |attrs: &[KeyValue], key: &str| {
         attrs
             .iter()
@@ -664,11 +687,7 @@ fn llm_operation_label_is_on_requests_tokens_latency_only() -> Result<()> {
             .map(|kv| kv.value.to_string())
     };
     let u64_ops = |name: &str| -> std::collections::BTreeSet<Option<String>> {
-        rm.scope_metrics
-            .iter()
-            .flat_map(|s| &s.metrics)
-            .find(|m| m.name == name)
-            .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
+        rm.sum_u64(name)
             .map(|sum| {
                 sum.data_points
                     .iter()
@@ -686,11 +705,7 @@ fn llm_operation_label_is_on_requests_tokens_latency_only() -> Result<()> {
 
     // Latency is a histogram and also carries operation.
     let latency_ops: std::collections::BTreeSet<Option<String>> = rm
-        .scope_metrics
-        .iter()
-        .flat_map(|s| &s.metrics)
-        .find(|m| m.name == "llm_latency_seconds")
-        .and_then(|m| m.data.as_any().downcast_ref::<data::Histogram<f64>>())
+        .histogram_f64("llm_latency_seconds")
         .map(|h| {
             h.data_points
                 .iter()
@@ -712,17 +727,11 @@ fn llm_operation_label_is_on_requests_tokens_latency_only() -> Result<()> {
         assert_eq!(u64_ops(name), only_none, "{name} must not carry operation");
     }
     // Cost (f64 sum) must not carry operation either.
-    let cost_has_op = rm
-        .scope_metrics
-        .iter()
-        .flat_map(|s| &s.metrics)
-        .find(|m| m.name == "llm_cost_usd_total")
-        .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<f64>>())
-        .is_some_and(|sum| {
-            sum.data_points
-                .iter()
-                .any(|p| label(&p.attributes, "operation").is_some())
-        });
+    let cost_has_op = rm.sum_f64("llm_cost_usd_total").is_some_and(|sum| {
+        sum.data_points
+            .iter()
+            .any(|p| label(&p.attributes, "operation").is_some())
+    });
     assert!(!cost_has_op, "cost must not carry operation");
     Ok(())
 }
@@ -752,29 +761,16 @@ fn llm_cost_is_priced_per_call_and_unknown_models_stay_unpriced() -> Result<()> 
     metrics.record_llm(&priced, 1.0, true, Transport::Tls, vec![]);
     metrics.record_llm(&unknown, 1.0, false, Transport::Tls, vec![]);
 
-    let mut rm = ResourceMetrics {
-        resource: Resource::empty(),
-        scope_metrics: vec![],
-    };
-    reader.collect(&mut rm)?;
-    let find = |name: &str| {
-        rm.scope_metrics
-            .iter()
-            .flat_map(|s| &s.metrics)
-            .find(|m| m.name == name)
-            .with_context(|| format!("{name} not collected"))
-    };
+    let rm = collect(&reader)?;
     let label = |attrs: &[KeyValue], key: &str| {
         attrs
             .iter()
             .find(|kv| kv.key.as_str() == key)
             .map(|kv| kv.value.to_string())
     };
-    let cost = find("llm_cost_usd_total")?
-        .data
-        .as_any()
-        .downcast_ref::<data::Sum<f64>>()
-        .context("llm_cost_usd_total is not an f64 sum")?;
+    let cost = rm
+        .sum_f64("llm_cost_usd_total")
+        .context("llm_cost_usd_total not collected")?;
     // gpt-5, error call not billed: 200×$1.25 + 1000×$0.125 + 800×$10 per million.
     let mut parts: Vec<(Option<String>, f64)> = cost
         .data_points
@@ -796,11 +792,9 @@ fn llm_cost_is_priced_per_call_and_unknown_models_stay_unpriced() -> Result<()> 
             label(&p.attributes, "price_table_version").as_deref() == Some("2026-11-14")
         })
     );
-    let unpriced = find("llm_unpriced_tokens_total")?
-        .data
-        .as_any()
-        .downcast_ref::<data::Sum<u64>>()
-        .context("llm_unpriced_tokens_total is not a u64 sum")?;
+    let unpriced = rm
+        .sum_u64("llm_unpriced_tokens_total")
+        .context("llm_unpriced_tokens_total not collected")?;
     let points: Vec<_> = unpriced
         .data_points
         .iter()
@@ -825,17 +819,9 @@ fn llm_cache_savings_ceiling_is_emitted_with_the_cache_price_basis() -> Result<(
     };
     metrics.record_llm(&usage, 1.0, false, Transport::Tls, vec![]);
 
-    let mut rm = ResourceMetrics {
-        resource: Resource::empty(),
-        scope_metrics: vec![],
-    };
-    reader.collect(&mut rm)?;
+    let rm = collect(&reader)?;
     let ceiling = rm
-        .scope_metrics
-        .iter()
-        .flat_map(|s| &s.metrics)
-        .find(|m| m.name == "llm_cache_savings_ceiling_usd_total")
-        .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<f64>>())
+        .sum_f64("llm_cache_savings_ceiling_usd_total")
         .context("ceiling counter not collected")?;
     let point = ceiling.data_points.first().context("one ceiling point")?;
     assert_eq!((point.value * 1e6).round(), 4500.0);
@@ -872,17 +858,9 @@ fn llm_cache_savings_ceiling_skips_unpriced_calls_and_flags_assumed_free() -> Re
     };
     metrics.record_llm(&unpriced, 1.0, false, Transport::Tls, vec![]);
 
-    let mut rm = ResourceMetrics {
-        resource: Resource::empty(),
-        scope_metrics: vec![],
-    };
-    reader.collect(&mut rm)?;
+    let rm = collect(&reader)?;
     let ceiling = rm
-        .scope_metrics
-        .iter()
-        .flat_map(|s| &s.metrics)
-        .find(|m| m.name == "llm_cache_savings_ceiling_usd_total")
-        .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<f64>>())
+        .sum_f64("llm_cache_savings_ceiling_usd_total")
         .context("ceiling counter not collected")?;
     assert_eq!(
         ceiling.data_points.len(),
@@ -918,19 +896,8 @@ fn llm_cache_savings_ceiling_excludes_priced_embeddings() -> Result<()> {
             .build();
         let metrics = HoneyBeeMetrics::new(&provider.meter("test"), load_prices(None));
         metrics.record_llm(usage, 1.0, false, Transport::Tls, vec![]);
-        let mut rm = ResourceMetrics {
-            resource: Resource::empty(),
-            scope_metrics: vec![],
-        };
-        reader.collect(&mut rm)?;
-        let points = |name: &str| {
-            rm.scope_metrics
-                .iter()
-                .flat_map(|s| &s.metrics)
-                .find(|m| m.name == name)
-                .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<f64>>())
-                .map_or(0, |s| s.data_points.len())
-        };
+        let rm = collect(&reader)?;
+        let points = |name: &str| rm.sum_f64(name).map_or(0, |s| s.data_points.len());
         Ok((
             points("llm_cost_usd_total"),
             points("llm_cache_savings_ceiling_usd_total"),
@@ -1102,17 +1069,9 @@ fn llm_cost_after_a_reload_has_the_new_price_and_version() -> Result<()> {
     reload_prices(&metrics.prices, &mut file);
     metrics.record_llm(&vllm_call(), 1.0, false, Transport::Tls, vec![]);
 
-    let mut rm = ResourceMetrics {
-        resource: Resource::empty(),
-        scope_metrics: vec![],
-    };
-    reader.collect(&mut rm)?;
+    let rm = collect(&reader)?;
     let cost = rm
-        .scope_metrics
-        .iter()
-        .flat_map(|s| &s.metrics)
-        .find(|m| m.name == "llm_cost_usd_total")
-        .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<f64>>())
+        .sum_f64("llm_cost_usd_total")
         .context("llm_cost_usd_total counter not collected")?;
     let mut points: Vec<(f64, String)> = cost
         .data_points
@@ -1158,20 +1117,12 @@ fn manual_provider() -> (SdkMeterProvider, SharedReader) {
 /// `llm_responses_unparsed_total` by pod name in the `batch` namespace, and the count in the overflow series.
 #[cfg(feature = "k8s")]
 fn unparsed_by_pod(reader: &SharedReader) -> Result<(HashMap<String, u64>, u64)> {
-    let mut rm = ResourceMetrics {
-        resource: Resource::empty(),
-        scope_metrics: vec![],
-    };
-    reader.collect(&mut rm)?;
+    let rm = collect(reader)?;
     let sum = rm
-        .scope_metrics
-        .iter()
-        .flat_map(|s| &s.metrics)
-        .find(|m| m.name == "llm_responses_unparsed_total")
-        .and_then(|m| m.data.as_any().downcast_ref::<data::Sum<u64>>())
+        .sum_u64("llm_responses_unparsed_total")
         .context("llm_responses_unparsed_total not collected")?;
     // Other tests record into the global metrics at the same time; count only this test's namespace.
-    let attr = |p: &data::DataPoint<u64>, key: &str| {
+    let attr = |p: &Point<u64>, key: &str| {
         p.attributes
             .iter()
             .find(|kv| kv.key.as_str() == key)
