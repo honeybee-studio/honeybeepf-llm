@@ -37,7 +37,7 @@ helm install honeybeepf-llm oci://ghcr.io/honeybee-studio/charts/honeybeepf-llm 
 kubectl logs -n honeybeepf ds/honeybeepf-llm -f | grep 'LLM SUCCESS'
 ```
 
-![Agent log on k3s: LLM calls from pods in team-a (OpenAI), team-b (Anthropic) and team-c (Gemini), each line showing the model and the token counts the agent recorded](docs/images/demo.svg)
+![Agent log on k3s: LLM calls from pods in team-a (OpenAI), team-b (Anthropic) and team-c (Gemini), each line showing the model and the token counts the agent recorded, then the USD spent per team from Prometheus](docs/images/demo.svg)
 
 - No LLM traffic yet? [Try the demo](https://honeybee-studio.github.io/honeybeepf-llm/demo/): a mock provider, clients in three team namespaces and Grafana, with
   no API keys.
