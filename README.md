@@ -14,8 +14,8 @@
 ![honeybeepf-llm: your LLM bill, split by team. A receipt of LLM calls with a subtotal per team: team-b $1.96, team-a $0.85, team-c $0.17, total $2.98](docs/assets/og.png)
 
 - **No app code changed.** SDKs keep calling the real provider; nothing to import, wrap or redeploy.
-- **Off the request path.** ~53 µs of agent CPU per LLM call at 200 calls/s, 32 MB RSS plus 19 MB of BPF maps, and
-  −6.7% throughput at ~11k calls/s, measured with and without the agent in v0.3.0
+- **Off the request path.** ~55 µs of agent CPU per LLM call at 200 calls/s, 32 MB RSS plus 19 MB of BPF maps, and
+  −6.6% throughput at ~11k calls/s, measured with and without the agent in v0.3.2
   ([benchmark](https://honeybee-studio.github.io/honeybeepf-llm/benchmark/)).
 - **The major providers built in:** OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI and Meta,
   plus many OpenAI-compatible APIs such as Groq, DeepSeek, Mistral, Together and OpenRouter
@@ -90,7 +90,7 @@ The docs are at **[honeybee-studio.github.io/honeybeepf-llm](https://honeybee-st
 
 ## Roadmap
 
-![Roadmap: released in v0.2.0 and v0.3.0, v0.4.0 next, and the backlog, with the issue for each item](docs/images/roadmap.svg)
+![Roadmap: released in v0.2.0 and v0.3.x, v0.4.0 on main, and the backlog, with the issue for each item](docs/images/roadmap.svg)
 
 Each section is a milestone: [v0.2.0](https://github.com/honeybee-studio/honeybeepf-llm/milestone/1) · [v0.3.0](https://github.com/honeybee-studio/honeybeepf-llm/milestone/2) · [v0.4.0](https://github.com/honeybee-studio/honeybeepf-llm/milestone/4) · [Backlog](https://github.com/honeybee-studio/honeybeepf-llm/milestone/3). The milestones have no dates yet;
 open them for the current progress.

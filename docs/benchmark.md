@@ -63,7 +63,31 @@ harness without root. `--cases` runs a subset; `--help` lists the flags.
 
 The newest release comes first; earlier runs are folded below it.
 
-### v0.3.0 (9018cd7), measured 2026-11-14
+### v0.3.2 (65d194e), measured 2026-11-17
+
+- Kernel 7.0.0-43-generic (Ubuntu 26.04.1 LTS), multipass VM: 4 vCPU of an Intel Core Ultra 5 225H, 7.7 GiB memory;
+  CPU steal 0.0%; Python 3.14.4, OpenSSL 3.5.5; release build of tag v0.3.2, defaults as above except 5 rounds
+
+| Case | req/s off | req/s on | p50 ms off | p50 ms on | p99 ms off | p99 ms on |
+|---|---|---|---|---|---|---|
+| `llm` | 200.12 | 200.13 | 0.89 | 0.81 | 2.12 | 2.24 |
+| `non-llm` | 200.12 | 200.12 | 0.78 | 0.81 | 1.80 | 2.18 |
+| `max` | 11,601 | 10,840 (−6.6%) | 0.32 | 0.34 | 0.78 | 0.90 |
+
+| Case | CPU s / 1k req | RSS anon MB | RSS file MB | PSS MB | BPF maps MB | Tokens recorded |
+|---|---|---|---|---|---|---|
+| `llm` | 0.055 | 4.4 | 27.3 | 21.4 | 18.8 | 100% |
+| `non-llm` | 0.020 | 4.4 | 27.3 | 21.3 | 18.8 | 100% |
+| `max` | 0.006 | 4.4 | 27.3 | 21.3 | 18.8 | 100% |
+
+Startup with 1,000 idle processes took 0.14 s. v0.3.1 and v0.3.2 change no code on the measured path (release
+signing, more OpenAI-compatible hosts, chart defaults), and the numbers match v0.3.0 within the noise: 0.055 vs 0.053
+s per 1,000 `llm` calls, the same memory, and −6.6% vs −6.7% at `max`. Every token was recorded in all five runs.
+
+### Earlier releases
+
+<details markdown>
+<summary>v0.3.0 (9018cd7), measured 2026-11-14</summary>
 
 - Kernel 7.0.0-43-generic (Ubuntu 26.04.1 LTS), multipass VM: 4 vCPU of an Intel Core Ultra 5 225H, 7.7 GiB memory;
   CPU steal 0.0%; Python 3.14.4, OpenSSL 3.5.5; release build of `main` at 9018cd7 with the version set to 0.3.0,
@@ -85,7 +109,7 @@ Startup with 1,000 idle processes took 0.16 s. Against v0.2.0, CPU per call is l
 `llm` calls), memory is 0.2 MB higher, and the `max` throughput cost is about the same (−6.7% vs −6.5%). Every token
 was recorded in all five runs.
 
-### Earlier releases
+</details>
 
 <details markdown>
 <summary>v0.2.0 (f8970f3), measured 2026-10-30</summary>
