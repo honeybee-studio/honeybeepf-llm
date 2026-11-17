@@ -40,6 +40,7 @@ a Collector and the Grafana cost dashboard, and covers uninstall.
 
 ## Main values
 
+<!-- --8<-- [start:values] -->
 | Value | Default | What it does |
 |---|---|---|
 | `output.otlp.endpoint` | `""` | Collector to send metrics to: `host:port`, `http://` or `https://` |
@@ -51,6 +52,8 @@ a Collector and the Grafana cost dashboard, and covers uninstall.
 | `builtinProbes.llm.detectByShape` | `false` | Experimental: record OpenAI-shaped calls to hosts no provider lists |
 | `alerts.prometheusRule.enabled`, `alerts.budgets` | off, `{}` | Spend, budget and capture-health alerts as a PrometheusRule ([alerts](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/docs/alerts.md)) |
 | `resources` | 50m / 128Mi requested | Sized from the benchmark |
+
+<!-- --8<-- [end:values] -->
 
 Every value is commented in
 [`values.yaml`](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/charts/honeybeepf-llm/values.yaml).

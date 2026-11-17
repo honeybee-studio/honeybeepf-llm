@@ -34,6 +34,8 @@ LLM SUCCESS | PID: 1686847 | Model: claude-test | Latency: 0.00s | Tokens: 140 (
 `ds/honeybeepf-llm` follows one agent pod. On a cluster with several nodes, each node's calls are in that node's
 agent pod: `kubectl logs -n honeybeepf -l app.kubernetes.io/name=honeybeepf-llm --prefix -f` follows them all.
 
+No lines? See [Troubleshooting](troubleshooting.md).
+
 ## 3. Next
 
 - [Send the metrics to Prometheus and open the cost dashboard](install.md).

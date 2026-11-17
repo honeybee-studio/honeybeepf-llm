@@ -69,6 +69,9 @@ markdown_extensions:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - pymdownx.highlight
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
   - pymdownx.superfences
   - pymdownx.tabbed:
       alternate_style: true
@@ -103,6 +106,9 @@ nav:
       - Grafana dashboards: grafana/README.md
   - Reference:
       - Metrics: metrics.md
+      - Helm values: reference-values.md
   - Operations:
       - Overhead benchmark: benchmark.md
       - Security review: security-review.md
+      - Troubleshooting: troubleshooting.md
+      - FAQ: faq.md

@@ -1,5 +1,5 @@
 ---
-title: honeybeepf-llm
+title: Your LLM bill, split by team
 description: Your LLM bill, split by team. Tokens and estimated cost per Kubernetes namespace, pod and model, read with eBPF. No code changes, no proxy, no SDK.
 hide:
   - navigation
@@ -138,12 +138,15 @@ Tokens and dollars per namespace, pod and model in Prometheus, with a [Grafana d
 
 <div class="hb-index" markdown>
 
-- [What is supported](providers.md): providers, runtimes, protocols and kernels, and how to find the workloads whose
-  calls are not seen.
-- [Metrics](metrics.md): every metric and label, why a call was not recorded, and example PromQL.
-- [Alerts](alerts.md): spend, data-quality and agent-health rules shipped with the chart.
-- [Grafana dashboards](grafana/README.md): the cost and security dashboards and how to install them.
-- [Overhead benchmark](benchmark.md): CPU, memory and throughput with and without the agent.
+- [Quickstart](quickstart.md): install the agent and watch the calls in a few minutes.
+- [How it works](how-it-works.md): from a TLS buffer to dollars per pod, step by step.
+- [What is supported](providers.md): providers, runtimes, protocols and kernels.
+- [Find the workloads that are not seen](guides/coverage.md): one query lists them.
+- [Add a provider](guides/custom-providers.md) or [your own prices](guides/prices.md).
+- [Metrics](metrics.md): every metric and label, and why a call was not recorded.
+- [Budgets and alerts](alerts.md): spend and data-quality rules shipped with the chart.
+- [Troubleshooting](troubleshooting.md) and [FAQ](faq.md).
 - [Security review](security-review.md): kernel hooks, privileges, data handling and known gaps.
+- [Overhead benchmark](benchmark.md): CPU, memory and throughput with and without the agent.
 
 </div>
