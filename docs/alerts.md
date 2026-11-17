@@ -61,7 +61,6 @@ the alert asks a person to check which it is. `llm_responses_unparsed_total` has
 | Alert | Fires when | For | Severity |
 |---|---|---|---|
 | `HoneybeepfAgentMissing` | the agent on a node reported an hour ago and does not now (the collector drops a series 5 minutes after its last update) | 10m | critical |
-| `HoneybeepfLLMProbeInactive` | the agent on a node runs with no LLM probe attached | 10m | critical |
 
 `HoneybeepfAgentMissing` also fires for about an hour after a node is removed, for example by an autoscaler.
 
