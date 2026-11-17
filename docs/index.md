@@ -1,5 +1,5 @@
 ---
-title: honeybeepf-llm
+title: Your LLM bill, split by team
 description: Your LLM bill, split by team. Tokens and estimated cost per Kubernetes namespace, pod and model, read with eBPF. No code changes, no proxy, no SDK.
 hide:
   - navigation
@@ -15,7 +15,7 @@ hide:
 <p class="hb-sub">Your provider sends one total. honeybeepf-llm shows which namespace, pod and model spent it, without
 touching your apps.</p>
 
-[Install with Helm :material-arrow-right:](install.md){ .md-button .md-button--primary }
+[Quickstart :material-arrow-right:](quickstart.md){ .md-button .md-button--primary }
 [GitHub :fontawesome-brands-github:](https://github.com/honeybee-studio/honeybeepf-llm){ .md-button }
 
 <p class="hb-meta">Open source, Apache-2.0 · eBPF DaemonSet for Kubernetes · OpenTelemetry metrics</p>
@@ -57,7 +57,7 @@ touching your apps.</p>
     charts/honeybeepf-llm
 
 <span>DaemonSet ready: 1 agent per node</span></div>
-<span class="hb-step__n">1</span>
+<div class="hb-step__n">1</div>
 <h3>Install one DaemonSet</h3>
 
 One agent per node. Your apps, SDKs and API keys stay as they are.
@@ -68,7 +68,7 @@ One agent per node. Your apps, SDKs and API keys stay as they are.
 <span>host</span>   api.anthropic.com
 <span>model</span>  claude-sonnet-4-5
 <span>tokens</span> 1,840  <b>$0.011</b></div>
-<span class="hb-step__n">2</span>
+<div class="hb-step__n">2</div>
 <h3>It reads every LLM call</h3>
 
 Each call is read in the kernel, where your app hands it to TLS, and matched to its pod.
@@ -76,7 +76,7 @@ Each call is read in the kernel, where your app hands it to TLS, and matched to 
 
 <div class="hb-step" markdown>
 <div class="hb-step__art hb-step__art--shot"><img src="images/grafana-cost-narrow.png" alt="Grafana panel: estimated spend per workload, team-b support-bot $1.96, team-a chat-api $0.85, team-c summarizer $0.17"></div>
-<span class="hb-step__n">3</span>
+<div class="hb-step__n">3</div>
 <h3>See the cost per team</h3>
 
 Tokens and dollars per namespace, pod and model in Prometheus, with a [Grafana dashboard](grafana/README.md) included.
@@ -138,12 +138,15 @@ Tokens and dollars per namespace, pod and model in Prometheus, with a [Grafana d
 
 <div class="hb-index" markdown>
 
-- [What is supported](providers.md): providers, runtimes, protocols and kernels, and how to find the workloads whose
-  calls are not seen.
-- [Metrics](metrics.md): every metric and label, why a call was not recorded, and example PromQL.
-- [Alerts](alerts.md): spend, data-quality and agent-health rules shipped with the chart.
-- [Grafana dashboards](grafana/README.md): the cost and security dashboards and how to install them.
-- [Overhead benchmark](benchmark.md): CPU, memory and throughput with and without the agent.
+- [Quickstart](quickstart.md): install the agent and watch the calls in a few minutes.
+- [How it works](how-it-works.md): from a TLS buffer to dollars per pod, step by step.
+- [What is supported](providers.md): providers, runtimes, protocols and kernels.
+- [Find the workloads that are not seen](guides/coverage.md): one query lists them.
+- [Add a provider](guides/custom-providers.md) or [your own prices](guides/prices.md).
+- [Metrics](metrics.md): every metric and label, and why a call was not recorded.
+- [Budgets and alerts](alerts.md): spend and data-quality rules shipped with the chart.
+- [Troubleshooting](troubleshooting.md) and [FAQ](faq.md).
 - [Security review](security-review.md): kernel hooks, privileges, data handling and known gaps.
+- [Overhead benchmark](benchmark.md): CPU, memory and throughput with and without the agent.
 
 </div>

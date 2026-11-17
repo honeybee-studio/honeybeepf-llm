@@ -273,6 +273,11 @@
   gap: 1.4rem;
 }
 
+.hb-step {
+  display: flex;
+  flex-direction: column;
+}
+
 .md-typeset .hb-step h3 {
   margin: 0.3rem 0;
   font-size: 0.95rem;
@@ -287,7 +292,8 @@
 
 .hb-step__n {
   display: block;
-  margin-top: 0.8rem;
+  order: -1;
+  margin-bottom: 0.4rem;
   color: var(--hb-hl);
   font-family: var(--hb-serif);
   font-size: 2.2rem;
@@ -387,6 +393,11 @@
 
   .hb-steps {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .hb-step__art--code,
+  .hb-step__art--log {
+    height: auto;
   }
 }
 

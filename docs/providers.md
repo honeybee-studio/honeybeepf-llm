@@ -1,143 +1,124 @@
 # What is supported
 
-✅ means the agent recorded exactly the expected token counts on Linux 7.0, against a local TLS mock of each
-provider's API called by curl and by the official Python and Node.js SDKs; recorded real provider responses are
-replayed against it as well. A blank cell was not checked.
+Four questions decide whether a call is recorded: which **provider** it goes to, which **runtime** makes it, which
+**protocol** carries it and which **kernel** the node runs.
 
-**Providers** (built in, no configuration)
+!!! info "What ✅ means"
+    The agent recorded exactly the expected token counts on Linux 7.0, against a local TLS mock of the provider's API
+    called by curl and by the official Python and Node.js SDKs, with recorded real responses replayed as well. A blank
+    cell was not checked.
 
-| Provider / API | JSON | Streaming (SSE) | Cache tokens |
+## Providers
+
+Built in, no configuration:
+
+| Provider / API | JSON | Streaming | Cache tokens |
 |---|:-:|:-:|:-:|
 | OpenAI Chat Completions | ✅ | ✅ | ✅ read |
 | OpenAI Responses API | ✅ | ✅ | |
 | Anthropic Messages | ✅ | ✅ | ✅ read/write |
 | Google Gemini (`generateContent`, `streamGenerateContent`) | ✅ | ✅ | ✅ read |
 | Google Gemini Interactions API (Gemini API and Vertex AI) | ✅ | ✅ | ✅ read |
-| Google Gemini Decisions API (`gemini-decision-1`, input tokens only; the response names no model, so calls are unpriced) | ✅ | | |
+| Google Gemini Decisions API (`gemini-decision-1`)¹ | ✅ | | |
 | Azure OpenAI | ✅ Chat Completions | ✅ Responses API | |
 | Google Vertex AI (Gemini) | ✅ | ✅ | |
 | Claude on Vertex AI, Google Cloud and Microsoft Foundry | ✅ | ✅ | ✅ read/write |
-| Amazon Bedrock Converse | ✅ | ✅ ConverseStream (event stream) | ✅ read/write |
-| Amazon Bedrock InvokeModel (Anthropic Claude models) | ✅ | ✅ InvokeModelWithResponseStream, every model | ✅ read/write |
-| Meta Model API — Muse Spark (`api.meta.ai`: Chat Completions, Responses, Messages) | ✅ | ✅ | |
-| OpenAI-compatible Chat Completions of 25 hosted providers, listed below (usage read as OpenAI Chat Completions) | | | |
+| Amazon Bedrock Converse | ✅ | ✅ ConverseStream | ✅ read/write |
+| Amazon Bedrock InvokeModel (Claude models) | ✅ | ✅ every model | ✅ read/write |
+| Meta Model API, Muse Spark (`api.meta.ai`) | ✅ | ✅ | |
+| [OpenAI-compatible providers](#openai-compatible-providers) | Chat Completions | | |
 
-Compressed responses (`gzip`, `br`, `zstd`, `deflate`) are decoded, SSE included.
+¹ Input tokens only. The response names no model, so these calls are unpriced.
 
-The OpenAI-compatible providers are Groq, DeepSeek, Together, Fireworks, OpenRouter, Mistral, Cerebras, Alibaba Qwen
-(Model Studio / DashScope), Moonshot (Kimi), Zhipu / Z.ai (GLM), MiniMax, SiliconFlow, Volcengine Ark and BytePlus
-ModelArk, DeepInfra, Nebius Token Factory, SambaNova, Novita, Hyperbolic, Baseten, NVIDIA API Catalog, the Hugging Face
-router, Cloudflare Workers AI, Vercel AI Gateway, Upstage and AI21. Their hosts, regional and workspace hosts included,
-come from each provider's API reference, which documents OpenAI's usage with reasoning tokens inside
-`completion_tokens`; the full list is the `openai-compatible` entry of the built-in list. Only Chat Completions is
-listed, not their Responses or embeddings endpoints. Their models are not in the price table, so these calls are
-recorded with tokens and no cost unless a price file names the model. A router or gateway (Hugging Face, Vercel,
-OpenRouter) gives one record per app call, with the usage the routed provider reported.
+Compressed responses (`gzip`, `br`, `zstd`, `deflate`) are decoded, streams included.
 
-Left out for now: xAI, whose `completion_tokens` leave out reasoning tokens (usage is read by response shape, so it
-would be undercounted); Databricks, whose reasoning and cache counts sit at the top of `usage`; Cohere, whose
-compatibility API documents no usage; and Cloudflare AI Gateway, whose cache hits return usage the provider never
-billed. Some providers send streaming usage only with `stream_options.include_usage`, as OpenAI does; a stream without
-it is counted under `llm_responses_unparsed_total{reason="usage_absent"}`.
+### OpenAI-compatible providers
 
-`builtinProbes.llm.providers` in `values.yaml` describes providers by host, path and usage fields, in the format of
-the [built-in list](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/honeybeepf-llm/honeybeepf-llm-core/src/providers/default_providers.json). They are added to the
-built-in providers; a provider with a built-in name (`openai`, `anthropic`, `gemini`, `bedrock`, matched exactly)
-replaces every built-in entry of that name, so an `openai` entry must also cover the Responses API and an
-`anthropic` entry Claude on Vertex AI. Usage is read by matching the response's fields, not its host, with the
-built-in entries tried first: a gateway that returns an OpenAI-, Anthropic- or Gemini-shaped body is read with the
-built-in fields.
+Their Chat Completions calls are read like OpenAI's:
 
-By default only HTTPS calls made through OpenSSL or Go `crypto/tls` are seen. An in-cluster **plain-HTTP** endpoint
-(a typical Ollama or vLLM) is captured at the socket layer when a provider opts in with `plaintext`:
+| | | |
+|---|---|---|
+| Groq | DeepSeek | Together |
+| Fireworks | OpenRouter | Mistral |
+| Cerebras | Alibaba Qwen (Model Studio, DashScope) | Moonshot (Kimi) |
+| Zhipu / Z.ai (GLM) | MiniMax | SiliconFlow |
+| Volcengine Ark, BytePlus ModelArk | DeepInfra | Nebius Token Factory |
+| SambaNova | Novita | Hyperbolic |
+| Baseten | NVIDIA API Catalog | Hugging Face router |
+| Cloudflare Workers AI | Vercel AI Gateway | Upstage |
+| AI21 | | |
 
-```yaml
-builtinProbes:
-  llm:
-    providers:
-      - name: vllm                 # a non-built-in name, so it is added, not replacing a built-in
-        hosts: ["vllm.default.svc.cluster.local"]   # must match the Host header the app sends
-        paths: ["/v1/chat/completions"]             # optional; omit to match any path on the host
-        plaintext: { port: 8000 }
-```
+- **Hosts** come from each provider's API reference, regional and workspace hosts included; the full list is the
+  `openai-compatible` entry of the
+  [built-in list](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/honeybeepf-llm/honeybeepf-llm-core/src/providers/default_providers.json).
+- **Only Chat Completions**, not their Responses or embeddings endpoints.
+- **No cost by default.** Their models are not in the price table, so calls are recorded with tokens only until you
+  [add their prices](guides/prices.md).
+- **Routers** (Hugging Face, Vercel, OpenRouter) give one record per app call, with the usage the routed provider
+  reported.
 
-The agent resolves those Service endpoints and records matching calls with `transport="plain"` (TLS calls carry
-`transport="tls"`), with no proxy and no app change. It needs a node with cgroup v2 and kernel 5.10+; the chart
-grants read access to `services` and `endpointslices` only when a provider sets `plaintext`. OpenAI-compatible
-servers need no `response` block, and the request's `Host` header must match one of the provider's `hosts`. IPv4 only so far.
+??? note "Left out for now, and why"
+    | Provider | Why |
+    |---|---|
+    | xAI | its `completion_tokens` leave out reasoning tokens, so it would be undercounted |
+    | Databricks | its reasoning and cache counts sit at the top of `usage` |
+    | Cohere | its compatibility API documents no usage |
+    | Cloudflare AI Gateway | its cache hits return usage the provider never billed |
 
-### Detecting unlisted hosts by shape (experimental)
+!!! tip "Streaming without usage"
+    Some providers send streaming usage only when the request sets `stream_options.include_usage`, as OpenAI does. A
+    stream without it is counted under `llm_responses_unparsed_total{reason="usage_absent"}`.
 
-This mode is experimental and may change. On a VM, 44 ordinary HTTPS calls (GitHub, PyPI, npm, Docker Hub and
-others over HTTP/1.1 and HTTP/2, plus echo services on LLM paths) and 15 local non-LLM JSON responses on LLM paths
-recorded nothing with it on.
+### Not listed?
 
-`builtinProbes.llm.detectByShape` (default `false`) records OpenAI/Anthropic/Gemini-compatible calls to hosts no
-entry lists — new providers, gateways, in-cluster model servers — by request path and response shape instead of
-host:
+- [Add a provider](guides/custom-providers.md) by host, path and usage fields.
+- Add an in-cluster model server as a [plain-HTTP provider](guides/plaintext.md).
+- Record calls to unlisted hosts by their [shape](guides/detect-by-shape.md).
 
-```yaml
-builtinProbes:
-  llm:
-    detectByShape: true
-```
+## Runtimes
 
-When on, an HTTP/1.1 or HTTP/2 request whose path matches a built-in pattern (`/chat/completions`, `/v1/responses`,
-`/v1/messages`, `generateContent`, …) is kept even if its `Host` is unlisted, and it is recorded **only** if the
-response carries that family's usage fields; a response without them is dropped, so a path match alone never
-records. When off (the default) only listed hosts are recorded, exactly as before. This covers the common
-OpenAI-compatible APIs (Groq, DeepSeek, Together, Fireworks, OpenRouter, Mistral, xAI, Perplexity, Cerebras, vLLM,
-LM Studio); it does not catch shapes with no `usage` object or a non-matching path (e.g. Ollama's native
-`/api/chat`, which needs an explicit `providers` entry).
+Also checked in pods on k3s: `python:3.12-slim`, `python:3.13-alpine`, `node:24-slim`.
 
-A call recorded this way carries `match="shape"` on its request, token and cost metrics; a call matched by its
-host has no `match` label. A path match whose response has no usage is not counted in
-`llm_responses_unparsed_total` either, since it may not have been an LLM call.
-
-An in-cluster gateway reached over TLS (LiteLLM, a company proxy) is then recorded twice: the app's call to the
-gateway, under the app's namespace, and the gateway's call to the provider, under the gateway's. The first is the
-one that says which team spent it; the second is the one the provider bills. To total spend without counting such
-calls twice, leave out one side, for example the shape-matched calls when the gateway's own upstream calls are
-recorded:
-
-```promql
-sum by (target_namespace) (increase(honeybeepf_llm_llm_cost_usd_total{match!="shape"}[1d]))
-```
-
-A gateway outside the cluster (OpenRouter, a hosted proxy), or one called over plain HTTP without a `plaintext`
-entry, is recorded once.
-
-**Runtimes** (also checked in pods on k3s: `python:3.12-slim`, `python:3.13-alpine`, `node:24-slim`)
-
-| Runtime | TLS library | Status |
+| Runtime | TLS library | Seen |
 |---|---|:-:|
-| Python (CPython: `python:*-slim`, Alpine, distro) | shared `libssl` | ✅ |
+| Python (CPython: slim, Alpine, distro) | shared `libssl` | ✅ |
 | Node.js official binaries and `node:` images | OpenSSL inside the `node` executable | ✅ |
 | Node.js from distro packages | shared `libssl` | ✅ |
 | curl and other programs linked to `libssl` | shared `libssl` | ✅ |
-| Go 1.20+ (`crypto/tls`), stripped or not, amd64 and arm64 | `crypto/tls` inside the executable | ✅ |
-| Go before 1.20, forks of `crypto/tls` (such as uTLS), rustls, Java (JSSE), GnuTLS, NSS | not probed | ❌ not seen |
+| Go 1.20+, stripped or not, amd64 and arm64 | `crypto/tls` inside the executable | ✅ |
+| Go before 1.20, `crypto/tls` forks (uTLS), rustls, Java (JSSE), GnuTLS, NSS | not probed | ❌ |
 
-**Protocols**
+To list the workloads in your cluster that are not seen, see [Find the workloads that are not seen](guides/coverage.md).
 
-| Protocol | Status |
+## Protocols
+
+| Protocol | Seen |
 |---|:-:|
 | HTTP/1.1 (keep-alive, chunked) | ✅ |
 | HTTP/2 | ✅ |
-| WebSocket (e.g. OpenAI Realtime) | ❌ |
+| WebSocket (OpenAI Realtime) | ❌ |
 | HTTP/3 (QUIC) | ❌ |
 
-HTTP/2 is recorded from the start of a connection. A connection the agent joins mid-stream is still recorded, but
-with the provider host unknown; a request head lost to a capture gap counts under
-`llm_responses_unparsed_total{reason="headers_lost"}`. A Responses call made with `"background": true` is linked
-to the later poll that carries its usage over HTTP/2 as well as HTTP/1.1. Node.js 26 uses HTTP/2 by default (its built-in `fetch`,
-undici 8), so the official OpenAI and Anthropic Node SDKs now record with no change, checked with Node.js 26.13.0,
-`openai` 7.39.0 and `@anthropic-ai/sdk` 0.135.0, JSON and streaming.
+- **HTTP/2** is recorded from the start of a connection. A connection the agent joins mid-stream is still recorded,
+  with the provider host unknown; a request head lost to a capture gap counts under
+  `llm_responses_unparsed_total{reason="headers_lost"}`.
+- **Background Responses calls** (`"background": true`) are linked to the later poll that carries their usage, over
+  HTTP/1.1 and HTTP/2.
+- **Node.js 26** uses HTTP/2 by default in its built-in `fetch`, and the official OpenAI and Anthropic Node SDKs record
+  with no change (checked with Node.js 26.13.0, `openai` 7.39.0 and `@anthropic-ai/sdk` 0.135.0).
 
-**Kernels:** CI loads and attaches the probes and records exact token counts (OpenAI JSON, streaming and gzip,
-and Anthropic with a cache read, against a local mock) on 5.10, 5.15, 6.1, 6.6, 6.12, 6.18 and 7.2, on the
-RHEL 8.10 (4.18), 9.6 and 9.7 (5.14) kernels, and on 5.15 and 6.1 on arm64
-([kernel matrix](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/.github/workflows/kernel-matrix.yml)); other RHEL minor releases are not tested. The full
-provider and runtime tables above are checked on Linux 7.0.
+## Kernels
 
-**Overhead:** CPU, memory, latency and accuracy under load are measured in [docs/benchmark.md](benchmark.md).
+CI loads and attaches the probes and checks exact token counts on each of these, against a local mock:
+
+| Architecture | Kernels |
+|---|---|
+| x86-64 | 5.10, 5.15, 6.1, 6.6, 6.12, 6.18, 7.2 |
+| x86-64, RHEL | 8.10 (4.18), 9.6 and 9.7 (5.14) |
+| arm64 | 5.15, 6.1 |
+
+Other RHEL minor releases are not tested. The full provider and runtime tables above are checked on Linux 7.0. The
+lanes are in the
+[kernel matrix](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/.github/workflows/kernel-matrix.yml).
+
+CPU, memory, latency and accuracy under load are in the [overhead benchmark](benchmark.md).

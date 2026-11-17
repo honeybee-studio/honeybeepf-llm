@@ -31,10 +31,10 @@ annotations:
   artifacthub.io/license: Apache-2.0
   artifacthub.io/links: |
     - name: Documentation
-      url: https://github.com/honeybee-studio/honeybeepf-llm/tree/main/docs
+      url: https://honeybee-studio.github.io/honeybeepf-llm/
     - name: Install guide
-      url: https://github.com/honeybee-studio/honeybeepf-llm/blob/main/docs/install.md
+      url: https://honeybee-studio.github.io/honeybeepf-llm/install/
     - name: Overhead benchmark
-      url: https://github.com/honeybee-studio/honeybeepf-llm/blob/main/docs/benchmark.md
+      url: https://honeybee-studio.github.io/honeybeepf-llm/benchmark/
     - name: Security review
-      url: https://github.com/honeybee-studio/honeybeepf-llm/blob/main/docs/security-review.md
+      url: https://honeybee-studio.github.io/honeybeepf-llm/security-review/

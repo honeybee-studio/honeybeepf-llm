@@ -6,29 +6,33 @@
 [![Kernel Matrix](https://github.com/honeybee-studio/honeybeepf-llm/actions/workflows/kernel-matrix.yml/badge.svg?branch=main)](https://github.com/honeybee-studio/honeybeepf-llm/actions/workflows/kernel-matrix.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/honeybeepf-llm)](https://artifacthub.io/packages/search?repo=honeybeepf-llm)
+[![Docs](https://img.shields.io/badge/docs-honeybee--studio.github.io-e8a317)](https://honeybee-studio.github.io/honeybeepf-llm/)
+
+**[Documentation](https://honeybee-studio.github.io/honeybeepf-llm/)** · [Quickstart](https://honeybee-studio.github.io/honeybeepf-llm/quickstart/) · [How it works](https://honeybee-studio.github.io/honeybeepf-llm/how-it-works/) ·
+[What is supported](https://honeybee-studio.github.io/honeybeepf-llm/providers/) · [FAQ](https://honeybee-studio.github.io/honeybeepf-llm/faq/)
 
 ![LLM Cost Observability dashboard on the demo cluster: token usage, requests and latency by namespace, pod and workload; estimated spend per workload and per model in USD; and Cost-Waste Signals showing the measured cost of refused fallback attempts and the estimated savings from prompt caching, across team-a, team-b and team-c](docs/images/grafana.png)
 
 <sub>The bundled LLM Cost Observability dashboard on a single-node k3s cluster, built from the charts in this
 repository against a local mock of the provider APIs with fake keys.</sub>
 
-- **0 lines of app code changed** — SDKs keep calling the real provider; nothing to import, wrap or redeploy.
-- **~53 µs of agent CPU per LLM call** at 200 calls/s, 32 MB RSS plus 19 MB of BPF maps, and −6.7% throughput at
-  ~11k calls/s, measured with and without the agent in v0.3.0 ([benchmark](docs/benchmark.md)).
-- **11 built-in provider APIs** — OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI, Meta — plus the
-  OpenAI-compatible APIs of 25 hosted providers, among them Groq, DeepSeek, Mistral, Together, OpenRouter, Qwen, Kimi,
-  GLM, NVIDIA and Hugging Face ([list](docs/providers.md)).
-- **12 kernels in CI** — Linux 5.10 through 7.2 and RHEL 8.10 / 9.6 / 9.7 on x86-64, 5.15 and 6.1 on arm64: probes
-  loaded and attached, and token counts checked on each.
+- **No app code changed.** SDKs keep calling the real provider; nothing to import, wrap or redeploy.
+- **Off the request path.** ~53 µs of agent CPU per LLM call at 200 calls/s, 32 MB RSS plus 19 MB of BPF maps, and
+  −6.7% throughput at ~11k calls/s, measured with and without the agent in v0.3.0
+  ([benchmark](https://honeybee-studio.github.io/honeybeepf-llm/benchmark/)).
+- **The major providers built in:** OpenAI, Anthropic, Gemini, Amazon Bedrock, Azure OpenAI, Google Vertex AI and Meta,
+  plus many OpenAI-compatible APIs such as Groq, DeepSeek, Mistral, Together and OpenRouter
+  ([full list](https://honeybee-studio.github.io/honeybeepf-llm/providers/)).
+- **Checked in CI** on Linux 5.10 to 7.2 and RHEL 8.10 / 9.6 / 9.7, x86-64 and arm64: probes loaded and attached,
+  and token counts checked on each.
 
 honeybeepf-llm is a Rust eBPF agent that runs as a DaemonSet. It attaches uprobes to OpenSSL's `SSL_write` and
 `SSL_read` and to Go's `crypto/tls`, reads the plaintext HTTP of calls to LLM providers, and exports token usage,
-request counts and latency per Kubernetes namespace and pod over OpenTelemetry.
+request counts, latency and estimated cost per Kubernetes namespace and pod over OpenTelemetry.
 
 ## Quickstart
 
-Requires a cluster whose nodes run a Linux 5.10+ or RHEL 8.10 / 9.6 / 9.7 kernel, `kubectl` and Helm 3. Install the
-latest release and watch LLM calls per pod:
+Requires a cluster whose nodes run a Linux 5.10+ or RHEL 8.10 / 9.6 / 9.7 kernel, `kubectl` and Helm 3:
 
 ```bash
 kubectl create namespace honeybeepf
@@ -36,20 +40,13 @@ helm install honeybeepf-llm oci://ghcr.io/honeybee-studio/charts/honeybeepf-llm 
 kubectl logs -n honeybeepf ds/honeybeepf-llm -f | grep 'LLM SUCCESS'
 ```
 
-The chart in `charts/` on `main` can expect a newer agent than the latest release image, so install it only together
-with an image built from the same commit.
-
-No LLM traffic in the cluster yet? [`examples/demo/demo.sh up`](examples/demo) runs a mock provider, clients in
-three team namespaces and Grafana, with no API keys.
-
 ![Agent log on k3s: LLM calls from pods in team-a (OpenAI), team-b (Anthropic) and team-c (Gemini), each line showing the model and the token counts the agent recorded](docs/images/demo.svg)
 
-```
-LLM SUCCESS | PID: 1686847 | Model: claude-test | Latency: 0.00s | Tokens: 140 (Prompt: 125, Compl: 15, Cache read: 100, Cache write: 0) | Pod: team-b/support-bot-589db898dd-rv9ts
-```
-
-For the Grafana cost dashboard, install the bundled Prometheus and OpenTelemetry Collector charts too. Full
-commands, required capabilities, resources and uninstall are in [docs/install.md](docs/install.md).
+- No LLM traffic yet? [Try the demo](https://honeybee-studio.github.io/honeybeepf-llm/demo/): a mock provider, clients in three team namespaces and Grafana, with
+  no API keys.
+- For the Grafana cost dashboard, [install](https://honeybee-studio.github.io/honeybeepf-llm/install/) the bundled Prometheus and OpenTelemetry Collector too.
+- The chart in `charts/` on `main` can expect a newer agent than the latest release image, so install it only
+  together with an image built from the same commit.
 
 ## How it compares
 
@@ -62,81 +59,37 @@ commands, required capabilities, resources and uninstall are in [docs/install.md
 
 ## What it sees
 
-**Providers.** ✅ means the agent recorded exactly the expected token counts end to end, from the official Python
-and Node.js SDKs and curl calling a TLS mock of the provider's API on Linux 7.0. A blank cell was not checked.
+| | Seen | Not yet |
+|---|---|---|
+| Apps | Python, Node.js, curl and anything using OpenSSL; Go 1.20+ | rustls, Java (JSSE), GnuTLS, NSS, Go before 1.20 |
+| Protocols | HTTP/1.1 and HTTP/2, streaming included; in-cluster plain HTTP (Ollama, vLLM), opt-in | WebSocket, HTTP/3 |
+| Calls | chat, embeddings, image and transcription, with cache and reasoning tokens | |
 
-| Provider | JSON | Streaming | Cache tokens |
-|---|:-:|:-:|:-:|
-| OpenAI (Chat Completions, Responses API) | ✅ | ✅ | ✅ Chat Completions |
-| Anthropic Messages | ✅ | ✅ | ✅ |
-| Google Gemini | ✅ | ✅ | ✅ |
-| Google Vertex AI (Gemini, Claude) | ✅ | ✅ | ✅ Claude |
-| Azure OpenAI | ✅ | ✅ | |
-| Amazon Bedrock (Converse, InvokeModel) | ✅ | ✅ | ✅ |
-| Meta Model API | ✅ | ✅ | |
-| OpenAI-compatible APIs: Groq, DeepSeek, Mistral, Together, OpenRouter, Qwen, Kimi, GLM, NVIDIA, Hugging Face and [more](docs/providers.md) | | | |
-
-Cost comes from a built-in price table of OpenAI, Anthropic and Gemini models, matched by the model name in the
-response (a dated name such as `claude-sonnet-4-5@20250929` matches its model). Other models get a cost once their
-prices are added (`prices` in the chart values); until then their tokens are counted in
-`llm_unpriced_tokens_total`, not as $0. Embeddings, image and transcription calls are recorded too, with an
-`operation` label. Per-endpoint detail, adding a provider and detecting unlisted hosts by request shape
-(experimental, off by default) are in [docs/providers.md](docs/providers.md).
-
-**Your apps.**
-
-| App or traffic | Seen |
-|---|:-:|
-| Python, Node.js, curl, anything using OpenSSL | ✅ |
-| Go 1.20+ (`crypto/tls`), stripped or not | ✅ |
-| HTTP/1.1 and HTTP/2, streaming included | ✅ |
-| In-cluster plain HTTP (Ollama, vLLM) | ✅ opt-in |
-| Rust rustls, Java (JSSE), GnuTLS, NSS, Go before 1.20 | ❌ |
-| WebSocket, HTTP/3 (QUIC) | ❌ |
-
-To list the workloads in your cluster whose calls are not seen:
-
-```promql
-sum by (target_namespace, target_workload_name, tls) (honeybeepf_llm_llm_tls_coverage_pods{tls!="hooked"}) > 0
-```
-
-**Kernels.** Linux 5.10 to 7.2 and RHEL 8.10 / 9.6 / 9.7 on x86-64, and 5.15 and 6.1 on arm64: CI loads and attaches
-the probes on each and checks the token counts of OpenAI and Anthropic calls against a local mock.
+Cost comes from a built-in price table matched by the model name; models without a price are counted as unpriced
+tokens, not as $0, until you [add their prices](https://honeybee-studio.github.io/honeybeepf-llm/guides/prices/). One query
+[lists the workloads whose calls are not seen](https://honeybee-studio.github.io/honeybeepf-llm/guides/coverage/). The per-provider matrix is in
+[What is supported](https://honeybee-studio.github.io/honeybeepf-llm/providers/).
 
 ## How it works
 
 ![uprobes on SSL_write/SSL_read copy plaintext into a ring buffer; the agent parses HTTP, matches the provider, maps the cgroup to a pod and exports OTLP metrics](docs/images/how-it-works.svg)
 
-1. The agent finds every `libssl` mapped by a process (and executables with OpenSSL built in) and attaches
-   uprobes to `SSL_write` and `SSL_read`, including libraries opened after it started. In Go executables it probes
-   `crypto/tls` instead: `(*Conn).Write`, `Read` and each of `Read`'s return instructions.
-2. The uprobes copy the plaintext buffer, the pid and the cgroup id into a BPF ring buffer.
-3. In user space, the HTTP/1.1, HTTP/2 and SSE parser reassembles each request and response per TLS connection, picks
-   the provider from the host and path, and reads the usage fields from the response.
-4. The process's cgroup gives its container ID, which a watch on this node's pods maps to a namespace and pod.
-   The result is recorded as OpenTelemetry metrics sent over OTLP to the collector, which Prometheus scrapes.
-
-## Metrics
-
-Exported per namespace, pod and workload over OTLP, scraped by Prometheus:
-
-- `llm_requests_total`, `llm_tokens_total` (prompt / completion) and `llm_latency_seconds`
-- `llm_cache_read_tokens_total`, `llm_cache_write_tokens_total`, `llm_reasoning_tokens_total`
-- `llm_cost_usd_total` — estimated USD per call from the built-in price table; `llm_unpriced_tokens_total` for tokens without a price
-- `llm_responses_unparsed_total` — calls seen but not recorded, by `reason`
-
-The bundled LLM Cost Grafana dashboard shows the cost per workload and per model. Labels, unparsed reasons and example PromQL are in [docs/metrics.md](docs/metrics.md);
-the dashboards ship in [docs/grafana/](docs/grafana/).
+The agent attaches to the TLS functions of every process on its node, copies the plaintext of each call into a ring
+buffer, reads the usage fields from the response, maps the process to its pod and exports the result as OpenTelemetry
+metrics. [How it works](https://honeybee-studio.github.io/honeybeepf-llm/how-it-works/) goes step by step; the [security review](https://honeybee-studio.github.io/honeybeepf-llm/security-review/) lists every
+hook, privilege and what the agent can and cannot see.
 
 ## Documentation
 
-- [Install and build from source](docs/install.md)
-- [Security review](docs/security-review.md)
-- [Supported providers, runtimes, protocols and kernels](docs/providers.md)
-- [Metrics reference](docs/metrics.md)
-- [Alerts and budgets](docs/alerts.md)
-- [Overhead benchmark](docs/benchmark.md)
-- [Grafana dashboards](docs/grafana/)
+The docs are at **[honeybee-studio.github.io/honeybeepf-llm](https://honeybee-studio.github.io/honeybeepf-llm/)**, built from [`docs/`](docs/).
+
+| | |
+|---|---|
+| Get started | [Quickstart](https://honeybee-studio.github.io/honeybeepf-llm/quickstart/) · [Try the demo](https://honeybee-studio.github.io/honeybeepf-llm/demo/) · [Install](https://honeybee-studio.github.io/honeybeepf-llm/install/) · [Verify the image and chart](https://honeybee-studio.github.io/honeybeepf-llm/verify/) · [Build from source](https://honeybee-studio.github.io/honeybeepf-llm/build/) |
+| Concepts | [How it works](https://honeybee-studio.github.io/honeybeepf-llm/how-it-works/) · [What is supported](https://honeybee-studio.github.io/honeybeepf-llm/providers/) · [Cost and prices](https://honeybee-studio.github.io/honeybeepf-llm/cost/) |
+| Guides | [Workloads not seen](https://honeybee-studio.github.io/honeybeepf-llm/guides/coverage/) · [Add a provider](https://honeybee-studio.github.io/honeybeepf-llm/guides/custom-providers/) · [Add your own prices](https://honeybee-studio.github.io/honeybeepf-llm/guides/prices/) · [Plain-HTTP model servers](https://honeybee-studio.github.io/honeybeepf-llm/guides/plaintext/) · [Budgets and alerts](https://honeybee-studio.github.io/honeybeepf-llm/alerts/) · [Grafana dashboards](https://honeybee-studio.github.io/honeybeepf-llm/grafana/) |
+| Reference | [Metrics](https://honeybee-studio.github.io/honeybeepf-llm/metrics/) · [Helm values](https://honeybee-studio.github.io/honeybeepf-llm/reference-values/) |
+| Operations | [Overhead benchmark](https://honeybee-studio.github.io/honeybeepf-llm/benchmark/) · [Security review](https://honeybee-studio.github.io/honeybeepf-llm/security-review/) · [Troubleshooting](https://honeybee-studio.github.io/honeybeepf-llm/troubleshooting/) · [FAQ](https://honeybee-studio.github.io/honeybeepf-llm/faq/) |
 
 ## Roadmap
 
