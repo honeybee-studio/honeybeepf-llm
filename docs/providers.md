@@ -40,72 +40,9 @@ compatibility API documents no usage; and Cloudflare AI Gateway, whose cache hit
 billed. Some providers send streaming usage only with `stream_options.include_usage`, as OpenAI does; a stream without
 it is counted under `llm_responses_unparsed_total{reason="usage_absent"}`.
 
-`builtinProbes.llm.providers` in `values.yaml` describes providers by host, path and usage fields, in the format of
-the [built-in list](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/honeybeepf-llm/honeybeepf-llm-core/src/providers/default_providers.json). They are added to the
-built-in providers; a provider with a built-in name (`openai`, `anthropic`, `gemini`, `bedrock`, matched exactly)
-replaces every built-in entry of that name, so an `openai` entry must also cover the Responses API and an
-`anthropic` entry Claude on Vertex AI. Usage is read by matching the response's fields, not its host, with the
-built-in entries tried first: a gateway that returns an OpenAI-, Anthropic- or Gemini-shaped body is read with the
-built-in fields.
-
-By default only HTTPS calls made through OpenSSL or Go `crypto/tls` are seen. An in-cluster **plain-HTTP** endpoint
-(a typical Ollama or vLLM) is captured at the socket layer when a provider opts in with `plaintext`:
-
-```yaml
-builtinProbes:
-  llm:
-    providers:
-      - name: vllm                 # a non-built-in name, so it is added, not replacing a built-in
-        hosts: ["vllm.default.svc.cluster.local"]   # must match the Host header the app sends
-        paths: ["/v1/chat/completions"]             # optional; omit to match any path on the host
-        plaintext: { port: 8000 }
-```
-
-The agent resolves those Service endpoints and records matching calls with `transport="plain"` (TLS calls carry
-`transport="tls"`), with no proxy and no app change. It needs a node with cgroup v2 and kernel 5.10+; the chart
-grants read access to `services` and `endpointslices` only when a provider sets `plaintext`. OpenAI-compatible
-servers need no `response` block, and the request's `Host` header must match one of the provider's `hosts`. IPv4 only so far.
-
-### Detecting unlisted hosts by shape (experimental)
-
-This mode is experimental and may change. On a VM, 44 ordinary HTTPS calls (GitHub, PyPI, npm, Docker Hub and
-others over HTTP/1.1 and HTTP/2, plus echo services on LLM paths) and 15 local non-LLM JSON responses on LLM paths
-recorded nothing with it on.
-
-`builtinProbes.llm.detectByShape` (default `false`) records OpenAI/Anthropic/Gemini-compatible calls to hosts no
-entry lists — new providers, gateways, in-cluster model servers — by request path and response shape instead of
-host:
-
-```yaml
-builtinProbes:
-  llm:
-    detectByShape: true
-```
-
-When on, an HTTP/1.1 or HTTP/2 request whose path matches a built-in pattern (`/chat/completions`, `/v1/responses`,
-`/v1/messages`, `generateContent`, …) is kept even if its `Host` is unlisted, and it is recorded **only** if the
-response carries that family's usage fields; a response without them is dropped, so a path match alone never
-records. When off (the default) only listed hosts are recorded, exactly as before. This covers the common
-OpenAI-compatible APIs (Groq, DeepSeek, Together, Fireworks, OpenRouter, Mistral, xAI, Perplexity, Cerebras, vLLM,
-LM Studio); it does not catch shapes with no `usage` object or a non-matching path (e.g. Ollama's native
-`/api/chat`, which needs an explicit `providers` entry).
-
-A call recorded this way carries `match="shape"` on its request, token and cost metrics; a call matched by its
-host has no `match` label. A path match whose response has no usage is not counted in
-`llm_responses_unparsed_total` either, since it may not have been an LLM call.
-
-An in-cluster gateway reached over TLS (LiteLLM, a company proxy) is then recorded twice: the app's call to the
-gateway, under the app's namespace, and the gateway's call to the provider, under the gateway's. The first is the
-one that says which team spent it; the second is the one the provider bills. To total spend without counting such
-calls twice, leave out one side, for example the shape-matched calls when the gateway's own upstream calls are
-recorded:
-
-```promql
-sum by (target_namespace) (increase(honeybeepf_llm_llm_cost_usd_total{match!="shape"}[1d]))
-```
-
-A gateway outside the cluster (OpenRouter, a hosted proxy), or one called over plain HTTP without a `plaintext`
-entry, is recorded once.
+Not listed? [Add a provider](guides/custom-providers.md) by host, path and usage fields, add an in-cluster model
+server as a [plain-HTTP provider](guides/plaintext.md), or record calls to unlisted hosts by their
+[shape](guides/detect-by-shape.md).
 
 **Runtimes** (also checked in pods on k3s: `python:3.12-slim`, `python:3.13-alpine`, `node:24-slim`)
 

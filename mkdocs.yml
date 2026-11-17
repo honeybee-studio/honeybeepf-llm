@@ -89,11 +89,20 @@ nav:
       - Verify the image and chart: verify.md
       - Build from source: build.md
   - Concepts:
+      - How it works: how-it-works.md
       - What is supported: providers.md
+      - Cost and prices: cost.md
+  - Guides:
+      - Find the workloads that are not seen: guides/coverage.md
+      - Add a provider: guides/custom-providers.md
+      - Add your own prices: guides/prices.md
+      - Self-hosted models over plain HTTP: guides/plaintext.md
+      - Detect unlisted hosts by shape: guides/detect-by-shape.md
+      - Compare workload variants: guides/pod-labels.md
+      - Budgets and alerts: alerts.md
+      - Grafana dashboards: grafana/README.md
   - Reference:
       - Metrics: metrics.md
-      - Alerts: alerts.md
-      - Grafana dashboards: grafana/README.md
   - Operations:
       - Overhead benchmark: benchmark.md
       - Security review: security-review.md

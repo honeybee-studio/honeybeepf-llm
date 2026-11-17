@@ -37,8 +37,8 @@ agent pod: `kubectl logs -n honeybeepf -l app.kubernetes.io/name=honeybeepf-llm 
 ## 3. Next
 
 - [Send the metrics to Prometheus and open the cost dashboard](install.md).
-- [Check which of your workloads are seen](metrics.md#tls-coverage).
-- [See how calls are priced](metrics.md#cost).
+- [Check which of your workloads are seen](guides/coverage.md).
+- [See how calls are priced](cost.md), and [add your own prices](guides/prices.md).
 
 To remove it:
 
