@@ -47,7 +47,7 @@ changes a syscall result, drops or redirects a packet, or modifies data.
 | `plaintext_connect4` | cgroup (connect4) | the host's cgroup v2 root | note the connecting task when the destination is a watched endpoint | destination IPv4/port, task pid/cgroup |
 | `plaintext_sockops` | sock_ops | the host's cgroup v2 root | add a watched socket to the sockhash; remove it and end its stream on close | the socket 4-tuple |
 | `plaintext_skmsg` | sk_msg | the plaintext sockhash | copy each send on a watched socket (always `SK_PASS`) | up to 4 KB of the sent bytes |
-| `plaintext_skskb` | sk_skb (`stream_verdict`) | the plaintext sockhash | copy each receive on a watched socket (always `SK_PASS`) | up to 16 KB of the received bytes |
+| `plaintext_skskb` | sk_skb (`stream_verdict`) | the plaintext sockhash | copy each receive on a watched socket (always `SK_PASS`) | up to 64 KB of the received bytes |
 
 - **LLM programs** (the SSL rows, `probe_ssl_task_exit`, `probe_exec` and the libssl-open watch) attach when
   `builtinProbes.llm.enabled` is true. The uprobe table is in
@@ -139,8 +139,8 @@ services and endpointslices is granted but the code only gets and lists them.
 - **Plaintext stays in memory on the node.** The uprobes (and, for plaintext endpoints, the socket programs) copy
   decrypted request and response bytes, which include headers such as `Authorization`, into a BPF ring buffer (8 MB for
   TLS, 4 MB for plaintext when it is on). Userspace parses the HTTP for token counts and drops the bytes. Captured
-  bytes are bounded at the kernel (16 KB per read, 4 KB per write), and in userspace each connection's buffer is capped
-  at 8 MB for a request and 16 MB for a response.
+  bytes are bounded at the kernel (16 KB per read, 4 KB per write, 64 KB per plaintext receive), and in userspace each
+  connection's buffer is capped at 8 MB for a request and 16 MB for a response.
 - **Which TLS traffic reaches the agent.** The uprobes fire for every TLS connection in a process that uses the probed
   OpenSSL, not only LLM calls. A connection's bytes are copied until the kernel knows its class (`ssl_class.rs`,
   `conn_filter.rs`): HTTP/1.1 connections to hosts no provider serves, and server-side connections, are dropped in the

@@ -25,10 +25,9 @@ An OpenAI-compatible API needs no `response` block. If the server is reached ove
 
 ## How entries combine
 
-`builtinProbes.llm.providers` in `values.yaml` describes providers by host, path and usage fields, in the format of
-the [built-in list](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/honeybeepf-llm/honeybeepf-llm-core/src/providers/default_providers.json). They are added to the
-built-in providers; a provider with a built-in name (`openai`, `anthropic`, `gemini`, `bedrock`, matched exactly)
-replaces every built-in entry of that name, so an `openai` entry must also cover the Responses API and an
-`anthropic` entry Claude on Vertex AI. Usage is read by matching the response's fields, not its host, with the
-built-in entries tried first: a gateway that returns an OpenAI-, Anthropic- or Gemini-shaped body is read with the
-built-in fields.
+- **Added, not replacing.** Your entries are added to the built-in ones, in the format of the
+  [built-in list](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/honeybeepf-llm/honeybeepf-llm-core/src/providers/default_providers.json).
+- **Except built-in names.** An entry named `openai`, `anthropic`, `gemini` or `bedrock` replaces every built-in entry
+  of that name, so an `openai` entry must also cover the Responses API, and an `anthropic` entry Claude on Vertex AI.
+- **Usage is read by shape.** The response's fields decide how usage is read, with the built-in entries tried first: a
+  gateway that returns an OpenAI-, Anthropic- or Gemini-shaped body is read with the built-in fields.

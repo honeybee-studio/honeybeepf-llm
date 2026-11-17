@@ -1,5 +1,10 @@
 # Metrics
 
+The agent exports OpenTelemetry metrics; the names below are as Prometheus stores them, with the `honeybeepf_llm_`
+prefix. Cost metrics are on [Cost and prices](cost.md).
+
+## The metrics
+
 | Metric (as stored by the bundled Prometheus) | Type | Labels |
 |---|---|---|
 | `honeybeepf_llm_llm_requests_total` | counter | `model`, `status`, `target_namespace`, `target_pod_name`, `target_workload_kind`, `target_workload_name` |
@@ -10,20 +15,31 @@
 | `honeybeepf_llm_llm_latency_seconds` | histogram | same as requests |
 | `honeybeepf_llm_llm_responses_unparsed_total` | counter | `reason`, `target_namespace`, `target_pod_name`, `target_workload_kind`, `target_workload_name` |
 
-`llm_requests_total`, `llm_tokens_total` and `llm_latency_seconds` also carry `transport` (`tls` or `plain`),
-which tells an OpenSSL-captured call apart from one captured on the socket-level plaintext path; the cache and
-reasoning metrics do not carry it.
+## Labels
 
-A call matched by its request path and response shape alone (`detectByShape`, host not listed) also carries
-`match="shape"` on every per-call metric, cost included; a call matched by its host has no `match` label, so
-`{match!="shape"}` keeps only host-matched calls ([why](guides/detect-by-shape.md)).
+**Who made the call**
 
-`model` is the model the response names. When it names none, as with the Gemini Decisions API and Bedrock Converse,
-it is the top-level `model` of the request body, or the model ID in a Bedrock `/model/{id}/...` path (an inference
-profile ARN is left out); with neither, `unknown`.
+| Label | Value |
+|---|---|
+| `target_namespace`, `target_pod_name` | the pod that made the call |
+| `target_workload_kind`, `target_workload_name` | its owner: a Deployment or Argo Rollout (through its ReplicaSet), a CronJob (through its Job, which needs the chart's `jobs get` permission), a StatefulSet or DaemonSet; `Pod` and the pod name for a pod without an owner; `unattributed` if the owner cannot be named |
+| `target_pod_label_<name>` | a pod label you chose, see [pod labels](guides/pod-labels.md) |
 
-`llm_responses_unparsed_total` counts LLM calls the agent saw but could not record, so a drop in recorded calls
-can be told apart from a drop in traffic. `reason` is one of:
+**What the call was**
+
+| Label | Value |
+|---|---|
+| `model` | the model the response names; if none (Gemini Decisions, Bedrock Converse), the request's top-level `model` or the model ID in a Bedrock `/model/{id}/...` path (an inference profile ARN is left out); with neither, `unknown` |
+| `transport` | `tls`, or `plain` for a call captured at the socket ([plain HTTP](guides/plaintext.md)); on requests, tokens and latency only |
+| `match` | `shape` for a call to an unlisted host matched by its [shape](guides/detect-by-shape.md); absent for a call matched by its host, so `{match!="shape"}` keeps only those |
+
+The collector and Prometheus add labels of their own, such as `k8s_pod_name`, `k8s_node_name` and `namespace`: those
+name the agent's pod and node and the collector's namespace, not the caller.
+
+## Calls seen but not recorded
+
+`llm_responses_unparsed_total` counts LLM calls the agent saw but could not record, so a drop in recorded calls can be
+told apart from a drop in traffic.
 
 | `reason` | The call was given up because |
 |---|---|
@@ -40,33 +56,27 @@ can be told apart from a drop in traffic. `reason` is one of:
 Not counted here: a read lost whole because the ring buffer was full (see `llm_events_total{stage="reserve_fail"}`),
 and a connection left idle for 300 s without being closed (for example a killed process).
 
-A plain-HTTP receive larger than the 16 KB capture window (one skb over 16 KB on loopback or from GRO) is counted
-under `llm_events_total{stage="plain_recv_truncated"}`, whether or not the call is still recorded; its usage is read
-only when it falls in the first 16 KB.
+A plain-HTTP receive is captured whole up to 64 KB, the most one skb carries on loopback or after GRO. A larger one
+is counted under `llm_events_total{stage="plain_recv_truncated"}`, whether or not the call is still recorded; its
+usage is read only when it falls in the first 64 KB.
 
-The chart's alert rules use these counters; see [alerts.md](alerts.md). Unparsed calls per minute by reason, for an
-alert on `> 0` (excluding `agent_session`, which is counted on purpose, not a drop, and `usage_absent`, which some
-providers cause on every call):
+For an alert, unparsed calls per minute by reason, leaving out `agent_session` (counted on purpose) and
+`usage_absent` (some providers cause it on every call). The chart's [alert rules](alerts.md) use these counters.
 
 ```promql
 sum by (target_namespace, reason) (rate(honeybeepf_llm_llm_responses_unparsed_total{reason!~"agent_session|usage_absent"}[5m])) * 60
 ```
 
-Calls whose response had no usage, per minute, for a panel rather than an alert:
+For a panel, calls whose response had no usage:
 
 ```promql
 sum by (target_namespace) (rate(honeybeepf_llm_llm_responses_unparsed_total{reason="usage_absent"}[5m])) * 60
 ```
 
-The collector and Prometheus add more labels, such as `k8s_pod_name`, `k8s_node_name` and `namespace`; those name
-the agent's pod and node and the collector's namespace. `target_namespace` and `target_pod_name` name the pod
-that made the call. `target_workload_kind` and `target_workload_name` name its owner: a Deployment or an Argo
-Rollout (through its ReplicaSet), a CronJob (through its Job, which needs the chart's `jobs get` permission), a
-StatefulSet or DaemonSet, or `Pod` and the pod name for a pod without an owner; `unattributed` if the owner cannot
-be named. To split a workload further, by version or team label, add [pod labels](guides/pod-labels.md).
+## Example
 
-The [bundled Prometheus](install.md) is the `honeybeepf-llm-prometheus-server` service (port 80) in the `honeybeepf`
-namespace. Tokens per minute by namespace:
+Tokens per minute by namespace, from the [bundled Prometheus](install.md) (the `honeybeepf-llm-prometheus-server`
+service, port 80, in the `honeybeepf` namespace):
 
 ```promql
 sum by (target_namespace, token_type) (rate(honeybeepf_llm_llm_tokens_total[5m])) * 60

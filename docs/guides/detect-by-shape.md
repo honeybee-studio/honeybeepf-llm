@@ -1,12 +1,11 @@
-# Detect unlisted hosts by shape (experimental)
+# Detect unlisted hosts by shape
 
-This mode is experimental and may change. On a VM, 44 ordinary HTTPS calls (GitHub, PyPI, npm, Docker Hub and
-others over HTTP/1.1 and HTTP/2, plus echo services on LLM paths) and 15 local non-LLM JSON responses on LLM paths
-recorded nothing with it on.
+!!! warning "Experimental"
+    Off by default and may change. On a test VM, 44 ordinary HTTPS calls (GitHub, PyPI, npm, Docker Hub and echo
+    services on LLM paths) and 15 non-LLM JSON responses on LLM paths recorded nothing with it on.
 
-`builtinProbes.llm.detectByShape` (default `false`) records OpenAI/Anthropic/Gemini-compatible calls to hosts no
-entry lists — new providers, gateways, in-cluster model servers — by request path and response shape instead of
-host:
+Normally only calls to known hosts are recorded. With detection by shape, the agent also records calls to hosts no
+provider lists, such as a new provider, a gateway or an in-cluster model server, when they look like an LLM call.
 
 ```yaml
 builtinProbes:
@@ -14,23 +13,37 @@ builtinProbes:
     detectByShape: true
 ```
 
-When on, an HTTP/1.1 or HTTP/2 request whose path matches a built-in pattern (`/chat/completions`, `/v1/responses`,
-`/v1/messages`, `generateContent`, …) is kept even if its `Host` is unlisted, and it is recorded **only** if the
-response carries that family's usage fields; a response without them is dropped, so a path match alone never
-records. When off (the default) only listed hosts are recorded, exactly as before. This covers the common
-OpenAI-compatible APIs (Groq, DeepSeek, Together, Fireworks, OpenRouter, Mistral, xAI, Perplexity, Cerebras, vLLM,
-LM Studio); it does not catch shapes with no `usage` object or a non-matching path (e.g. Ollama's native
-`/api/chat`, which needs an explicit `providers` entry).
+## When a call counts
 
-A call recorded this way carries `match="shape"` on its request, token and cost metrics; a call matched by its
-host has no `match` label. A path match whose response has no usage is not counted in
-`llm_responses_unparsed_total` either, since it may not have been an LLM call.
+A call to an unlisted host is recorded only when **both** are true:
 
-An in-cluster gateway reached over TLS (LiteLLM, a company proxy) is then recorded twice: the app's call to the
-gateway, under the app's namespace, and the gateway's call to the provider, under the gateway's. The first is the
-one that says which team spent it; the second is the one the provider bills. To total spend without counting such
-calls twice, leave out one side, for example the shape-matched calls when the gateway's own upstream calls are
-recorded:
+1. The request path matches a built-in pattern: `/chat/completions`, `/v1/responses`, `/v1/messages`,
+   `generateContent` and the like.
+2. The response carries that API family's usage fields.
+
+A path match alone never records anything. It is not counted in `llm_responses_unparsed_total` either, since it may
+not have been an LLM call.
+
+| Covered | Not covered |
+|---|---|
+| OpenAI-compatible APIs: Groq, DeepSeek, Together, Fireworks, OpenRouter, Mistral, xAI, Perplexity, Cerebras, vLLM, LM Studio | responses with no `usage` object |
+| Anthropic- and Gemini-shaped APIs | other paths, such as Ollama's native `/api/chat`: [add it as a provider](custom-providers.md) |
+
+## Telling them apart
+
+A call recorded this way carries `match="shape"` on its request, token and cost metrics. A call matched by its host
+has no `match` label.
+
+## Gateways are counted twice
+
+An in-cluster gateway reached over TLS (LiteLLM, a company proxy) is then recorded twice:
+
+| Record | Namespace | Tells you |
+|---|---|---|
+| app → gateway (`match="shape"`) | the app's | which team spent it |
+| gateway → provider | the gateway's | what the provider bills |
+
+To total spend once, leave one side out, for example the shape-matched calls:
 
 ```promql
 sum by (target_namespace) (increase(honeybeepf_llm_llm_cost_usd_total{match!="shape"}[1d]))
