@@ -1,0 +1,58 @@
+name: Fuzz
+
+# Feeds random bytes to the parsers that read other processes' traffic: HTTP/2 frames, HPACK, chunked bodies
+# and provider usage JSON. A minute per target on changes, ten minutes weekly; a crash uploads its input.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'honeybeepf-llm/honeybeepf-llm-core/**'
+      - 'honeybeepf-llm/fuzz/**'
+      - '.github/workflows/fuzz.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'honeybeepf-llm/honeybeepf-llm-core/**'
+      - 'honeybeepf-llm/fuzz/**'
+      - '.github/workflows/fuzz.yml'
+  schedule:
+    - cron: '41 5 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [h2_frames, hpack, chunked, usage]
+    env:
+      SECONDS_PER_TARGET: ${{ github.event_name == 'schedule' && '600' || '60' }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: nightly-2026-04-30
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.1 --locked
+
+      - name: Fuzz
+        working-directory: honeybeepf-llm
+        run: cargo fuzz run "$TARGET" -- -max_total_time="$SECONDS_PER_TARGET" -rss_limit_mb=2048
+
+      - name: Keep the crashing input
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: honeybeepf-llm/fuzz/artifacts
+          if-no-files-found: ignore
