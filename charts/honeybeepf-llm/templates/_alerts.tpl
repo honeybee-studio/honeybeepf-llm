@@ -115,12 +115,4 @@ Spend and call rules group by target_namespace, the calling pod's namespace: `na
     annotations:
       summary: {{`"The honeybeepf-llm agent on {{ $labels.k8s_node_name }} stopped reporting"`}}
       description: {{`"The agent on {{ $labels.k8s_node_name }} reported an hour ago and not now, so LLM calls on that node are not recorded. This also fires for about an hour after a node is removed."`}}
-  - alert: HoneybeepfLLMProbeInactive
-    expr: max by (k8s_node_name) (honeybeepf_llm_active_probes{probe="llm"}) == 0
-    for: 10m
-    labels:
-      severity: critical
-    annotations:
-      summary: {{`"The LLM probe on {{ $labels.k8s_node_name }} is not attached"`}}
-      description: {{`"The agent on {{ $labels.k8s_node_name }} runs but has no LLM probe attached, so no call on that node is recorded."`}}
 {{- end }}

@@ -103,21 +103,15 @@ tests:
         exp_alerts:
           - exp_labels: {severity: warning, target_namespace: team-k, target_workload_name: api}
 
-  # node-1's agent stops reporting after an hour; node-2 keeps reporting; node-3 runs with no LLM probe.
+  # node-1's agent stops reporting after an hour; node-2 keeps reporting.
   - interval: 1m
     input_series:
       - series: 'honeybeepf_llm_active_probes{k8s_node_name="node-1",probe="llm"}'
         values: '1x60 stale'
       - series: 'honeybeepf_llm_active_probes{k8s_node_name="node-2",probe="llm"}'
         values: '1x100'
-      - series: 'honeybeepf_llm_active_probes{k8s_node_name="node-3",probe="llm"}'
-        values: '0x100'
     alert_rule_test:
       - eval_time: 80m
         alertname: HoneybeepfAgentMissing
         exp_alerts:
           - exp_labels: {severity: critical, k8s_node_name: node-1}
-      - eval_time: 80m
-        alertname: HoneybeepfLLMProbeInactive
-        exp_alerts:
-          - exp_labels: {severity: critical, k8s_node_name: node-3}
