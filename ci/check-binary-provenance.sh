@@ -10,6 +10,8 @@ root=$(git -C "${1:-.}" rev-parse --show-toplevel)
 allowlist=(
   'docs/images/architecture.png'
   'docs/images/grafana.png' # README screenshot of docs/grafana/honeybeepf-cost.json; recapture it in Grafana after the Quickstart
+  'docs/images/grafana-cost-narrow.png' # the cost panel cropped from grafana.png, for the docs site home page
+  'docs/assets/og.png' # the docs site's link preview image, a 1200x630 render of its home page
 )
 
 # Build and deploy inputs: none of these may mention testdata or any binary file name.
