@@ -1,0 +1,26 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+exporters:
+  debug:
+    verbosity: detailed
+  file:
+    path: /output/otel.jsonl
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug, file]
+    metrics:
+      receivers: [otlp]
+      exporters: [debug, file]
+    logs:
+      receivers: [otlp]
+      exporters: [debug, file]

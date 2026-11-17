@@ -65,7 +65,7 @@ class LoadGenerator:
 
         t_start = time.monotonic()
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with httpx.AsyncClient(timeout=self._timeout, verify=False) as client:
             if profile.rate_rps > 0 and profile.duration_secs > 0:
                 interval = 1.0 / profile.rate_rps
                 tasks = []

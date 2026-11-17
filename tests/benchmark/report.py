@@ -16,18 +16,35 @@ def _overhead(key: str, b: float, p: float) -> str:
     return "-"
 
 
-def format_report(baseline: dict, proxy: dict) -> str:
-    header = f"{'Metric':<25} {'Baseline':>12} {'LiteLLM Proxy':>14} {'Overhead':>12}"
+def format_report(baseline: dict, proxy: dict, ebpf: dict | None = None) -> str:
+    if ebpf is None:
+        header = f"{'Metric':<25} {'Baseline':>12} {'LiteLLM Proxy':>14} {'Overhead':>12}"
+        sep = "-" * len(header)
+        lines = [header, sep]
+        for row in ROWS:
+            label, key, fmt = row[0], row[1], row[2]
+            mult = row[3] if len(row) > 3 else 1
+            b = baseline.get(key, 0) * mult
+            p = proxy.get(key, 0) * mult
+            lines.append(f"{label:<25} {format(b, fmt):>12} {format(p, fmt):>14} {_overhead(key, b, p):>12}")
+        return "\n".join(lines)
+
+    header = (
+        f"{'Metric':<25} {'Baseline':>12} {'LiteLLM Proxy':>14} {'honeybeepf-llm':>15} "
+        f"{'Proxy Overhead':>14} {'eBPF Overhead':>14}"
+    )
     sep = "-" * len(header)
     lines = [header, sep]
-
     for row in ROWS:
         label, key, fmt = row[0], row[1], row[2]
         mult = row[3] if len(row) > 3 else 1
         b = baseline.get(key, 0) * mult
         p = proxy.get(key, 0) * mult
-        lines.append(f"{label:<25} {format(b, fmt):>12} {format(p, fmt):>14} {_overhead(key, b, p):>12}")
-
+        e = ebpf.get(key, 0) * mult
+        lines.append(
+            f"{label:<25} {format(b, fmt):>12} {format(p, fmt):>14} {format(e, fmt):>15} "
+            f"{_overhead(key, b, p):>14} {_overhead(key, b, e):>14}"
+        )
     return "\n".join(lines)
 
 
@@ -40,24 +57,38 @@ def format_markdown(results: dict) -> str:
 
         baseline = data.get("baseline", {})
         proxy = data.get("proxy", {})
+        ebpf = data.get("ebpf")
 
         lines.append(f"### {scenario_name}")
         lines.append("")
-        lines.append("| Metric | Baseline | LiteLLM Proxy | Overhead |")
-        lines.append("|--------|----------|---------------|----------|")
 
-        for row in ROWS:
-            label, key, fmt = row[0], row[1], row[2]
-            mult = row[3] if len(row) > 3 else 1
-            b = baseline.get(key, 0) * mult
-            p = proxy.get(key, 0) * mult
-            lines.append(f"| {label} | {format(b, fmt)} | {format(p, fmt)} | {_overhead(key, b, p)} |")
-
+        if ebpf is None:
+            lines.append("| Metric | Baseline | LiteLLM Proxy | Overhead |")
+            lines.append("|--------|----------|---------------|----------|")
+            for row in ROWS:
+                label, key, fmt = row[0], row[1], row[2]
+                mult = row[3] if len(row) > 3 else 1
+                b = baseline.get(key, 0) * mult
+                p = proxy.get(key, 0) * mult
+                lines.append(f"| {label} | {format(b, fmt)} | {format(p, fmt)} | {_overhead(key, b, p)} |")
+        else:
+            lines.append("| Metric | Baseline | LiteLLM Proxy | honeybeepf-llm | Proxy Overhead | eBPF Overhead |")
+            lines.append("|--------|----------|---------------|----------------|----------------|----------------|")
+            for row in ROWS:
+                label, key, fmt = row[0], row[1], row[2]
+                mult = row[3] if len(row) > 3 else 1
+                b = baseline.get(key, 0) * mult
+                p = proxy.get(key, 0) * mult
+                e = ebpf.get(key, 0) * mult
+                lines.append(
+                    f"| {label} | {format(b, fmt)} | {format(p, fmt)} | {format(e, fmt)} "
+                    f"| {_overhead(key, b, p)} | {_overhead(key, b, e)} |"
+                )
         lines.append("")
 
     if "kill" in results:
         k = results["kill"]
-        lines.append("### Kill Test")
+        lines.append("### Kill Test (LiteLLM Proxy only — single-arm, no baseline/eBPF analog)")
         lines.append("")
         lines.append(f"- Proxy killed mid-load: **{k['errors']}** requests failed ({k['error_rate']:.0%} error rate)")
         lines.append("")
