@@ -46,40 +46,55 @@ Make an LLM call from another terminal on the same host; a line with the model a
 
 ## 3. Run it as a service
 
-Put the settings in an environment file:
+=== "xtask"
 
-```bash
-sudo mkdir -p /etc/honeybeepf-llm
-sudo tee /etc/honeybeepf-llm/honeybeepf-llm.env <<'EOF'
-BUILTIN_PROBES__LLM=true
-RUST_LOG=info
-# Send metrics to an OpenTelemetry Collector; leave it out to keep the calls in the log only.
-# OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
-EOF
-```
+    From the machine you build on, install a systemd unit on the server that turns the LLM probe on, logs each call
+    and keeps the six capabilities below:
 
-Then a systemd unit that runs the agent as root:
+    ```bash
+    cargo +nightly xtask install-service --host <user>@<server>
+    ssh <user>@<server> 'sudo systemctl start honeybeepf-llm'
+    ```
 
-```bash
-sudo tee /etc/systemd/system/honeybeepf-llm.service <<'EOF'
-[Unit]
-Description=honeybeepf-llm LLM eBPF agent
-After=network.target
+    To send metrics to a Collector, put `OTEL_EXPORTER_OTLP_ENDPOINT=...` in an environment file on the server and pass
+    it with `--config /etc/honeybeepf-llm/honeybeepf-llm.env`; its settings override the unit's.
 
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/honeybeepf-llm
-EnvironmentFile=/etc/honeybeepf-llm/honeybeepf-llm.env
-Restart=on-failure
-RestartSec=5
+=== "By hand"
 
-[Install]
-WantedBy=multi-user.target
-EOF
-sudo systemctl daemon-reload
-sudo systemctl enable --now honeybeepf-llm
-sudo journalctl -u honeybeepf-llm -f
-```
+    Put the settings in an environment file:
+
+    ```bash
+    sudo mkdir -p /etc/honeybeepf-llm
+    sudo tee /etc/honeybeepf-llm/honeybeepf-llm.env <<'EOF'
+    BUILTIN_PROBES__LLM=true
+    RUST_LOG=info
+    # Send metrics to an OpenTelemetry Collector; leave it out to keep the calls in the log only.
+    # OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+    EOF
+    ```
+
+    Then a systemd unit that runs the agent as root:
+
+    ```bash
+    sudo tee /etc/systemd/system/honeybeepf-llm.service <<'EOF'
+    [Unit]
+    Description=honeybeepf-llm LLM eBPF agent
+    After=network.target
+
+    [Service]
+    Type=simple
+    ExecStart=/usr/local/bin/honeybeepf-llm
+    EnvironmentFile=/etc/honeybeepf-llm/honeybeepf-llm.env
+    Restart=on-failure
+    RestartSec=5
+
+    [Install]
+    WantedBy=multi-user.target
+    EOF
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now honeybeepf-llm
+    sudo journalctl -u honeybeepf-llm -f
+    ```
 
 ## Permissions
 
