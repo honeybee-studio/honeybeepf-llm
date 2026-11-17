@@ -61,50 +61,7 @@ harness without root. `--cases` runs a subset; `--help` lists the flags.
 
 ## Results
 
-### v0.2.0 (f8970f3), measured 2026-10-30
-
-- Kernel 7.0.0-38-generic (Ubuntu 26.04.1 LTS), multipass VM: 4 vCPU of an Intel Core Ultra 5 225H, 7.7 GiB memory;
-  CPU steal 0.0%; Python 3.14.4, OpenSSL 3.5.5; release build of tag v0.2.0, defaults as above except 5 rounds
-
-| Case | req/s off | req/s on | p50 ms off | p50 ms on | p99 ms off | p99 ms on |
-|---|---|---|---|---|---|---|
-| `llm` | 200.12 | 200.13 | 0.81 | 0.89 | 1.90 | 2.47 |
-| `non-llm` | 200.13 | 200.12 | 0.80 | 0.77 | 1.92 | 2.06 |
-| `max` | 11,612 | 10,861 (−6.5%) | 0.32 | 0.34 | 0.76 | 0.99 |
-
-| Case | CPU s / 1k req | RSS anon MB | RSS file MB | PSS MB | BPF maps MB | Tokens recorded |
-|---|---|---|---|---|---|---|
-| `llm` | 0.067 | 4.2 | 26.8 | 20.6 | 18.8 | 100% |
-| `non-llm` | 0.048 | 4.2 | 26.7 | 20.6 | 18.8 | 100% |
-| `max` | 0.008 | 4.2 | 26.7 | 20.5 | 18.8 | 100% |
-
-Startup with 1,000 idle processes took 0.12 s. At 200 requests/s the latency differences are a few tenths of a
-millisecond and go both ways (the run with the agent is sometimes faster), so they are noise at this resolution. In
-`max` (about 10,900 LLM calls/s) every token was recorded in all five runs.
-
-### main preview (e3fa2a3), measured 2026-11-09
-
-Not a release: a snapshot of `main` to track the numbers between releases. Fewer rounds than the v0.2.0 run, so
-the cells are noisier; read it alongside v0.2.0, not as a replacement.
-
-- Kernel 7.0.0-42-generic (Ubuntu 26.04.1 LTS), multipass VM: 4 vCPU of an Intel Core Ultra 5 225H, 7.7 GiB memory;
-  CPU steal 0.0%; Python 3.14.4, OpenSSL 3.5.5; release build of `main` at e3fa2a3, defaults as above (3 rounds, seed 93)
-
-| Case | req/s off | req/s on | p50 ms off | p50 ms on | p99 ms off | p99 ms on |
-|---|---|---|---|---|---|---|
-| `llm` | 200.12 | 200.12 | 0.88 | 0.98 | 2.50 | 2.73 |
-| `non-llm` | 200.12 | 200.13 | 0.73 | 0.91 | 2.11 | 2.16 |
-| `max` | 11,293 | 10,651 (−5.7%) | 0.33 | 0.35 | 0.79 | 0.94 |
-
-| Case | CPU s / 1k req | RSS anon MB | RSS file MB | PSS MB | BPF maps MB | Tokens recorded |
-|---|---|---|---|---|---|---|
-| `llm` | 0.062 | 4.3 | 27.1 | 21.0 | 18.8 | 100% |
-| `non-llm` | 0.018 | 4.3 | 27.0 | 20.9 | 18.8 | 100% |
-| `max` | 0.006 | 4.3 | 27.0 | 20.9 | 18.8 | 100% |
-
-Startup with 1,000 idle processes took 0.15 s. Memory, token accuracy (100% in every case) and the `max` throughput
-cost (−5.7%) are in line with v0.2.0; the latency columns differ by a few tenths of a millisecond, within the noise
-at this rate and round count.
+The newest release comes first; earlier runs are folded below it.
 
 ### v0.3.0 (9018cd7), measured 2026-11-14
 
@@ -127,3 +84,29 @@ at this rate and round count.
 Startup with 1,000 idle processes took 0.16 s. Against v0.2.0, CPU per call is lower (0.053 vs 0.067 s per 1,000
 `llm` calls), memory is 0.2 MB higher, and the `max` throughput cost is about the same (−6.7% vs −6.5%). Every token
 was recorded in all five runs.
+
+### Earlier releases
+
+<details markdown>
+<summary>v0.2.0 (f8970f3), measured 2026-10-30</summary>
+
+- Kernel 7.0.0-38-generic (Ubuntu 26.04.1 LTS), multipass VM: 4 vCPU of an Intel Core Ultra 5 225H, 7.7 GiB memory;
+  CPU steal 0.0%; Python 3.14.4, OpenSSL 3.5.5; release build of tag v0.2.0, defaults as above except 5 rounds
+
+| Case | req/s off | req/s on | p50 ms off | p50 ms on | p99 ms off | p99 ms on |
+|---|---|---|---|---|---|---|
+| `llm` | 200.12 | 200.13 | 0.81 | 0.89 | 1.90 | 2.47 |
+| `non-llm` | 200.13 | 200.12 | 0.80 | 0.77 | 1.92 | 2.06 |
+| `max` | 11,612 | 10,861 (−6.5%) | 0.32 | 0.34 | 0.76 | 0.99 |
+
+| Case | CPU s / 1k req | RSS anon MB | RSS file MB | PSS MB | BPF maps MB | Tokens recorded |
+|---|---|---|---|---|---|---|
+| `llm` | 0.067 | 4.2 | 26.8 | 20.6 | 18.8 | 100% |
+| `non-llm` | 0.048 | 4.2 | 26.7 | 20.6 | 18.8 | 100% |
+| `max` | 0.008 | 4.2 | 26.7 | 20.5 | 18.8 | 100% |
+
+Startup with 1,000 idle processes took 0.12 s. At 200 requests/s the latency differences are a few tenths of a
+millisecond and go both ways (the run with the agent is sometimes faster), so they are noise at this resolution. In
+`max` (about 10,900 LLM calls/s) every token was recorded in all five runs.
+
+</details>
