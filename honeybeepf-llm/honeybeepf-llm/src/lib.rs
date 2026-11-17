@@ -26,14 +26,9 @@ use crate::settings::Settings;
 
 pub mod probes;
 use crate::probes::{
-    DynamicProbe, IdentityResolver, LibOpen, LibOpenSeen, Probe, ProcessInfo,
-    builtin::{
-        FileAccessProbe,
-        llm::{
-            ExecNotify, ExecPidQueue, LibOpenQueue, LlmProbe, setup_exec_watch,
-            setup_lib_open_watch,
-        },
-        process_lifecycle::{self, ProcessLifecycleProbe},
+    DynamicProbe, IdentityResolver, LibOpen, LibOpenSeen, ProcessInfo,
+    builtin::llm::{
+        ExecNotify, ExecPidQueue, LibOpenQueue, LlmProbe, setup_exec_watch, setup_lib_open_watch,
     },
     discovery::resolve_in_root,
     request_shutdown, shutdown_flag,
@@ -332,49 +327,9 @@ impl HoneyBeeEngine {
     }
 
     fn attach_probes(&mut self) -> Result<()> {
-        // File Access Probe
-        if self
-            .settings
-            .builtin_probes
-            .filesystem
-            .file_access
-            .unwrap_or(false)
-        {
-            let watched_paths = self
-                .settings
-                .builtin_probes
-                .filesystem
-                .watched_paths
-                .clone()
-                .unwrap_or_default();
-
-            if watched_paths.is_empty() {
-                info!("FileAccessProbe is ENABLED but no watched_paths configured, skipping...");
-            } else {
-                info!("FileAccessProbe is ENABLED, attaching...");
-                let probe = FileAccessProbe::new(watched_paths);
-                probe.attach(&mut self.bpf, self.resolver.clone())?;
-            }
-        }
-
         for probe in &self.dynamic_probes {
             probe.attach(&mut self.bpf, self.resolver.clone())?;
             telemetry::record_active_probe("llm", 1);
-        }
-
-        if self
-            .settings
-            .builtin_probes
-            .process_lifecycle
-            .unwrap_or(false)
-        {
-            if let Some(hook) = process_lifecycle::missing_kernel_hook() {
-                warn!("Process lifecycle probe skipped: kernel has no {hook}");
-            } else {
-                ProcessLifecycleProbe.attach(&mut self.bpf, self.resolver.clone())?;
-                telemetry::record_active_probe("process_lifecycle", 1);
-                info!("Process lifecycle probe attached");
-            }
         }
         Ok(())
     }
@@ -450,10 +405,7 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
-    use crate::{
-        probes::POLL_INTERVAL_MS,
-        settings::{BuiltinProbes, FilesystemProbes},
-    };
+    use crate::{probes::POLL_INTERVAL_MS, settings::BuiltinProbes};
 
     #[test]
     fn rescans_run_once_per_debounce_and_only_when_asked() {
@@ -520,11 +472,8 @@ mod tests {
     fn test_startup_error_stops_blocking_readers() {
         let settings = Settings {
             builtin_probes: BuiltinProbes {
-                // The object has no file access program, so attaching it fails inside run().
-                filesystem: FilesystemProbes {
-                    file_access: Some(true),
-                    watched_paths: Some(vec!["/etc".into()]),
-                },
+                // The object has no LLM maps, so attaching the LLM probe fails inside run().
+                llm: Some(true),
                 ..Default::default()
             },
             ..Default::default()
@@ -543,8 +492,8 @@ mod tests {
             });
             engine.run().await
         });
-        let err = result.expect_err("attaching the file access probe fails");
-        assert!(format!("{err:#}").contains("WATCHED_PATHS"), "{err:#}");
+        let err = result.expect_err("attaching the LLM probe fails");
+        assert!(format!("{err:#}").contains("LLM_STATS"), "{err:#}");
 
         let (done_tx, done_rx) = mpsc::channel();
         std::thread::spawn(move || {

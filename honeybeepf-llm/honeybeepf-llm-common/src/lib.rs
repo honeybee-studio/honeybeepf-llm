@@ -324,63 +324,8 @@ const _: () = assert!(core::mem::size_of::<LibOpenEvent>() == 4 + 4 + 16 + 8 + M
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for LibOpenEvent {}
 
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct ProcessExitEvent {
-    pub pid: u32,
-    pub ppid: u32,
-    pub exit_code: i32,
-    pub _pad: u32,
-    pub start_time: u64,
-    pub exit_time: u64,
-    pub cgroup_id: u64,
-    pub comm: [u8; 16],
-}
-
-#[cfg(feature = "user")]
-unsafe impl aya::Pod for ProcessExitEvent {}
-// ============================================================
-// File Access Events
-// ============================================================
-
+/// Longest path an exec or libssl-open event carries.
 pub const MAX_FILENAME_LEN: usize = 256;
-pub const MAX_COMM_LEN: usize = 16;
-/// Maximum length of suffix patterns for wildcard matching (e.g., ".ssh/authorized_keys")
-pub const MAX_SUFFIX_LEN: usize = 64;
-
-/// File access event emitted on sys_enter_openat tracepoint
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct FileAccessEvent {
-    pub metadata: EventMetadata,
-    pub tid: u32,
-    pub flags: u32,
-    pub mode: u32,
-    pub ino: u64,
-    pub dev: u32,
-    pub _pad2: u32,
-    pub comm: [u8; MAX_COMM_LEN],
-    pub filename: [u8; MAX_FILENAME_LEN],
-}
-
-impl Default for FileAccessEvent {
-    fn default() -> Self {
-        Self {
-            metadata: EventMetadata::default(),
-            tid: 0,
-            flags: 0,
-            mode: 0,
-            ino: 0,
-            dev: 0,
-            _pad2: 0,
-            comm: [0u8; MAX_COMM_LEN],
-            filename: [0u8; MAX_FILENAME_LEN],
-        }
-    }
-}
-
-#[cfg(feature = "user")]
-unsafe impl aya::Pod for FileAccessEvent {}
 
 #[cfg(test)]
 mod tests {
