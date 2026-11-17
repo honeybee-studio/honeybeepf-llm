@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 
-use chrono::NaiveDate;
 use serde::de::{DeserializeSeed, Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
@@ -243,11 +242,63 @@ fn day<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
 
 /// Days since 1970-01-01 for a real `YYYY-MM-DD` date.
 fn parse_day(s: &str) -> Option<u32> {
-    // chrono alone would also take `2026-1-30`, a sign or leading spaces.
     let digits = s.bytes().all(|b| b == b'-' || b.is_ascii_digit());
     if !(digits && s.split('-').map(str::len).eq([4, 2, 2])) {
         return None;
     }
-    let date = NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?;
-    u32::try_from(date.to_epoch_days()).ok()
+    let mut parts = s.split('-').map(str::parse::<i64>);
+    let (y, m, d) = (
+        parts.next()?.ok()?,
+        parts.next()?.ok()?,
+        parts.next()?.ok()?,
+    );
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let last = *month_days.get(usize::try_from(m).ok()?.checked_sub(1)?)?;
+    if !(1..=last).contains(&d) {
+        return None;
+    }
+    // Day count with March as the first month, so the leap day ends a year (Hinnant's days_from_civil).
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let year_of_era = y.rem_euclid(400);
+    let day_of_year = (153 * m + 2) / 5 + d - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    u32::try_from(y.div_euclid(400) * 146_097 + day_of_era - 719_468).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_day;
+
+    #[test]
+    fn days_count_from_1970_and_only_real_dates_parse() {
+        assert_eq!(parse_day("1970-01-01"), Some(0));
+        assert_eq!(parse_day("2000-03-01"), Some(11_017));
+        assert_eq!(parse_day("2026-11-17"), Some(20_774));
+        assert_eq!(parse_day("2024-02-29"), Some(19_782));
+        for bad in [
+            "1969-12-31",
+            "2026-02-29",
+            "2100-02-29",
+            "2026-04-31",
+            "2026-13-01",
+            "2026-00-10",
+            "2026-1-30",
+        ] {
+            assert_eq!(parse_day(bad), None, "{bad}");
+        }
+    }
 }
