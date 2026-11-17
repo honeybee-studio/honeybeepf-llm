@@ -1,0 +1,2 @@
+# zig for cargo-zigbuild in binaries.yml; `pip-compile --generate-hashes zig.in` writes zig.txt.
+ziglang==0.14.1

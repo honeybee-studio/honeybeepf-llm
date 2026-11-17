@@ -46,3 +46,13 @@ updates:
     labels:
       - dependencies
       - documentation
+  # Keeps the hash-pinned zig used to build the release binaries current.
+  - package-ecosystem: pip
+    directory: /.github/requirements
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+      - ci

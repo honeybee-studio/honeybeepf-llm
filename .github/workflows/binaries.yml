@@ -13,6 +13,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/binaries.yml'
+      - '.github/requirements/zig.txt'
 
 permissions:
   contents: read
@@ -52,7 +53,7 @@ jobs:
         run: |
           cargo install bpf-linker --locked --version 0.10.3
           cargo install cargo-zigbuild --locked --version 0.24.0
-          python3 -m pip install --user ziglang==0.14.1
+          python3 -m pip install --user --require-hashes -r .github/requirements/zig.txt
 
       - name: Build
         working-directory: honeybeepf-llm
