@@ -1,304 +1,256 @@
 # Security review
 
-This document is for the security and platform teams who approve the agent before it runs. honeybeepf-llm is a DaemonSet
-with eBPF capabilities, the host PID namespace and read-only access to the host's cgroup tree. It attaches eBPF programs
-to OpenSSL and to a few kernel hooks, reads TLS plaintext in memory on the node to find LLM API calls, and exports token
-and cost metrics over OTLP. It is not a proxy and does not change the data or the result of any call.
-
-Every statement below is drawn from the chart, the code or the CI workflows, with the file named inline, and it
-describes the chart's defaults unless an option is named. Where something has not been tested, it says so. Section 8
-lists the known gaps in one place. To report a suspected vulnerability, follow [`SECURITY.md`](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/SECURITY.md) (GitHub
-private vulnerability reporting).
+For the security and platform teams who approve the agent before it runs. Every statement comes from the chart, the
+code or the CI workflows and describes the chart's defaults unless an option is named; what has not been tested says so.
+[Known gaps](#8-known-gaps) collects the open issues. To report a vulnerability, follow
+[`SECURITY.md`](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/SECURITY.md).
 
 ## At a glance
 
 | Question | Answer |
 |---|---|
-| Privileged container? | Not `privileged: true`: `capabilities.drop: [ALL]`, then `BPF`, `PERFMON`, `SYS_ADMIN`, `SYS_PTRACE`, `NET_ADMIN` and `SYS_RESOURCE` are added back, and AppArmor is unconfined for the agent container. With uid 0 and `hostPID`, a compromised agent has root-level access to the node (section 2). |
-| Runs as root? | Yes, uid 0 in the container, with `hostPID: true`. |
-| Host filesystem? | Only the host's cgroup tree is mounted (read-only, at `/host/sys/fs/cgroup`). Through `hostPID`, `/proc/<pid>/root` still reaches other processes' filesystems, including the host's (section 2). |
-| Reads plaintext? | Yes, in memory only: the decrypted bytes of TLS connections in processes that use the probed OpenSSL, until a connection is known not to be an LLM call (section 3). |
-| What leaves the node? | OTLP metrics over gRPC (plaintext to an in-cluster collector by default, TLS with an `https://` endpoint), and the container's log lines; never request or response bodies (section 3). |
+| What is it? | A DaemonSet that reads TLS plaintext in memory on its node to find LLM API calls and exports token and cost metrics. Not a proxy; it never changes a call or its result. |
+| Privileged? | No `privileged: true`. All capabilities dropped, six added back ([Privileges](#2-privileges)). AppArmor unconfined for the agent container. |
+| Runs as root? | Yes, uid 0, with `hostPID`. A compromised agent has root-level access to the node. |
+| Host filesystem? | Only the cgroup tree, read-only. `/proc/<pid>/root` still reaches other filesystems through `hostPID`. |
+| Reads plaintext? | Yes, in memory only, until a connection is known not to be an LLM call ([Data handling](#3-data-handling)). |
+| What leaves the node? | OTLP metrics and log lines. Never request or response bodies, headers or keys. |
 | Listening ports? | None. |
-| In the request path? | No proxy, but the uprobes run in the application's own thread on every `SSL_read`/`SSL_write` (section 5). |
-| Signed images? | Yes, from the first build after signing started: keyless cosign signatures, an SBOM and build provenance on the images, and a signed release chart (section 7). |
+| In the request path? | No proxy, but the uprobes run in the application's thread on every `SSL_read`/`SSL_write` ([Failure behaviour](#5-failure-behaviour)). |
+| Image? | Chainguard `glibc-dynamic`: glibc, libgcc and CA certificates, no shell or package manager; no known vulnerabilities in a Trivy scan when built. |
+| Signed? | Images (with SBOM and provenance) and the release chart, by keyless cosign, from 0.3.1 ([Supply chain](#7-supply-chain)). |
 
 ## 1. Kernel hooks
 
-With chart defaults only the LLM probe attaches (`builtinProbes.llm.enabled: true`; `false` attaches nothing). The
-other groups below are opt-in as noted. Every program only reads or observes: none
-changes a syscall result, drops or redirects a packet, or modifies data.
+Every program only reads or observes: none changes a syscall result, drops or redirects a packet, or modifies data.
 
-| Program (eBPF) | Type | Attaches to | Purpose | What it reads |
+| Group | Programs | Attach to | Read | On by default |
 |---|---|---|---|---|
-| `probe_ssl_rw_enter` | uprobe | `SSL_read`, `SSL_write` entry | record the call's buffer pointer and length | arg0/arg1 (`SSL*`, buffer pointer) |
-| `probe_ssl_read_exit` / `probe_ssl_write_exit` | uretprobe | `SSL_read` / `SSL_write` return | copy the decrypted bytes of the call | up to 16 KB of a read, 4 KB of a write |
-| `probe_ssl_rw_ex_enter` | uprobe | `SSL_read_ex`, `SSL_write_ex` entry | same, for the `_ex` variants (byte count via arg3) | arg0/arg1/arg3 pointers |
-| `probe_ssl_read_ex_exit` / `probe_ssl_write_ex_exit` | uretprobe | `SSL_read_ex` / `SSL_write_ex` return | copy the decrypted bytes | up to 16 KB of a read, 4 KB of a write |
-| `probe_ssl_do_handshake_enter` / `_exit` | uprobe / uretprobe | `SSL_do_handshake` | start the latency timer; mark a reused `SSL*` | the `SSL*` pointer only |
-| `probe_ssl_free` | uprobe | `SSL_free` | end the connection's stream (the address can be reused) | the `SSL*` pointer only |
-| `probe_ssl_task_exit` | tracepoint | `sched:sched_process_exit` | clear the in-flight call state of an exiting thread | thread id only |
-| `probe_exec` | tracepoint | `sched:sched_process_exec` | tell userspace to attach SSL probes to the new process | pid and the process `comm` |
-| `probe_lib_open_fentry` / `probe_lib_open` | fentry, kprobe fallback | `do_sys_openat2` | notice a `libssl.so*` open before its first SSL call | the opened path |
-| `honeybeepf_llm_group_exit` | kprobe | `do_group_exit` | mark a process group that is exiting | pid/tgid |
-| `honeybeepf_llm_process_exit` | kprobe | `acct_collect` | report a process exit at its last thread (needs `CONFIG_BSD_PROCESS_ACCT`) | pid/tgid, exit code, `comm`, cgroup id, start and exit time |
-| `honeybeepf_llm_oom_mark_victim` | tracepoint | `oom:mark_victim` | flag a pid the OOM killer chose, so its exit is attributed | the victim pid |
-| `sys_enter_openat` | tracepoint | the `openat` syscall | record opens of a short list of watched paths | the opened path (matched against the list) |
-| `plaintext_connect4` | cgroup (connect4) | the host's cgroup v2 root | note the connecting task when the destination is a watched endpoint | destination IPv4/port, task pid/cgroup |
-| `plaintext_sockops` | sock_ops | the host's cgroup v2 root | add a watched socket to the sockhash; remove it and end its stream on close | the socket 4-tuple |
-| `plaintext_skmsg` | sk_msg | the plaintext sockhash | copy each send on a watched socket (always `SK_PASS`) | up to 4 KB of the sent bytes |
-| `plaintext_skskb` | sk_skb (`stream_verdict`) | the plaintext sockhash | copy each receive on a watched socket (always `SK_PASS`) | up to 64 KB of the received bytes |
+| LLM, OpenSSL | `probe_ssl_*` | `SSL_read`, `SSL_write` and their `_ex` variants, `SSL_do_handshake`, `SSL_free`, in each `libssl` or executable that exports them | up to 16 KB of a read and 4 KB of a write; otherwise pointers only | yes |
+| LLM, Go | `probe_go_tls_*` | `crypto/tls` `(*Conn).Write`, `Read`, each return of `Read`, and `Close` in Go 1.20+ executables | the same limits | yes (`builtinProbes.llm.executables`) |
+| LLM, discovery | `probe_exec`, `probe_ssl_task_exit`, `probe_lib_open_fentry` (kprobe fallback without BTF) | `sched_process_exec`, `sched_process_exit`, `do_sys_openat2` | pid, `comm`, thread id, opened path | yes |
+| Plaintext | `plaintext_connect4`, `plaintext_sockops`, `plaintext_skmsg`, `plaintext_skskb` | the host's cgroup v2 root and a sockhash | up to 4 KB of a send and 64 KB of a receive on watched sockets | only when a provider sets `plaintext` |
 
-- **LLM programs** (the SSL rows, `probe_ssl_task_exit`, `probe_exec` and the libssl-open watch) attach when
-  `builtinProbes.llm.enabled` is true. The uprobe table is in
-  `honeybeepf-llm/honeybeepf-llm/src/probes/builtin/llm/mod.rs`, the exec and libssl-open attach points in
-  `honeybeepf-llm/honeybeepf-llm/src/probes/mod.rs`, and the eBPF programs under
-  `honeybeepf-llm/honeybeepf-llm-ebpf/src/probes/builtin/`. The agent also attaches to a process's own executable when
-  it exports `SSL_read`/`SSL_write` (official Node.js builds), or to Go's `crypto/tls` in a Go 1.20+ executable
-  (`(*Conn).Write` and `Read` entries, each return in `Read`, and `Close`; `probe_go_tls_*` in
-  `.../probes/builtin/llm/gotls.rs`, which read only), switched by `builtinProbes.llm.executables` (default true). Without kernel BTF the libssl-open watch falls back from fentry to a kprobe.
-- **Plaintext programs** load only when a provider sets `plaintext` and the node has cgroup v2 on kernel 5.10 or later;
-  otherwise they stay off and the agent logs why (`plaintext::start`, called from
-  `honeybeepf-llm/honeybeepf-llm/src/lib.rs`). They attach at the host's cgroup v2 root through the
-  `/host/sys/fs/cgroup` mount, so they see the connections of every process on the node (if `/host/sys/fs/cgroup` is not
-  a cgroup2 mount they fall back to the agent's own `/sys/fs/cgroup` and see only the agent pod; the log names the
-  path), and act only on sockets to the configured endpoints: in-cluster Services, or any other host the agent resolves
-  by DNS (`honeybeepf-llm/honeybeepf-llm/src/plaintext.rs`). `plaintext_connect4` always allows the connect and both
-  data programs always return `SK_PASS`. Watched sockets do pass through the kernel's sockmap layer, and `sk_msg` may
-  linearize a message (`bpf_msg_pull_data`) before copying it; the bytes delivered are unchanged.
-- **Process-lifecycle programs** (`honeybeepf_llm_group_exit`, `honeybeepf_llm_process_exit`,
-  `honeybeepf_llm_oom_mark_victim`) attach only when the agent runs with `BUILTIN_PROBES__PROCESS_LIFECYCLE=true`,
-  which the chart does not set.
-  When on, they export `process_exit{cause, exit_code, cgroup_id}` and `process_lifetime_seconds`, and log the process
-  `comm`. A kernel without one of the hooks is logged and skipped; any other attach error stops the agent.
-- **The `openat` file-access tracepoint** attaches only when the agent runs with
-  `BUILTIN_PROBES__FILESYSTEM__FILE_ACCESS=true`, which the chart does not set. When on, it records opens of the paths
-  in `BUILTIN_PROBES__FILESYSTEM__WATCHED_PATHS` only, capped
-  at 128 paths (`MAX_WATCHED_PATHS`, `.../probes/builtin/file_access.rs`). It reads the path, not file contents, and
-  exports `file_access_events` with the file name, open flags, process name, cgroup id, namespace and pod, and logs each
-  open at info level.
+- **Plaintext programs** act only on sockets to the configured endpoints. `plaintext_connect4` always allows the
+  connect and the data programs always return `SK_PASS`; `sk_msg` may linearize a message before copying it, and the
+  bytes delivered are unchanged. They need cgroup v2 and Linux 5.10+, else they stay off with a log line.
+
+<details markdown>
+<summary>Every program, one by one</summary>
+
+| Program | Type | Attaches to | Purpose | Reads |
+|---|---|---|---|---|
+| `probe_ssl_rw_enter` | uprobe | `SSL_read`, `SSL_write` entry | record the buffer pointer and length | `SSL*`, buffer pointer |
+| `probe_ssl_read_exit` / `probe_ssl_write_exit` | uretprobe | `SSL_read` / `SSL_write` return | copy the decrypted bytes | up to 16 KB of a read, 4 KB of a write |
+| `probe_ssl_rw_ex_enter` | uprobe | `SSL_read_ex`, `SSL_write_ex` entry | the same for the `_ex` variants | `SSL*`, buffer and count pointers |
+| `probe_ssl_read_ex_exit` / `probe_ssl_write_ex_exit` | uretprobe | `SSL_read_ex` / `SSL_write_ex` return | copy the decrypted bytes | up to 16 KB of a read, 4 KB of a write |
+| `probe_ssl_do_handshake_enter` / `_exit` | uprobe / uretprobe | `SSL_do_handshake` | start the latency timer; mark a reused `SSL*` | the `SSL*` pointer |
+| `probe_ssl_free` | uprobe | `SSL_free` | end the connection's stream | the `SSL*` pointer |
+| `probe_go_tls_*` | uprobe | Go `crypto/tls` `(*Conn).Write`, `Read`, `Read` returns, `Close` | the same, for Go executables | buffer contents within the same limits |
+| `probe_ssl_task_exit` | tracepoint | `sched:sched_process_exit` | clear an exiting thread's in-flight state | thread id |
+| `probe_exec` | tracepoint | `sched:sched_process_exec` | attach SSL probes to new processes | pid, `comm` |
+| `probe_lib_open_fentry` / `probe_lib_open` | fentry, kprobe fallback | `do_sys_openat2` | notice a `libssl.so*` open before its first SSL call | the opened path |
+| `plaintext_connect4` | cgroup connect4 | host cgroup v2 root | note the task connecting to a watched endpoint | destination IPv4 and port, pid, cgroup |
+| `plaintext_sockops` | sock_ops | host cgroup v2 root | add a watched socket to the sockhash; end its stream on close | the socket 4-tuple |
+| `plaintext_skmsg` | sk_msg | the plaintext sockhash | copy each send | up to 4 KB |
+| `plaintext_skskb` | sk_skb `stream_verdict` | the plaintext sockhash | copy each receive | up to 64 KB |
+
+Where in the code: the uprobe table in `honeybeepf-llm/honeybeepf-llm/src/probes/builtin/llm/mod.rs` and `gotls.rs`,
+the exec and libssl-open attach points in `src/probes/mod.rs`, the eBPF programs under
+`honeybeepf-llm/honeybeepf-llm-ebpf/src/probes/builtin/`, plaintext in `src/plaintext.rs`. If `/host/sys/fs/cgroup` is not a cgroup2 mount, the plaintext programs fall back
+to the agent's own `/sys/fs/cgroup` and see only the agent pod; the log names the path.
+
+</details>
 
 ## 2. Privileges
 
-The container's `securityContext` is in `charts/honeybeepf-llm/values.yaml`: `readOnlyRootFilesystem: true`,
-`seccompProfile.type: RuntimeDefault`, `capabilities.drop: [ALL]`, then these are added back:
+**Container.** `readOnlyRootFilesystem: true`, `seccompProfile: RuntimeDefault`, `capabilities.drop: [ALL]`, then:
 
-| Capability | Why it is needed |
+| Capability | Why |
 |---|---|
-| `BPF` | create the eBPF maps and load the programs |
-| `PERFMON` | attach the uprobes, tracepoints and fentry program, and read user memory (`bpf_probe_read_user`) |
-| `SYS_ADMIN` | the uprobe `perf_event_open`: the Ubuntu 7.0 kernel refuses it with `PERFMON` alone (the chart comment links the kernel bug). On 6.9 and later it also satisfies the network checks below |
-| `SYS_PTRACE` | read other processes' `/proc/<pid>/root` and `/proc/<pid>/maps` to find their libssl (`.../probes/discovery.rs`) |
-| `NET_ADMIN` | create the plaintext sockhash map, which exists even when plaintext capture is off; kernels before 6.9 require it for that map type |
-| `SYS_RESOURCE` | raise `RLIMIT_MEMLOCK` at startup; kernels before 5.11 charge BPF map memory to it rather than to the cgroup |
+| `BPF` | create the maps and load the programs |
+| `PERFMON` | attach uprobes, tracepoints and fentry, and read user memory |
+| `SYS_ADMIN` | the uprobe `perf_event_open`, which Ubuntu's 7.0 kernel refuses with `PERFMON` alone |
+| `SYS_PTRACE` | read other processes' `/proc/<pid>/root` and `/proc/<pid>/maps` to find their libssl |
+| `NET_ADMIN` | create the plaintext sockhash at start, even with plaintext off; kernels before 6.9 only |
+| `SYS_RESOURCE` | raise `RLIMIT_MEMLOCK`; kernels before 5.11 only |
 
-CI loads and attaches the agent with only these capabilities (read from `values.yaml` by `ci/smoke.sh`) on kernels 5.10
-to 7.2, RHEL 8.10, 9.6 and 9.7, and bpf-next (`.github/workflows/kernel-matrix.yml`).
+CI loads and attaches the agent with exactly these capabilities on every kernel in the matrix (`ci/smoke.sh`).
 
-**If the agent is compromised**, these capabilities with uid 0 and `hostPID` amount to root on the node. For example,
-`SYS_ADMIN` lets it load BPF programs that read or write any process's memory, and `SYS_PTRACE` with `hostPID` reaches
-every process's `/proc/<pid>/root`, including filesystems that are not read-only. The agent's own programs only read,
-but the boundary is the agent binary and image, not the kernel.
+| Setting | Value |
+|---|---|
+| User | uid 0: no `USER` in the image, no `runAsUser` or `runAsNonRoot` in the chart |
+| `allowPrivilegeEscalation` | true in effect, because `SYS_ADMIN` is added |
+| AppArmor | `Unconfined` for the agent container: Ubuntu's containerd profile blocks `/proc/<pid>/root`, and then only pods that share the agent image's libssl are recorded |
+| SELinux | `spc_t` only with `debug: true` (off by default) |
+| Service account token | mounted |
+| `privileged`, `hostNetwork`, `hostIPC` | not set |
 
-The agent runs as uid 0: the image sets no `USER` and the chart sets no `runAsUser` or `runAsNonRoot`. Kubernetes treats
-`allowPrivilegeEscalation` as true when `SYS_ADMIN` is added. The service account token is mounted (no
-`automountServiceAccountToken: false`). AppArmor is set to `Unconfined` for the agent container
-(`securityContext.appArmorProfile`, or the pod annotation on Kubernetes before 1.30): the agent opens other containers'
-libssl through `/proc/<pid>/root`, and the containerd profile on Ubuntu nodes denies that, so with the runtime default
-only pods that share the agent image's libssl are recorded. With `debug: true` the chart also sets `seLinuxOptions.type:
-spc_t`, an unconfined SELinux type; it is off by default.
+**Host access.**
 
-Host access, from `charts/honeybeepf-llm/templates/daemonset.yaml`:
+| Access | Why |
+|---|---|
+| `hostPID: true` | read `/proc/<pid>` of other pods' processes for libssl discovery and pod attribution |
+| host `/sys/fs/cgroup`, read-only at `/host/sys/fs/cgroup` | pod attribution and the plaintext attach point |
+| `/sys/kernel/tracing`, `/sys/kernel/debug`, read-only | tracefs |
+| prices ConfigMap, read-only | only when `builtinProbes.llm.prices` is set |
 
-- `hostPID: true`, to read `/proc/<pid>` of processes in other pods for libssl discovery and pod attribution.
-- The host's `/sys/fs/cgroup`, mounted read-only at `/host/sys/fs/cgroup`, for pod attribution
-  (`honeybeepf-llm/honeybeepf-llm/src/k8s.rs`) and the plaintext attach point (`.../src/plaintext.rs`). No other part
-  of the host filesystem is mounted. With `hostPID` and `SYS_PTRACE` the agent can still open any process's
-  `/proc/<pid>/root`, which is how it finds other containers' libssl; that path also reaches the host's own root
-  through the host's processes, so a compromised agent can still read host files (see "If the agent is compromised").
-- `/sys/kernel/tracing` and `/sys/kernel/debug`, read-only, for tracefs. A prices ConfigMap is mounted read-only only
-  when `builtinProbes.llm.prices` is set. No host path is mounted writable.
-- No `privileged: true`, no `hostNetwork`, no `hostIPC`.
+No host path is mounted writable.
 
-Kubernetes RBAC, from `charts/honeybeepf-llm/templates/clusterrole.yaml`, created with the chart's ServiceAccount
-(`serviceAccount.create`, default true):
+**Kubernetes RBAC** (a ClusterRole with the chart's ServiceAccount):
 
-| API group | Resources | Verbs | Why | When granted |
-|---|---|---|---|---|
-| `""` (core) | `pods` | get, list, watch | map a pid/cgroup to a pod for metric labels | always |
-| `batch` | `jobs` | get | a pod references its Job; the agent reads it to find the CronJob | always |
-| `""` (core) | `services` | get, list, watch | resolve a configured plaintext provider's in-cluster hosts to ClusterIPs | only when a provider sets `plaintext` |
-| `discovery.k8s.io` | `endpointslices` | get, list, watch | resolve those Services to ready pod IPs | only when a provider sets `plaintext` |
+| Resources | Verbs | Why | Granted |
+|---|---|---|---|
+| `pods` | get, list, watch | map a process to its pod | always |
+| `batch/jobs` | get | find a Job's CronJob | always |
+| `services` | get, list, watch | resolve plaintext providers' hosts | only with a `plaintext` provider |
+| `discovery.k8s.io/endpointslices` | get, list, watch | resolve those Services to pod IPs | only with a `plaintext` provider |
 
-The role has no write verbs and no access to Secrets. It is cluster-wide: the agent filters pods to its own node in its
-watch (`k8s.rs`), but the token can read every pod spec in the cluster, including literal environment values. `watch` on
-services and endpointslices is granted but the code only gets and lists them.
+No write verbs and no Secrets. The role is cluster-wide: the agent watches only its own node's pods, but the token can
+read every pod spec in the cluster, including literal environment values. `watch` on services and endpointslices is
+granted but unused.
+
+!!! danger "If the agent is compromised"
+    These capabilities with uid 0 and `hostPID` amount to root on the node. `SYS_ADMIN` allows BPF programs that read
+    or write any process's memory, and `SYS_PTRACE` with `hostPID` reaches every process's `/proc/<pid>/root`,
+    including the host's own and filesystems that are not read-only. The agent's programs only read, but the boundary is
+    the agent binary and image, not the kernel.
 
 ## 3. Data handling
 
-- **Plaintext stays in memory on the node.** The uprobes (and, for plaintext endpoints, the socket programs) copy
-  decrypted request and response bytes, which include headers such as `Authorization`, into a BPF ring buffer (8 MB for
-  TLS, 4 MB for plaintext when it is on). Userspace parses the HTTP for token counts and drops the bytes. Captured
-  bytes are bounded at the kernel (16 KB per read, 4 KB per write, 64 KB per plaintext receive), and in userspace each
-  connection's buffer is capped at 8 MB for a request and 16 MB for a response.
-- **Which TLS traffic reaches the agent.** The uprobes fire for every TLS connection in a process that uses the probed
-  OpenSSL, not only LLM calls. A connection's bytes are copied until the kernel knows its class (`ssl_class.rs`,
-  `conn_filter.rs`): HTTP/1.1 connections to hosts no provider serves, and server-side connections, are dropped in the
-  kernel after their first request; other HTTP/1.1 requests are dropped until the next POST; HTTP/2 connections and TLS
-  that is not HTTP are not filtered in the kernel and keep being copied to the agent, which discards what it cannot
-  match to a provider.
-- **What is exported.** OTLP metrics only (`honeybeepf-llm/honeybeepf-llm/src/telemetry.rs`): request, token, latency
-  and cost series with labels such as namespace, pod, workload, model, status, attempt, reason, operation, modality,
-  transport, token type and cost type; an info series with the configured provider names and a config hash; and the
-  price table version. `builtinProbes.llm.podLabels` (opt-in) adds chosen pod labels. The model label comes from the
-  application's request and response JSON, so an application controls its value; the OpenTelemetry SDK caps each
+| | |
+|---|---|
+| Plaintext | decrypted request and response bytes, headers such as `Authorization` included, copied into a ring buffer (8 MB for TLS, 4 MB for plaintext when on), parsed for token counts and dropped |
+| Bounds | 16 KB per read, 4 KB per write and 64 KB per plaintext receive in the kernel; 8 MB of request and 16 MB of response per connection in user space |
+| Exported | OTLP metrics only: request, token, latency and cost series ([labels](metrics.md)), a provider-config info series and the price table version |
+| Logged | per call: model, request path without the query string, pid, pod, latency and token counts. Never a body or header; the model and an OpenAI background call's id are the only values taken from a body |
+| Network | no listening port. Outbound: the OTLP collector, the Kubernetes API, and DNS for plaintext hosts outside the cluster |
+| Disk | read-only root filesystem and host mounts; the only file written is the heartbeat in a 1 MiB in-memory `emptyDir` |
+
+**Which TLS traffic reaches the agent.** The uprobes fire for every TLS connection in a probed process, not only LLM
+calls. The kernel drops a connection's bytes once it knows its class:
+
+| Connection | Filtered in the kernel |
+|---|---|
+| HTTP/1.1 to a host no provider serves, or a server-side connection | after its first request |
+| other HTTP/1.1 | requests until the next POST |
+| HTTP/2, and TLS that is not HTTP | not filtered: copied to the agent, which drops what matches no provider |
+
+- **Labels an app controls.** The `model` label comes from the application's JSON; the OpenTelemetry SDK caps each
   instrument at 2,000 series.
-- **Logs.** The container logs to stdout, which the kubelet stores on the node. At the default `info` level a recorded
-  call logs its model, request path (query string removed), pid, pod, latency and token counts. No log statement prints
-  a request or response body or header; the model name and an OpenAI Responses background call's id are the only logged
-  values taken from a body. A test feeds fake API keys in the three forms providers use (OpenAI `Authorization: Bearer`,
-  Gemini `?key=`/`x-goog-api-key`, Bedrock SigV4 presigned query) and asserts the logs never contain them
-  (`test_credentials_stay_out_of_logs`, `.../probes/builtin/llm/processor/tests.rs`); it covers the HTTP/1.1 path.
-- **Network.** No listening port: the chart defines no Service and the container exposes no port; the liveness and
-  readiness checks are exec probes. Outbound connections are the OTLP collector, the Kubernetes API, and DNS for
-  plaintext hosts outside the cluster. OTLP is gRPC: plaintext for a `host:port` or `http://` endpoint (the in-cluster
-  default), TLS for an `https://` endpoint, verified against the CA in `output.otlp.caSecret` if set, else the system
-  roots (`otlp_tls` in `honeybeepf-llm/honeybeepf-llm/src/telemetry.rs`). `output.otlp.headersSecret` passes headers
-  such as a bearer token from a Secret. With the default empty `output.otlp.endpoint`, nothing is exported.
-- **Disk.** The root filesystem and every host mount are read-only; the agent writes no files. (`/proc/<pid>/root` is a
-  separate path; see "If the agent is compromised" in section 2.)
-- The agent reads TLS plaintext on its own node by design; keeping that plaintext inside the agent is the security
-  boundary, as stated in `SECURITY.md`.
+- **Keys stay out of logs.** A test feeds fake keys in each provider's form (`Authorization: Bearer`, Gemini `?key=` and
+  `x-goog-api-key`, Bedrock SigV4 presigned queries) and checks the logs never contain them; it covers HTTP/1.1.
+- **OTLP transport.** Plaintext gRPC to a `host:port` or `http://` endpoint, the in-cluster default; TLS to `https://`,
+  verified against `output.otlp.caSecret` or the system roots. `output.otlp.headersSecret` passes a token from a Secret.
+  With no endpoint, nothing is exported.
+
+The agent reads TLS plaintext on its node by design; keeping it inside the agent is the security boundary, as
+`SECURITY.md` states.
+
+<details markdown>
+<summary>Where in the code</summary>
+
+Kernel-side classification in `ssl_class.rs` and `conn_filter.rs`; exported series in
+`honeybeepf-llm/honeybeepf-llm/src/telemetry.rs` (OTLP TLS in `otlp_tls`); the key test is
+`test_credentials_stay_out_of_logs` in `src/probes/builtin/llm/processor/tests.rs`. Libssl discovery is in
+`src/probes/discovery.rs` and pod attribution in `src/k8s.rs`.
+
+</details>
 
 ## 4. Resource use per node
 
-Measured overhead is in [docs/benchmark.md](benchmark.md). The numbers below are from its v0.3.2 run: kernel 7.0.0-43 on
-a 4-vCPU VM, Python clients against a local mock server, plaintext capture off and no OTLP export. Use that document as
-the source of truth.
+From the [benchmark](benchmark.md)'s v0.3.2 run: a 4-vCPU VM on kernel 7.0, Python clients against a local mock,
+plaintext capture off, no OTLP export.
 
-| Measure | Value (from docs/benchmark.md) |
+| Measure | Value |
 |---|---|
-| Agent CPU | 0.055 CPU-seconds per 1,000 requests in the `llm` case; 0.006 at the `max` rate |
-| Memory (RSS anon / file) | ~4.4 MB anonymous, ~27.3 MB file-backed; PSS ~21.4 MB |
-| BPF map memory (`memlock`) | ~18.8 MB with plaintext capture off |
-| Application impact | −6.6% throughput in the saturating `max` case; p99 latency +0.1 to +0.4 ms at 200 req/s, which the benchmark treats as noise |
+| Agent CPU | 0.055 CPU-seconds per 1,000 LLM calls; 0.006 at the saturating rate |
+| Memory | about 4.4 MB anonymous and 27.3 MB file-backed RSS; PSS about 21.4 MB |
+| BPF maps | about 18.8 MB with plaintext capture off |
+| Application | −6.6% throughput at the saturating rate; p99 +0.1 to +0.4 ms at 200 requests/s |
+| Chart | requests 50m CPU and 128Mi, limits 1 CPU and 1Gi |
 
-The chart requests 50m CPU / 128Mi and limits 1 CPU / 1Gi per node (`charts/honeybeepf-llm/values.yaml`).
+- **Kernel memory is fixed by the map sizes**: ring buffers of 8 MB for TLS, 4 MB for plaintext when on (4 KB off), 1 MB
+  64 KB each for exec and libssl opens, plus hash maps of up to 65,536 entries.
+  The extra memory with plaintext on has not been measured.
+- **User-space memory is bounded per connection, not per node.** Each open connection can hold 8 MB of request and 16 MB
+  of response (32 MB for HTTP/2), freed after 5 minutes idle. Many concurrent large calls can reach the 1Gi limit and
+  get the agent OOM-killed; applications are unaffected. Only speculative HTTP/2 buffering has a node-wide cap, 64 MB.
 
-**Kernel memory is fixed by the map sizes.** The ring buffers are 8 MB for TLS, 4 MB for plaintext when it is on (4 KB
-otherwise), 1 MB each for process exit and file access, and 64 KB each for exec and libssl opens. The per-thread maps of
-in-flight SSL calls hold 10,240 entries, the connection-class map 32,768 (LRU), the process start-time and name maps
-10,240 each, and the libssl-open map 4,096. With plaintext capture on, the socket, connection and connect-handoff maps
-hold 65,536 entries each and the endpoint map 8,192; with it off they hold one entry each. The extra memory when it is
-on has not been measured. Sizes are in `honeybeepf-llm/honeybeepf-llm-ebpf/src/probes/builtin/` and
-`honeybeepf-llm/honeybeepf-llm-common/src/lib.rs`.
+<details markdown>
+<summary>Map sizes</summary>
 
-**Userspace memory is bounded per connection, not per node.** The agent keeps one stream per open connection, with no
-limit on the number of connections, and frees a stream after 5 minutes idle. Each stream can hold up to 8 MB of request
-and 16 MB of response (HTTP/2: up to 32 MB per connection); only speculative HTTP/2 buffering has a node-wide cap (64
-MB). Many concurrent large calls can therefore reach the 1Gi limit and get the agent OOM-killed; applications are
-unaffected (section 5).
+The per-thread maps of in-flight SSL calls hold 10,240 entries, the connection-class map 32,768 (LRU), the process
+start-time and name maps 10,240 each, and the libssl-open map 4,096. With plaintext capture on, the socket, connection
+and connect-handoff maps hold 65,536 entries each and the endpoint map 8,192; with it off, one entry each. Sizes are in
+`honeybeepf-llm/honeybeepf-llm-ebpf/src/probes/builtin/` and `honeybeepf-llm/honeybeepf-llm-common/src/lib.rs`.
+
+</details>
 
 ## 5. Failure behaviour
 
-The agent is not a proxy, so a slow, crashed or detached agent never blocks a call. It is not free for the application
-either: the uprobes run synchronously in the calling thread on every `SSL_read`/`SSL_write`, so they add CPU and latency
-whatever state the agent is in (section 4 has the measured cost). If the agent cannot keep up, the kernel drops events
-at the ring buffer (`reserve_fail`) rather than slowing the application, and those calls go unrecorded. With plaintext
-capture on, `connect4` also runs on every IPv4 connect on the node and `sock_ops` on every TCP connection setup,
-returning at once for destinations that are not watched. On kernel 7.0 that measured about 60 ns per run of each, about
-0.6 µs for a loopback connection, and no change in connection throughput under a connect/close load.
+The agent is not a proxy, so a slow, crashed or detached agent never blocks a call. The uprobes still run in the
+calling thread on every `SSL_read`/`SSL_write`, so they cost CPU and latency whatever state the agent is in. If the
+agent falls behind, the kernel drops events at the ring buffer (`reserve_fail`) rather than slowing the application.
 
-- **Crash or OOM-kill:** the kubelet restarts the container; metrics stop until it is back. Nothing is pinned, so the
-  programs detach when the process exits.
-- **Fatal at startup** (the agent exits and the pod goes into CrashLoopBackOff; applications are unaffected): loading
-  the BPF object or creating a map (for example a missing capability, or a memlock limit too low on a kernel before
-  5.11), attaching the exec tracepoint, file-access attach errors (including more than 128 watched paths), and
-  process-lifecycle attach errors other than a missing hook.
-- **Logged and skipped:** a uprobe attach to one library, no libssl on the node yet (the agent waits for one), the
-  task-exit tracepoint, the libssl-open watch, plaintext capture, and a process-lifecycle hook the kernel lacks (for
-  example `acct_collect` without `CONFIG_BSD_PROCESS_ACCT`).
-- **A startup error after programs attach** sets a global shutdown flag through a drop guard, so the ring-buffer reader
-  threads stop and the process exits with an error line rather than hanging (`ShutdownOnDrop` in `HoneyBeeEngine::run`,
-  `honeybeepf-llm/honeybeepf-llm/src/lib.rs`).
-- **Health checks:** the agent rewrites `/run/honeybeepf/heartbeat` (a 1 MiB in-memory `emptyDir`) every 10 s, but only
-  while each ring-buffer reader and the discovery loop has made progress in the last 30 s
-  (`honeybeepf-llm/honeybeepf-llm/src/health.rs`). The liveness and readiness probes fail when the file is older than 60
-  s, so the kubelet restarts a hung agent; a startup probe allows 5 minutes for the BPF load and attach. The probes are
-  exec checks, so there is still no listening port.
-- **Visibility:** a call the agent saw but could not record is counted under `llm_responses_unparsed_total` with a
-  reason, and kernel-side losses under `llm_events_total` (see [docs/metrics.md](metrics.md)). These reach a collector
-  only when `output.otlp.endpoint` is set; otherwise only the logs show them.
+| Event | What happens |
+|---|---|
+| Crash or OOM kill | the kubelet restarts it; metrics stop until it is back; nothing is pinned, so the programs detach |
+| Fatal at startup: loading the BPF object, creating a map (a missing capability, or memlock too low before 5.11), attaching the exec tracepoint | the pod goes into CrashLoopBackOff; applications are unaffected |
+| One library fails to attach, no libssl yet (the agent waits), the task-exit tracepoint or libssl-open watch fails, plaintext capture fails | logged and skipped |
+| An error after programs attach | a shutdown flag stops the reader threads and the process exits with an error line |
+| The agent hangs | `/run/honeybeepf/heartbeat` is rewritten every 10 s only while every reader loop made progress in 30 s; the probes run `honeybeepf-llm --check-heartbeat`, which fails when it is 60 s old, and the kubelet restarts the agent. A reader takes at most 1,024 records a pass and beats each pass, so a busy agent keeps beating. A startup probe allows 5 minutes for the BPF load and attach |
+
+- **Plaintext capture**, when on, also runs `connect4` on every IPv4 connect and `sock_ops` on every TCP setup on the
+  node. On kernel 7.0 that measured about 60 ns per run, 0.6 µs per loopback connection, and no change in connection
+  throughput.
+- **Lost calls are counted**: in `llm_responses_unparsed_total` by reason, and kernel-side losses in `llm_events_total`
+  ([metrics](metrics.md)), when an OTLP endpoint is set.
+- Where in the code: the shutdown flag is `ShutdownOnDrop` in `HoneyBeeEngine::run`
+  (`honeybeepf-llm/honeybeepf-llm/src/lib.rs`); the heartbeat is `src/health.rs`.
 
 ## 6. Coexistence with other eBPF tools
 
-- **Other uprobes on libssl.** Several tools can attach uprobes to the same `SSL_read`/`SSL_write`. The agent attaches
-  each library file once, keyed by device and inode (on overlayfs, by inode, size and times). The file on disk is not
-  changed, but the kernel writes a breakpoint into each process's in-memory copy of the probed functions, which a
-  code-integrity checker or debugger looking at those addresses can see.
-- **Other tracepoint and kprobe tools.** The kernel lets several programs share a tracepoint or kprobe, so the agent's
-  hooks (`sched_process_exec`, `sched_process_exit`, `do_sys_openat2`, and the opt-in `do_group_exit`, `acct_collect`,
-  `oom:mark_victim` and `openat`) run alongside another tool's on the same points.
-- **CNIs and other cgroup programs.** The plaintext `connect4` and `sock_ops` programs attach at the host's cgroup v2
-  root through a BPF link (`CgroupAttachMode::Single` in `honeybeepf-llm/honeybeepf-llm/src/plaintext.rs`; plaintext
-  needs kernel 5.10 or later). Through a link the kernel attaches them as multi-program, so they run alongside other
-  multi-program or link attachments; while they are attached, another tool's later attach of an exclusive (non-multi)
-  program at the same cgroup fails. Running them next to a CNI that attaches its own cgroup programs has not been
-  tested. If the attach fails, plaintext capture stays off with a log line and TLS capture is unaffected. They load only
-  when plaintext capture is configured.
-- **Sockmap.** The kernel attaches one set of sockmap programs per socket, so a socket the agent watches cannot also be
-  accelerated by another tool's sockmap (some service meshes and CNIs use one), and a socket already in another tool's
-  sockmap is not watched. This applies only to sockets to configured plaintext endpoints and has not been tested with
-  such a tool.
-- **Maps.** The agent pins no maps and uses no shared bpffs path, and it reads no other tool's maps. Like any BPF map,
-  its maps, including the TLS ring buffer that carries plaintext, can be opened by ID by another process on the node
-  that has `CAP_SYS_ADMIN`.
+| Alongside | Effect |
+|---|---|
+| other uprobes on libssl | allowed; each library is probed once. The file on disk is unchanged, but each process's in-memory copy carries a breakpoint that a code-integrity checker can see |
+| other tracepoint and kprobe tools | the kernel runs programs side by side on the same hook |
+| CNIs and other cgroup programs (plaintext only) | the agent attaches multi-program through a link, so it runs alongside others; another tool's later exclusive attach at the same cgroup fails. Not tested next to a CNI. If the attach fails, plaintext stays off with a log line |
+| another tool's sockmap (plaintext only) | one sockmap set per socket: a socket the agent watches cannot also be accelerated by another sockmap, and vice versa. Not tested |
+| maps | the agent pins no maps and reads no other tool's maps. Any process with `CAP_SYS_ADMIN` on the node can open its maps by ID, including the TLS ring buffer |
 
 ## 7. Supply chain
 
-- **Pinned actions.** Every GitHub Action in `.github/workflows/` is pinned to a full commit SHA with the version in a
-  trailing comment, and Dependabot (`.github/dependabot.yml`) proposes minor and patch updates to them weekly.
-- **Build inputs.** The image's base images (`rustlang/rust:nightly-trixie` for the build, which fixes the nightly
-  toolchain, and `debian:trixie-slim` at runtime, in `Dockerfile`) are pinned by digest, and Dependabot proposes digest
-  updates weekly. `bpf-linker` is pinned in the image build; the apt packages and `cargo-chef` are not.
-- **Dependency scanning.** `.github/workflows/audit.yml` runs `cargo audit` when a `Cargo.toml` or `Cargo.lock` changes
-  and weekly on `main`; it fails on a vulnerability advisory and reports unmaintained or unsound crates as warnings.
-  No workflow runs `cargo deny` or scans the image.
-- **Workflow tokens.** Each workflow sets top-level `permissions: contents: read`. The image-publish job in
-  `docker-publish.yml` and the image and chart jobs in `release.yml` raise it to `packages: write`, and the GitHub
-  release job in `release.yml` to `contents: write`. `build.yml` also declares a `contents: write` release job, which
-  never runs today: it needs the build job, which is skipped on pushes and pull requests. Fork pull requests get a
-  read-only token and cannot push images; pull requests from branches in the repository push a `pr-<number>` image. In
-  the workflow as written only `main` writes the build cache; since a pull request from a branch in the repository runs
-  with `packages: write`, anyone who can push a branch could change that.
-- **Images and tags.** Images are published to `ghcr.io/honeybee-studio/honeybeepf-llm`, tagged `latest` and `sha-<short
-  commit>` from `main` (`docker-publish.yml`), and `X.Y.Z` and `X.Y` from a `vX.Y.Z` tag on `main` whose version matches
-  the crate and chart (`release.yml`). The same public repository also holds the `pr-<number>` images and the
-  `buildcache` tag, so deploy a release tag or a digest. The chart is published to
-  `oci://ghcr.io/honeybee-studio/charts`.
-- **Signing, SBOM and provenance.** The image jobs in `docker-publish.yml` and `release.yml` attach an SBOM and build
-  provenance (`sbom: true`, `provenance: mode=max`) to every image they push and sign it by digest with keyless cosign,
-  using the job's GitHub OIDC token (`id-token: write`, granted only to those jobs and the chart job); `release.yml`
-  signs the chart it pushes the same way. The signing identity is the workflow file on this repository, so `cosign
-  verify --certificate-identity-regexp '^https://github.com/honeybee-studio/honeybeepf-llm/\.github/workflows/'
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com` checks an image ([verify](verify.md) has the
-  commands). Images and charts published before this was added are not signed.
-- **Binary fixture provenance.** `ci/check-binary-provenance.sh`, run from `docker-publish.yml`, checks that every
-  binary test fixture in the repository carries a documented sha256 and regeneration command. This is a check on the
-  source tree, not on the image.
+| | |
+|---|---|
+| GitHub Actions | pinned to full commit SHAs; Dependabot proposes minor and patch updates weekly |
+| Base images | build `rustlang/rust:nightly-trixie` and runtime `cgr.dev/chainguard/glibc-dynamic` (no shell or package manager; `USER 0:0` because it defaults to a non-root uid), pinned by digest, updated weekly by Dependabot. `bpf-linker` is pinned; apt packages and `cargo-chef` are not |
+| Dependencies | `cargo audit` on every `Cargo.toml`/`Cargo.lock` change and weekly on `main`; fails on a vulnerability advisory. No `cargo deny` |
+| Scanning | Trivy on every image CI builds, failing on a high or critical vulnerability that has a fix, and daily on `latest`, reported under Security; CodeQL (Rust, Python, Actions) through GitHub's default setup; OpenSSF Scorecard weekly, behind the README badge; secret scanning with push protection |
+| Workflow tokens | `contents: read` by default; image and chart jobs get `packages: write`, the release job `contents: write` |
+| Images | `ghcr.io/honeybee-studio/honeybeepf-llm`: `latest` and `sha-<commit>` from `main`, `X.Y.Z` and `X.Y` from release tags. The same repository holds `pr-<number>` images and a `buildcache` tag, so deploy a release tag or digest |
+| Signing | keyless cosign on every pushed image (with SBOM and provenance) and on the release chart, from 0.3.1. [Verify](verify.md) has the commands |
+| Binary files | `ci/check-binary-provenance.sh` requires a sha256 and a regeneration command for every binary fixture |
+
+<details markdown>
+<summary>Workflow token details</summary>
+
+The image-publish job in `docker-publish.yml` and the image and chart jobs in `release.yml` raise the token to
+`packages: write`, and the GitHub release job in `release.yml` to `contents: write`; only these jobs get
+`id-token: write` for signing. `build.yml` declares a `contents: write` release job that never runs today. Fork pull
+requests get a read-only token and cannot push images; pull requests from branches in the repository push a
+`pr-<number>` image and run with `packages: write`, so anyone who can push a branch could change the build cache, which
+the workflow writes only from `main`.
+
+</details>
 
 ## 8. Known gaps
 
-These are open and listed here so a reviewer does not have to find them:
-
-- A compromised agent has root-level access to the node through its capabilities, uid 0 and `hostPID` (section 2).
-- The bytes of all TLS connections in probed processes reach the agent's memory until classified; HTTP/2 and non-HTTP
-  TLS are not filtered in the kernel (section 3).
-- The agent runs as root, and through `hostPID` and `SYS_PTRACE` a compromised agent can read host files via
-  `/proc/<pid>/root` (section 2).
-- The service account can read every pod spec in the cluster, not only those on its node (section 2).
-- The agent container runs AppArmor-unconfined; a narrower profile that allows only what discovery needs is not provided
-  (section 2).
-- Userspace memory has no node-wide cap, so heavy concurrent traffic can OOM-kill the agent (section 4).
-- CI does not scan the published image for vulnerabilities, and images published before signing started are unsigned
-  (section 7).
+| Gap | Section |
+|---|---|
+| A compromised agent has root-level access to the node, including host files through `/proc/<pid>/root` | [2](#2-privileges) |
+| The service account can read every pod spec in the cluster, not only its node's | [2](#2-privileges) |
+| The agent container runs AppArmor-unconfined; no narrower profile is provided | [2](#2-privileges) |
+| HTTP/2 and non-HTTP TLS in probed processes reach the agent's memory unfiltered | [3](#3-data-handling) |
+| User-space memory has no node-wide cap, so heavy concurrent traffic can OOM-kill the agent | [4](#4-resource-use-per-node) |
+| Images before 0.3.1 are not signed | [7](#7-supply-chain) |
