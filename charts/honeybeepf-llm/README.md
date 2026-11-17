@@ -9,7 +9,7 @@ eBPF uprobes, and exports metrics over OpenTelemetry.
   OpenAI-compatible APIs of 25 hosted providers such as Groq, DeepSeek, Mistral, Qwen, Kimi and GLM. JSON and
   streaming, HTTP/1.1 and HTTP/2, cache and reasoning tokens.
 - **Priced** from a dated built-in table, with your own prices and discounts on top.
-- **Measured overhead:** about 53 µs of agent CPU per LLM call and 32 MB RSS plus 19 MB of BPF maps
+- **Measured overhead:** about 55 µs of agent CPU per LLM call and 32 MB RSS plus 19 MB of BPF maps
   ([benchmark](https://honeybee-studio.github.io/honeybeepf-llm/benchmark/)).
 
 ## Requirements

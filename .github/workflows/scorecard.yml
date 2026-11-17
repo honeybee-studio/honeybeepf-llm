@@ -1,0 +1,40 @@
+name: Scorecard
+
+# OpenSSF Scorecard checks the repository's security practices (branch protection, pinned actions, signed releases,
+# token permissions) and publishes the score behind the README badge.
+on:
+  branch_protection_rule:
+  schedule:
+    - cron: '37 5 * * 1'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analysis:
+    name: Scorecard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+      # Publishing the result to the Scorecard API needs the job's OIDC token.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
+        with:
+          results_file: scorecard.sarif
+          results_format: sarif
+          publish_results: true
+
+      - uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        with:
+          sarif_file: scorecard.sarif
+          category: scorecard

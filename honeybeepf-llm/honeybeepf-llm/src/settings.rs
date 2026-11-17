@@ -1,37 +1,7 @@
 use config::{Config, ConfigError, Environment, Map};
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 const DEFAULT_PROBE_INTERVAL_SECONDS: u32 = 60;
-
-/// Deserializes a comma-separated string (or an actual sequence) into `Option<Vec<String>>`.
-/// Use `#[serde(default, deserialize_with = "deserialize_comma_separated")]` on any
-/// `Option<Vec<String>>` field that is populated via an environment variable like
-/// `MY_FIELD=foo,bar,baz`.
-fn deserialize_comma_separated<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    use serde::de::Error;
-    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
-    match raw {
-        None => Ok(None),
-        Some(serde_json::Value::String(s)) => Ok(Some(split_comma_separated(&s))),
-        Some(serde_json::Value::Array(arr)) => {
-            let items = arr
-                .into_iter()
-                .map(|v| {
-                    v.as_str()
-                        .map(std::string::ToString::to_string)
-                        .ok_or_else(|| D::Error::custom("expected string in array"))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Some(items))
-        }
-        Some(other) => Err(D::Error::custom(format!(
-            "expected string or array, got {other}"
-        ))),
-    }
-}
 
 fn split_comma_separated(s: &str) -> Vec<String> {
     s.split(',')
@@ -40,20 +10,9 @@ fn split_comma_separated(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Filesystem probe configuration
-#[derive(Debug, Deserialize, Clone, Default)]
-#[allow(unused)]
-pub struct FilesystemProbes {
-    pub file_access: Option<bool>,
-    #[serde(default, deserialize_with = "deserialize_comma_separated")]
-    pub watched_paths: Option<Vec<String>>,
-}
-
 #[derive(Debug, Deserialize, Clone, Default)]
 #[allow(unused)]
 pub struct BuiltinProbes {
-    #[serde(default)]
-    pub filesystem: FilesystemProbes,
     pub llm: Option<bool>,
     /// Probe executables with OpenSSL built in (Node.js); on unless set to false.
     pub llm_executables: Option<bool>,
@@ -63,7 +22,6 @@ pub struct BuiltinProbes {
     /// Pod labels copied onto LLM metrics (k8s feature); each adds series, so none by default.
     #[serde(skip)]
     pub llm_pod_labels: Option<Vec<String>>,
-    pub process_lifecycle: Option<bool>,
     pub interval: Option<u32>,
 }
 
@@ -140,7 +98,6 @@ mod tests {
         dotenvy::dotenv().ok();
 
         unsafe {
-            std::env::set_var("BUILTIN_PROBES__FILESYSTEM__FILE_ACCESS", "true");
             std::env::set_var("BUILTIN_PROBES__INTERVAL", "42");
             std::env::set_var("BUILTIN_PROBES__LLM_EXECUTABLES", "false");
             std::env::set_var(
@@ -151,7 +108,6 @@ mod tests {
 
         let settings = Settings::new().expect("Failed to load settings");
 
-        assert_eq!(settings.builtin_probes.filesystem.file_access, Some(true));
         assert_eq!(settings.builtin_probes.interval, Some(42));
         assert_eq!(settings.builtin_probes.llm_executables, Some(false));
         let pod_labels = settings.builtin_probes.llm_pod_labels.as_deref();
@@ -162,7 +118,6 @@ mod tests {
 
         // 환경변수 정리
         unsafe {
-            std::env::remove_var("BUILTIN_PROBES__FILESYSTEM__FILE_ACCESS");
             std::env::remove_var("BUILTIN_PROBES__INTERVAL");
             std::env::remove_var("BUILTIN_PROBES__LLM_EXECUTABLES");
             std::env::remove_var("BUILTIN_PROBES__LLM_POD_LABELS");
@@ -188,15 +143,10 @@ mod tests {
             otel_exporter_otlp_endpoint: None,
             otel_exporter_otlp_protocol: None,
             builtin_probes: BuiltinProbes {
-                filesystem: FilesystemProbes {
-                    file_access: Some(true),
-                    watched_paths: None,
-                },
                 llm: None,
                 llm_executables: None,
                 llm_detect_by_shape: None,
                 llm_pod_labels: None,
-                process_lifecycle: None,
                 interval: None,
             },
             custom_probe_config: None,

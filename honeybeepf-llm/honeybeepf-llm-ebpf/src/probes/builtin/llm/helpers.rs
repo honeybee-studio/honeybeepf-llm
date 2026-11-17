@@ -54,7 +54,7 @@ impl Session {
     }
 }
 
-/// Metadata for an event of the current task (LlmEvent doesn't use the HoneyBeeEvent trait).
+/// Metadata for an event of the current task.
 #[inline(always)]
 pub fn current_metadata() -> EventMetadata {
     let pid_tgid = bpf_get_current_pid_tgid();

@@ -192,6 +192,17 @@ jobs:
       - name: Smoke-test the image's BPF programs
         run: bash ci/image-smoke.sh honeybeepf-llm:smoke
 
+      # Fails on a high or critical vulnerability that has a fix, so no image ships one an update would remove.
+      - name: Scan the image for fixable vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: honeybeepf-llm:smoke
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
+
       - name: Build and push
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
