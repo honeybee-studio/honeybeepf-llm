@@ -34,7 +34,7 @@ Requires a cluster whose nodes run a Linux 5.10+ or RHEL 8.10 / 9.6 / 9.7 kernel
 
 ```bash
 kubectl create namespace honeybeepf
-helm install honeybeepf-llm oci://ghcr.io/honeybee-studio/charts/honeybeepf-llm --version 0.3.2 -n honeybeepf
+helm install honeybeepf-llm oci://ghcr.io/honeybee-studio/charts/honeybeepf-llm --version 0.4.0 -n honeybeepf
 kubectl logs -n honeybeepf ds/honeybeepf-llm -f | grep 'LLM SUCCESS'
 ```
 
@@ -91,8 +91,8 @@ The docs are at **[honeybee-studio.github.io/honeybeepf-llm](https://honeybee-st
 
 ## Roadmap
 
-Each release is a [milestone](https://github.com/honeybee-studio/honeybeepf-llm/milestones), with its issues and
-progress: [v0.4.0](https://github.com/honeybee-studio/honeybeepf-llm/milestone/4) is next, and
+Each release is a [milestone](https://github.com/honeybee-studio/honeybeepf-llm/milestones) with its issues and
+progress: the open ones show what comes next, and
 [Backlog](https://github.com/honeybee-studio/honeybeepf-llm/milestone/3) holds what is not scheduled yet.
 
 ## Contributing
