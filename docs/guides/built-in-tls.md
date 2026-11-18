@@ -20,19 +20,33 @@ builtinProbes:
 
 Outside Kubernetes, set `BUILTIN_PROBES__LLM_AEAD=true`.
 
+To read the memory of named programs only, list them (an extension is ignored, so `claude` matches `claude.exe`):
+
+```yaml
+builtinProbes:
+  llm:
+    aead: true
+    aeadExecutables: [claude, codex]
+```
+
+Outside Kubernetes: `BUILTIN_PROBES__LLM_AEAD_EXECUTABLES=claude,codex`.
+
 ## How it works
 
-1. The agent reads the memory of each new process, and of each running one when it starts, for the library's table
-   of cipher functions. A table is found by its sizes (key, nonce, tag) followed by pointers into the program's
-   code, so no symbols are needed.
+1. The agent first reads the executable file of each new process, and of each running one when it starts. Only a
+   file with BoringSSL or aws-lc in its read-only data (and, if set, one of the listed names) goes on. For those it
+   reads the memory of the program's own data, not its heap, for the library's table of cipher functions. A table
+   is found by its sizes (key, nonce, tag) followed by pointers into the program's code, so no symbols are needed.
 2. It attaches uprobes to the table's encrypt (`seal`) and decrypt (`open`) functions. Other processes of the same
    program use the same probes.
 3. Kprobes on `tcp_sendmsg` and `tcp_recvmsg` tie each record to its TCP connection, so the call gets the same
    connection and pod as any other.
 
-Some tables are filled when the first connection uses their cipher, so a process is scanned again for about half an
-hour. The first scan of a program reads its data, about 60 ms for a 240 MB binary; later scans read only the pages
-the process wrote, a few milliseconds each.
+Some tables are filled when the first connection uses their cipher, so a process is scanned again until one shows,
+for at most about half an hour; after that, later processes of the same program are not read at all. The first scan
+of a program reads its data, about 60 ms for a 240 MB binary; later scans read only the pages the process wrote, a
+few milliseconds each. What is read, and for how long, is in the
+[security review](../security-review.md#3-data-handling).
 
 ## Limits
 

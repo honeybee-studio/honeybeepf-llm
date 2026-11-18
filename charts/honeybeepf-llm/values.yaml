@@ -51,6 +51,9 @@ builtinProbes:
     # Experimental: also record programs with their own BoringSSL or aws-lc and no TLS symbols, such as Claude
     # Code, by probing the cipher of each TLS 1.3 record (docs/guides/built-in-tls.md).
     aead: false
+    # With aead on, only scan executables of these names (with or without an extension: claude matches claude.exe),
+    # e.g. [claude, codex]. Empty scans any executable with BoringSSL or aws-lc built in.
+    aeadExecutables: []
     # Pod labels copied onto LLM metrics as target_pod_label_<name> ("." "/" "-" become "_"), e.g. for A/B variants.
     # Each label multiplies the series by its distinct values: list only low-cardinality labels.
     podLabels: []

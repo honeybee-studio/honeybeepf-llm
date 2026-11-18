@@ -5,7 +5,8 @@
 use std::{fs::File, os::unix::fs::FileExt};
 
 use anyhow::{Context, Result};
-use procfs::process::{MMPermissions, MMapPath, Process};
+use object::{Object, ObjectSection, read::ReadCache};
+use procfs::process::{MMPermissions, MMapPath, MemoryMap, Process};
 
 /// Nonce, overhead and tag sizes of the AEADs TLS 1.3 uses, after a key size of 16 or 32.
 const SIZES: [u8; 3] = [12, 16, 16];
@@ -26,6 +27,8 @@ const PAGE_PRESENT_OR_SWAPPED: u64 = 0b11 << 62;
 const PAGE_OF_FILE_OR_SHARED: u64 = 1 << 61;
 /// Pagemap entries per read.
 const PAGEMAP_CHUNK: usize = 4096;
+/// Text each library keeps in its version string; only executables with one have their memory scanned.
+const LIBRARY_MARKERS: [&[u8]; 2] = [b"BoringSSL", b"AWS-LC"];
 
 /// The library a table belongs to, which sets where its function pointers are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -77,6 +80,8 @@ pub struct Table {
     pub cleanup: u64,
     pub seal: u64,
     pub open: u64,
+    /// Found in writable memory: an AES-GCM table, filled at the first TLS handshake that uses it.
+    pub filled_at_run_time: bool,
 }
 
 /// An executable mapping of the file: [start, end) and the file offset of `start`.
@@ -90,7 +95,7 @@ fn file_offset(execs: &[ExecRange], ptr: u64) -> Option<u64> {
 }
 
 /// The table of `library` at the start of `bytes`, if its pointers make one.
-fn table_of(library: Library, bytes: &[u8], execs: &[ExecRange]) -> Option<Table> {
+fn table_of(library: Library, bytes: &[u8], execs: &[ExecRange], writable: bool) -> Option<Table> {
     let (at, count) = library.pointers();
     let table = bytes.get(..at + count * 8)?;
     if !library.header_fits(table) {
@@ -115,18 +120,19 @@ fn table_of(library: Library, bytes: &[u8], execs: &[ExecRange]) -> Option<Table
             cleanup: offsets[CLEANUP],
             seal: offsets[SEAL],
             open: offsets[OPEN],
+            filled_at_run_time: writable,
         })
 }
 
 /// Every table in `buf`, which starts at an 8-aligned address.
-fn tables_in(buf: &[u8], execs: &[ExecRange]) -> Vec<Table> {
+fn tables_in(buf: &[u8], execs: &[ExecRange], writable: bool) -> Vec<Table> {
     buf.chunks(8)
         .enumerate()
         .filter(|(_, head)| matches!(head[0], 16 | 32) && head.get(1..4) == Some(&SIZES))
         .filter_map(|(i, _)| {
             Library::ALL
                 .into_iter()
-                .find_map(|library| table_of(library, &buf[i * 8..], execs))
+                .find_map(|library| table_of(library, &buf[i * 8..], execs, writable))
         })
         .collect()
 }
@@ -168,14 +174,32 @@ fn written_runs(pagemap: Option<&File>, (start, end): (u64, u64)) -> Vec<(u64, u
     runs
 }
 
-/// The tables in the memory of `pid` that belongs to the executable with inode `ino`: its data and the
-/// zero-filled memory after it, and its read-only data. With `written_only`, only the pages the process
-/// has written, where it fills a table at run time.
-pub fn scan(pid: u32, ino: u64, written_only: bool) -> Result<Vec<Table>> {
-    let maps = Process::new(pid as i32)?.maps()?;
+/// Whether the executable at `path` has a BoringSSL or aws-lc built in, by its version text in
+/// `.rodata`; read from the file, not from any process.
+pub fn has_library(path: &str) -> bool {
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let cache = ReadCache::new(file);
+    let Ok(obj) = object::File::parse(&cache) else {
+        return false;
+    };
+    obj.sections()
+        .filter(|s| s.name() == Ok(".rodata"))
+        .filter_map(|s| s.data().ok())
+        .any(has_marker)
+}
+
+fn has_marker(data: &[u8]) -> bool {
+    (0..data.len()).any(|i| LIBRARY_MARKERS.iter().any(|m| data[i..].starts_with(m)))
+}
+
+/// The code ranges of the executable with inode `ino`, and the memory to scan: the file's data and the
+/// one zero-filled mapping right after it, as (start, end, writable). The heap and other memory are not read.
+fn regions_of(maps: &[MemoryMap], ino: u64) -> (Vec<ExecRange>, Vec<(u64, u64, bool)>) {
     let (mut execs, mut regions) = (Vec::new(), Vec::new());
-    let mut prev_end = None;
-    for map in &maps {
+    let mut file_end = None;
+    for map in maps {
         let (start, end) = map.address;
         let writable = map.perms.contains(MMPermissions::WRITE);
         let of_file = matches!(map.pathname, MMapPath::Path(_)) && map.inode == ino;
@@ -183,19 +207,19 @@ pub fn scan(pid: u32, ino: u64, written_only: bool) -> Result<Vec<Table>> {
             execs.push((start, end, map.offset));
         } else if of_file && map.perms.contains(MMPermissions::READ) {
             regions.push((start, end, writable));
-        } else if writable
-            && prev_end == Some(start)
-            && matches!(map.pathname, MMapPath::Anonymous | MMapPath::Heap)
+        } else if writable && file_end == Some(start) && matches!(map.pathname, MMapPath::Anonymous)
         {
-            // Zero-filled data follows the file's last mapping.
             regions.push((start, end, true));
-        } else {
-            prev_end = None;
-            continue;
         }
-        prev_end = Some(end);
+        file_end = of_file.then_some(end);
     }
+    (execs, regions)
+}
 
+/// The tables in the memory of `pid` that belongs to the executable with inode `ino` (see `regions_of`).
+/// With `written_only`, only the pages the process has written, where it fills a table at run time.
+pub fn scan(pid: u32, ino: u64, written_only: bool) -> Result<Vec<Table>> {
+    let (execs, mut regions) = regions_of(&Process::new(pid as i32)?.maps()?.0, ino);
     let mem = File::open(format!("/proc/{pid}/mem")).context("process memory not readable")?;
     if written_only {
         let pagemap = File::open(format!("/proc/{pid}/pagemap")).ok();
@@ -208,13 +232,13 @@ pub fn scan(pid: u32, ino: u64, written_only: bool) -> Result<Vec<Table>> {
     }
     let mut tables: Vec<Table> = Vec::new();
     let mut buf = vec![0u8; CHUNK + MAX_TABLE_LEN];
-    for (start, end, _) in regions {
+    for (start, end, writable) in regions {
         let mut pos = start;
         while pos < end {
             // Chunks overlap by one table, so a table across a chunk boundary is still found.
             let want = usize::try_from(end - pos).map_or(buf.len(), |left| left.min(buf.len()));
             let got = read_at(&mem, &mut buf[..want], pos);
-            for table in tables_in(&buf[..got], &execs) {
+            for table in tables_in(&buf[..got], &execs, writable) {
                 if !tables.contains(&table) {
                     tables.push(table);
                 }
@@ -240,6 +264,7 @@ fn read_at(mem: &File, buf: &mut [u8], pos: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use procfs::FromBufRead;
 
     const EXECS: [ExecRange; 1] = [(0x40_0000, 0x50_0000, 0x1000)];
 
@@ -271,8 +296,14 @@ mod tests {
             cleanup: 0x1200,
             seal: 0x1300,
             open: 0x1400,
+            filled_at_run_time: false,
         };
-        assert_eq!(tables_in(&buf, &EXECS), [expected]);
+        assert_eq!(tables_in(&buf, &EXECS, false), [expected]);
+        let filled = Table {
+            filled_at_run_time: true,
+            ..expected
+        };
+        assert_eq!(tables_in(&buf, &EXECS, true), [filled]);
     }
 
     #[test]
@@ -293,8 +324,9 @@ mod tests {
                 cleanup: 0x1200,
                 seal: 0x1300,
                 open: 0x1400,
+                filled_at_run_time: false,
             };
-            assert_eq!(tables_in(&buf, &EXECS), [expected]);
+            assert_eq!(tables_in(&buf, &EXECS, false), [expected]);
         }
     }
 
@@ -304,7 +336,7 @@ mod tests {
         for (i, p) in pointers.iter_mut().enumerate() {
             *p = 0x40_0100 + 0x100 * i as u64;
         }
-        let tables = tables_in(&aws_lc(16, 0x10, 0, pointers), &EXECS);
+        let tables = tables_in(&aws_lc(16, 0x10, 0, pointers), &EXECS, false);
         assert_eq!(tables.len(), 1);
         assert_eq!(tables[0].library, Library::AwsLc);
         assert_eq!((tables[0].seal, tables[0].open), (0x1500, 0x1600));
@@ -325,13 +357,13 @@ mod tests {
                 0,
             ],
         );
-        assert_eq!(tables_in(&buf, &EXECS), []);
+        assert_eq!(tables_in(&buf, &EXECS, false), []);
     }
 
     #[test]
     fn test_table_without_an_open_function_is_not_a_table() {
         let buf = boringssl(16, [0x40_0100, 0x40_0150, 0x40_0200, 0, 0x40_0300, 0, 0, 0]);
-        assert_eq!(tables_in(&buf, &EXECS), []);
+        assert_eq!(tables_in(&buf, &EXECS, false), []);
     }
 
     #[test]
@@ -351,8 +383,42 @@ mod tests {
             32,
             [0x40_0100, 0, 0x40_0200, 0, 0x40_0300, 0x40_0400, 0, 0],
         ));
-        assert_eq!(tables_in(&buf, &EXECS), []);
+        assert_eq!(tables_in(&buf, &EXECS, false), []);
         let cut = boringssl(32, [0x40_0100; 8]);
-        assert_eq!(tables_in(&cut[..cut.len() - 1], &EXECS), []);
+        assert_eq!(tables_in(&cut[..cut.len() - 1], &EXECS, false), []);
+    }
+
+    #[test]
+    fn test_only_the_file_data_and_the_zero_filled_mapping_after_it_are_read() {
+        let maps = "\
+00400000-00500000 r-xp 00001000 08:01 42 /usr/bin/tool
+00500000-00600000 r--p 00101000 08:01 42 /usr/bin/tool
+00600000-00700000 rw-p 00201000 08:01 42 /usr/bin/tool
+00700000-00800000 rw-p 00000000 00:00 0 
+00800000-00900000 rw-p 00000000 00:00 0 
+00900000-00a00000 rw-p 00000000 00:00 0                                  [heap]
+7f0000000000-7f0000100000 r--p 00000000 08:01 7 /usr/lib/libc.so.6
+7f0000100000-7f0000200000 rw-p 00000000 00:00 0 
+";
+        let maps = procfs::process::MemoryMaps::from_buf_read(maps.as_bytes()).expect("maps parse");
+        let (execs, regions) = regions_of(&maps.0, 42);
+        assert_eq!(execs, [(0x40_0000, 0x50_0000, 0x1000)]);
+        assert_eq!(
+            regions,
+            [
+                (0x50_0000, 0x60_0000, false),
+                (0x60_0000, 0x70_0000, true),
+                (0x70_0000, 0x80_0000, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_library_marker_found_anywhere_in_the_data() {
+        assert!(has_marker(
+            b"\0\0OpenSSL 1.1.1 (compatible; AWS-LC 1.66.2)\0"
+        ));
+        assert!(has_marker(b"BoringSSL"));
+        assert!(!has_marker(b"OpenSSL 3.0.13 30 Jan 2024\0BoringSS"));
     }
 }

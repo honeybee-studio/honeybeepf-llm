@@ -29,6 +29,7 @@ Every program only reads or observes: none changes a syscall result, drops or re
 |---|---|---|---|---|
 | LLM, OpenSSL | `probe_ssl_*` | `SSL_read`, `SSL_write` and their `_ex` variants, `SSL_do_handshake`, `SSL_free`, in each `libssl` or executable that exports them | up to 16 KB of a read and 4 KB of a write; otherwise pointers only | yes |
 | LLM, Go | `probe_go_tls_*` | `crypto/tls` `(*Conn).Write`, `Read`, each return of `Read`, and `Close` in Go 1.20+ executables | the same limits | yes (`builtinProbes.llm.executables`) |
+| LLM, built-in TLS | `probe_aead_*` | the `seal`, `open`, `init` and `cleanup` functions of a BoringSSL or aws-lc built into an executable, found by the AEAD table scan ([Data handling](#3-data-handling)); `tcp_sendmsg` and `tcp_recvmsg` (kprobes) once a table is found | the same limits; socket pointers | no (`builtinProbes.llm.aead`, experimental) |
 | LLM, discovery | `probe_exec`, `probe_ssl_task_exit`, `probe_lib_open_fentry` (kprobe fallback without BTF) | `sched_process_exec`, `sched_process_exit`, `do_sys_openat2` | pid, `comm`, thread id, opened path | yes |
 | Plaintext | `plaintext_connect4`, `plaintext_sockops`, `plaintext_skmsg`, `plaintext_skskb` | the host's cgroup v2 root and a sockhash | up to 4 KB of a send and 64 KB of a receive on watched sockets | only when a provider sets `plaintext` |
 
@@ -48,6 +49,10 @@ Every program only reads or observes: none changes a syscall result, drops or re
 | `probe_ssl_do_handshake_enter` / `_exit` | uprobe / uretprobe | `SSL_do_handshake` | start the latency timer; mark a reused `SSL*` | the `SSL*` pointer |
 | `probe_ssl_free` | uprobe | `SSL_free` | end the connection's stream | the `SSL*` pointer |
 | `probe_go_tls_*` | uprobe | Go `crypto/tls` `(*Conn).Write`, `Read`, `Read` returns, `Close` | the same, for Go executables | buffer contents within the same limits |
+| `probe_aead_seal` | uprobe | AEAD `seal` entry | copy a TLS record's plaintext before it is encrypted | the same limits; argument pointers |
+| `probe_aead_open_enter` / `probe_aead_open_exit` | uprobe / uretprobe | AEAD `open` | copy a TLS record's plaintext after it is decrypted | the same limits |
+| `probe_aead_init` / `probe_aead_cleanup` | uprobe | AEAD context init and cleanup | tie a cipher context to its socket, and forget it | context pointer |
+| `probe_aead_tcp_sendmsg` / `probe_aead_tcp_recvmsg` | kprobe | `tcp_sendmsg`, `tcp_recvmsg` on the whole node | learn the socket of the records a thread sealed or will open; a map lookup for other processes | socket pointer |
 | `probe_ssl_task_exit` | tracepoint | `sched:sched_process_exit` | clear an exiting thread's in-flight state | thread id |
 | `probe_exec` | tracepoint | `sched:sched_process_exec` | attach SSL probes to new processes | pid, `comm` |
 | `probe_lib_open_fentry` / `probe_lib_open` | fentry, kprobe fallback | `do_sys_openat2` | notice a `libssl.so*` open before its first SSL call | the opened path |
@@ -72,7 +77,7 @@ to the agent's own `/sys/fs/cgroup` and see only the agent pod; the log names th
 | `BPF` | create the maps and load the programs |
 | `PERFMON` | attach uprobes, tracepoints and fentry, and read user memory |
 | `SYS_ADMIN` | the uprobe `perf_event_open`, which Ubuntu's 7.0 kernel refuses with `PERFMON` alone |
-| `SYS_PTRACE` | read other processes' `/proc/<pid>/root` and `/proc/<pid>/maps` to find their libssl |
+| `SYS_PTRACE` | read other processes' `/proc/<pid>/root` and `/proc/<pid>/maps` to find their libssl; with the experimental AEAD scan on, also `/proc/<pid>/mem` of some processes ([Data handling](#3-data-handling)) |
 | `NET_ADMIN` | create the plaintext sockhash at start, even with plaintext off; kernels before 6.9 only |
 | `SYS_RESOURCE` | raise `RLIMIT_MEMLOCK`; kernels before 5.11 only |
 
@@ -127,6 +132,16 @@ granted but unused.
 | Logged | per call: model, request path without the query string, pid, pod, latency and token counts. Never a body or header; the model and an OpenAI background call's id are the only values taken from a body |
 | Network | no listening port. Outbound: the OTLP collector, the Kubernetes API, and DNS for plaintext hosts outside the cluster |
 | Disk | read-only root filesystem and host mounts; the only file written is the heartbeat in a 1 MiB in-memory `emptyDir` |
+
+**Process memory read by the AEAD table scan.** Experimental and off by default (`BUILTIN_PROBES__LLM_AEAD`). It
+finds the cipher table of a BoringSSL or aws-lc built into a program such as Claude Code, which exports no TLS function.
+
+| | |
+|---|---|
+| Which processes | only those whose executable file has `BoringSSL` or `AWS-LC` in its `.rodata`, checked once per file by reading the file; with `BUILTIN_PROBES__LLM_AEAD_EXECUTABLES` (e.g. `claude,codex`), only executables of those names |
+| Which memory | the executable's own mappings and the one zero-filled mapping right after them, read-only through `/proc/<pid>/mem`. Never the heap, stacks, libraries or other mappings. Rescans read only the pages of those mappings the process wrote (`/proc/<pid>/pagemap`) |
+| How long | until a table filled at run time is found, once per executable file; its later processes are not read. Otherwise up to 20 scans per process over about 30 minutes |
+| Kept | the file offsets of the table's functions, logged. The bytes read are dropped |
 
 **Which TLS traffic reaches the agent.** The uprobes fire for every TLS connection in a probed process, not only LLM
 calls. The kernel drops a connection's bytes once it knows its class:
