@@ -1,10 +1,12 @@
 version: 2
+# Version updates come once a month, one grouped PR per ecosystem. Security updates are separate and still
+# open as soon as an advisory is published.
 updates:
-  # Keeps the SHA-pinned actions and their version comments current in one weekly PR.
+  # The SHA-pinned actions and their version comments.
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     groups:
       github-actions:
         patterns:
@@ -22,35 +24,34 @@ updates:
     labels:
       - dependencies
       - ci
-  # Keeps the digest-pinned base images in Dockerfile current; the nightly toolchain image moves daily, so weekly.
+  # The digest-pinned base images: the agent's Dockerfile and the benchmark mock server.
   - package-ecosystem: docker
-    directory: /
+    directories:
+      - /
+      - /tests/benchmark
     schedule:
-      interval: weekly
+      interval: monthly
+    groups:
+      docker:
+        patterns:
+          - "*"
     commit-message:
       prefix: ci
     labels:
       - dependencies
       - ci
-  # Keeps the pinned MkDocs packages of the docs site current.
+  # The hash-pinned Python packages: the docs site, the zig that builds release binaries, the benchmark mock.
   - package-ecosystem: pip
-    directory: /docs
+    directories:
+      - /docs
+      - /.github/requirements
+      - /tests/benchmark
     schedule:
-      interval: weekly
+      interval: monthly
     groups:
-      docs:
+      pip:
         patterns:
           - "*"
-    commit-message:
-      prefix: docs
-    labels:
-      - dependencies
-      - documentation
-  # Keeps the hash-pinned zig used to build the release binaries current.
-  - package-ecosystem: pip
-    directory: /.github/requirements
-    schedule:
-      interval: weekly
     commit-message:
       prefix: ci
     labels:
