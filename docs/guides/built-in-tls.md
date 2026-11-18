@@ -1,12 +1,16 @@
 # Programs with built-in TLS
 
 !!! warning "Experimental"
-    Off by default and may change. Tested on a VM against a mock server with Claude Code (Bun) and Codex
-    (rustls), with AES-128-GCM, AES-256-GCM and ChaCha20-Poly1305. Not yet tested on Kubernetes or arm64.
+    Off by default and may change. Tested against a mock server with Claude Code (Bun) on a VM, with AES-128-GCM,
+    AES-256-GCM and ChaCha20-Poly1305, and in k3s pods. Not yet tested on arm64.
 
 Some programs carry their own TLS library and export no TLS function, so the usual probes see none of their calls:
 Bun builds such as Claude Code and OpenCode (BoringSSL), and Rust programs on rustls with aws-lc such as Codex and
 Goose. With this setting the agent also probes the cipher those libraries encrypt each TLS record with.
+
+Claude Code is recorded. Codex is not yet: it calls the API over a WebSocket, which is not parsed yet
+([#322](https://github.com/honeybee-studio/honeybeepf-llm/issues/322)), and its HTTP fallback is recorded only
+with `SSL_CERT_FILE` set ([#323](https://github.com/honeybee-studio/honeybeepf-llm/issues/323)).
 
 ```yaml
 builtinProbes:
@@ -35,7 +39,7 @@ the process wrote, a few milliseconds each.
 | Limit | Effect |
 |---|---|
 | TLS 1.3 only | A connection over TLS 1.2, such as through an old TLS-inspecting proxy, is not recorded. Provider endpoints use TLS 1.3. |
-| Codex over WebSocket | Not parsed yet; Codex calls over HTTP/2 are recorded. |
+| WebSocket | Not parsed yet, so Codex's default calls are not recorded. |
 | Connections open before the probes attach | A connection that rustls opened earlier may lose its first request. |
 | TCP kprobes | Once a table is found, every TCP send and receive on the node runs one map lookup. |
 | Coverage metric | Pods of these programs still count as `tls="other"` in [coverage](coverage.md). |

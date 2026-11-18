@@ -28,4 +28,4 @@ sum by (target_namespace, target_workload_name, tls) (honeybeepf_llm_llm_tls_cov
 | `openssl_not_hooked` | Check the agent log on that node for an attach error. A pod that started a moment ago is attached within a minute. |
 | `go` | Go before 1.20 is not supported: a build with Go 1.20 or later is seen. |
 | `java` | JSSE is not supported yet. |
-| `other` | Programs with a built-in BoringSSL or aws-lc (Claude Code, Codex) are seen with the experimental [AEAD probes](built-in-tls.md), but still count as `other` here. Other statically linked TLS is not supported yet. A pod that calls a model server over plain HTTP is seen once that server is a [plaintext provider](plaintext.md). |
+| `other` | Programs with a built-in BoringSSL or aws-lc, such as Claude Code, are seen with the experimental [AEAD probes](built-in-tls.md), but still count as `other` here. Other statically linked TLS is not supported yet. A pod that calls a model server over plain HTTP is seen once that server is a [plaintext provider](plaintext.md). |
