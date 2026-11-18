@@ -106,7 +106,13 @@ impl HoneyBeeEngine {
         if settings.builtin_probes.llm.unwrap_or(false) {
             let executables = settings.builtin_probes.llm_executables.unwrap_or(true);
             let detect_by_shape = settings.builtin_probes.llm_detect_by_shape.unwrap_or(false);
-            let aead = settings.builtin_probes.llm_aead.unwrap_or(false);
+            let aead = settings.builtin_probes.llm_aead.unwrap_or(false).then(|| {
+                settings
+                    .builtin_probes
+                    .llm_aead_executables
+                    .clone()
+                    .unwrap_or_default()
+            });
             dynamic_probes.push(Box::new(LlmProbe::new(executables, detect_by_shape, aead)));
         }
 

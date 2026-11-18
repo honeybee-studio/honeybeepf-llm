@@ -283,17 +283,36 @@ struct AeadPending {
     wait: u32,
 }
 
+/// Whether the processes of an executable file have their memory scanned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileScan {
+    /// No BoringSSL or aws-lc in the file, or no table at its first scan.
+    Skip,
+    Scan,
+    /// A table filled at run time was found, so every table of the file is known.
+    Done,
+}
+
 #[derive(Default)]
 struct AeadScans {
+    /// Executable names to scan; empty scans every executable with the library built in.
+    names: Vec<String>,
     pending: Vec<AeadPending>,
-    /// Files whose first scan found no table; they are not scanned again.
-    no_tables: HashSet<FileId>,
+    files: HashMap<FileId, FileScan>,
     /// Tables found in each file; its other processes share them.
     found: HashSet<(FileId, aead::Table)>,
 }
 
+/// Whether the executable at `path` is one of `names`, with or without its extension (`claude.exe`).
+fn named(names: &[String], path: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    let stem = file.split('.').next().unwrap_or(file);
+    names.is_empty() || names.iter().any(|n| n == file || n == stem)
+}
+
 impl LlmProbe {
-    pub fn new(executables: bool, detect_by_shape: bool, aead: bool) -> Self {
+    /// `aead`: scan executables for AEAD tables, only those named when the list is not empty.
+    pub fn new(executables: bool, detect_by_shape: bool, aead: Option<Vec<String>>) -> Self {
         // Shape detection is read by the host-blind parser globals, so push it once here.
         http::set_detect_by_shape(detect_by_shape);
         if detect_by_shape {
@@ -305,7 +324,12 @@ impl LlmProbe {
             known_targets: Arc::new(Mutex::new(HashSet::new())),
             attached: Arc::new(Mutex::new(HashSet::new())),
             executables,
-            aead: aead.then(Mutex::default),
+            aead: aead.map(|names| {
+                Mutex::new(AeadScans {
+                    names,
+                    ..AeadScans::default()
+                })
+            }),
         }
     }
 
@@ -325,9 +349,9 @@ impl LlmProbe {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !probed
-            && !scans.no_tables.contains(&id)
             && scans.pending.len() < limit
             && scans.pending.iter().all(|p| p.pid != pid)
+            && scans.should_scan(id, path)
         {
             let mut process = AeadPending {
                 pid,
@@ -471,6 +495,19 @@ fn log_executable(path: &str, id: FileId, result: Result<Option<ExeTls>>) {
 }
 
 impl AeadScans {
+    /// Whether processes of the file are scanned: it is named (when names are set), has a BoringSSL or
+    /// aws-lc built in, and not all of its tables are known. The file is read once, no process memory.
+    fn should_scan(&mut self, id: FileId, path: &str) -> bool {
+        named(&self.names, path)
+            && *self.files.entry(id).or_insert_with(|| {
+                if aead::has_library(path) {
+                    FileScan::Scan
+                } else {
+                    FileScan::Skip
+                }
+            }) == FileScan::Scan
+    }
+
     /// The constant tables of a file are known from its first scan: only the tables this process fills
     /// are left to find.
     fn skip_known_tables(&self, p: &mut AeadPending) {
@@ -482,7 +519,7 @@ impl AeadScans {
     /// Scan each process that is due and log the tables found.
     fn scan_pending(&mut self) {
         for mut p in std::mem::take(&mut self.pending) {
-            if self.no_tables.contains(&p.id) {
+            if self.files.get(&p.id) != Some(&FileScan::Scan) {
                 continue;
             }
             self.skip_known_tables(&mut p);
@@ -500,18 +537,19 @@ impl AeadScans {
                 continue;
             };
             debug!(
-                "AEAD scan {} of PID {} took {:?}, {} tables",
+                "AEAD scan {} of PID {} ({}) took {:?}, {} tables",
                 p.scans,
                 p.pid,
+                p.path,
                 started.elapsed(),
                 tables.len()
             );
             p.scans += 1;
             if p.scans == 1 && tables.is_empty() {
-                self.no_tables.insert(p.id);
+                self.files.insert(p.id, FileScan::Skip);
                 continue;
             }
-            for table in tables {
+            for &table in &tables {
                 if self.found.insert((p.id, table)) {
                     info!(
                         "Built-in {} AEAD table in {} (PID {}): init {:#x}/{:#x}, cleanup {:#x}, seal {:#x}, open {:#x}",
@@ -525,6 +563,10 @@ impl AeadScans {
                         table.open
                     );
                 }
+            }
+            if tables.iter().any(|t| t.filled_at_run_time) {
+                self.files.insert(p.id, FileScan::Done);
+                continue;
             }
             if p.scans < AEAD_SCANS {
                 p.wait = (1 << p.scans.saturating_sub(AEAD_DENSE_SCANS)) - 1;
@@ -684,9 +726,18 @@ impl Probe for LlmProbe {
                 warn!("Go TLS probe {prog} failed to load: {e:#}");
             }
         }
-        if self.aead.is_some() {
+        if let Some(scans) = &self.aead {
+            let names = &scans
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .names;
             warn!(
-                "AEAD table scan for built-in BoringSSL and aws-lc is on (experimental): tables are only logged"
+                "AEAD table scan for built-in BoringSSL and aws-lc is on (experimental): tables are only logged; executables: {}",
+                if names.is_empty() {
+                    "any with the library".to_owned()
+                } else {
+                    names.join(", ")
+                }
             );
         }
 
@@ -885,6 +936,32 @@ mod tests {
     }
 
     /// Node's event loop or asyncio: two streaming calls on one thread, their reads interleaved.
+    #[test]
+    fn test_aead_names_match_the_executable_with_or_without_its_extension() {
+        let names = vec!["claude".to_string(), "codex".to_string()];
+        let path = "/proc/7/root/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe";
+        assert!(named(&names, path));
+        assert!(named(&names, "/usr/local/bin/codex"));
+        assert!(!named(&names, "/usr/sbin/sshd"));
+        assert!(!named(&names, "/opt/claude-tools/bin/helper"));
+        assert!(named(&[], "/usr/sbin/sshd"));
+    }
+
+    #[test]
+    fn test_aead_scan_skips_an_executable_without_the_library_and_reads_it_once() {
+        let mut scans = AeadScans::default();
+        // Not this test binary: it holds the library names as constants.
+        let path = "/bin/sh";
+        let id = file_identity(path).expect("file identity");
+        assert!(!scans.should_scan(id, path));
+        assert_eq!(scans.files.get(&id), Some(&FileScan::Skip));
+        scans.files.insert(id, FileScan::Scan);
+        assert!(
+            scans.should_scan(id, path),
+            "the cached state is used, not the file"
+        );
+    }
+
     #[test]
     fn test_two_connections_on_one_thread_are_both_recorded() {
         use LlmDirection::{Read, Write};
