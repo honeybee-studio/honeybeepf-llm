@@ -8,7 +8,7 @@ fn ctx() -> CallContext {
         pid: 1,
         #[cfg(feature = "k8s")]
         pod_info: None,
-        by_shape: false,
+        matched: MatchedBy::Host,
     }
 }
 

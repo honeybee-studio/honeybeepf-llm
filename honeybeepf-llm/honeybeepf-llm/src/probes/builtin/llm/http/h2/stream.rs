@@ -1,5 +1,6 @@
 //! One HTTP/2 stream matched to a provider: its response body read for usage, by content type.
 
+use crate::telemetry::MatchedBy;
 use std::borrow::Cow;
 use std::time::Instant;
 
@@ -82,7 +83,7 @@ pub(super) struct H2Stream {
     /// its running session total never read.
     record_only: bool,
     /// Matched by its request path alone (shape detection, host unlisted).
-    by_shape: bool,
+    matched: MatchedBy,
     /// The background Responses id this stream polls (`GET <responses path>/{id}`), if it is a poll.
     poll: Option<Box<str>>,
     /// The model the request path names (Bedrock), for a response that names none.
@@ -102,7 +103,7 @@ impl H2Stream {
             key_tail: Vec::new(),
             status: None,
             record_only,
-            by_shape: false,
+            matched: MatchedBy::Host,
             poll: None,
             request_model: None,
         }
@@ -117,17 +118,22 @@ impl H2Stream {
     }
 
     /// A matched stream whose request path may name the model.
-    pub(super) fn open_for(start: Instant, record_only: bool, by_shape: bool, path: &str) -> Self {
+    pub(super) fn open_for(
+        start: Instant,
+        record_only: bool,
+        matched: MatchedBy,
+        path: &str,
+    ) -> Self {
         Self {
             request_model: super::super::request_model::from_path(path),
-            by_shape,
+            matched,
             ..Self::open(start, record_only)
         }
     }
 
     /// Whether the stream was matched by its request path alone.
-    pub(super) fn by_shape(&self) -> bool {
-        self.by_shape
+    pub(super) fn matched(&self) -> MatchedBy {
+        self.matched
     }
 
     /// Whether the matched provider is record-only, so its end is counted without reading usage.
@@ -400,7 +406,7 @@ mod tests {
         let mut s = H2Stream::open_for(
             Instant::now(),
             false,
-            false,
+            MatchedBy::Host,
             "/model/amazon.nova-pro-v1%3A0/converse",
         );
         s.response_headers(Some(200), Some(b"application/json"), b"");

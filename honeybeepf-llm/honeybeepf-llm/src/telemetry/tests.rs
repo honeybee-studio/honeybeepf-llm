@@ -497,7 +497,7 @@ fn llm_fallback_attempt_label_separates_declined_tokens_from_served() -> Result<
                 model,
                 status,
                 attempt,
-                false,
+                MatchedBy::Host,
                 #[cfg(feature = "k8s")]
                 None,
             )
@@ -1227,12 +1227,12 @@ fn a_rebuild_carries_active_totals_so_no_series_goes_backwards() -> Result<()> {
 
 #[test]
 fn shape_matched_calls_carry_match_shape_and_host_matched_calls_no_match_label() {
-    let has_match = |by_shape| {
+    let has_match = |matched| {
         llm_attrs(
             "m",
             "success",
             Attempt::Served,
-            by_shape,
+            matched,
             #[cfg(feature = "k8s")]
             None,
         )
@@ -1240,6 +1240,27 @@ fn shape_matched_calls_carry_match_shape_and_host_matched_calls_no_match_label()
         .find(|kv| kv.key.as_str() == "match")
         .map(|kv| kv.value.as_str().into_owned())
     };
-    assert_eq!(has_match(true).as_deref(), Some("shape"));
-    assert_eq!(has_match(false), None);
+    assert_eq!(has_match(MatchedBy::Shape).as_deref(), Some("shape"));
+    assert_eq!(has_match(MatchedBy::Host), None);
+    assert_eq!(has_match(MatchedBy::Gateway), None);
+}
+
+#[test]
+fn gateway_calls_carry_hop_gateway_and_other_calls_no_hop_label() {
+    let hop = |matched| {
+        llm_attrs(
+            "m",
+            "success",
+            Attempt::Served,
+            matched,
+            #[cfg(feature = "k8s")]
+            None,
+        )
+        .iter()
+        .find(|kv| kv.key.as_str() == "hop")
+        .map(|kv| kv.value.as_str().into_owned())
+    };
+    assert_eq!(hop(MatchedBy::Gateway).as_deref(), Some("gateway"));
+    assert_eq!(hop(MatchedBy::Host), None);
+    assert_eq!(hop(MatchedBy::Shape), None);
 }

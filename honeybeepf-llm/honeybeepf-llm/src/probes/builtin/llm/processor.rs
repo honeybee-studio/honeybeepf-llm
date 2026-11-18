@@ -1,3 +1,4 @@
+use crate::telemetry::MatchedBy;
 use std::time::Instant;
 
 use honeybeepf_llm_common::{capture_limit, plain_capture_limit};
@@ -51,17 +52,17 @@ pub struct CallContext {
     #[cfg(feature = "k8s")]
     pub(crate) pod_info: Option<std::sync::Arc<crate::k8s::PodInfo>>,
     /// The call was matched by its request path alone (shape detection, host unlisted).
-    pub(crate) by_shape: bool,
+    pub(crate) matched: MatchedBy,
 }
 
 impl CallContext {
     /// The same identity for one call, marked as matched by its path alone or not.
-    pub(crate) fn shaped(&self, by_shape: bool) -> Self {
+    pub(crate) fn with_match(&self, matched: MatchedBy) -> Self {
         Self {
             pid: self.pid,
             #[cfg(feature = "k8s")]
             pod_info: self.pod_info.clone(),
-            by_shape,
+            matched,
         }
     }
 }
@@ -174,7 +175,7 @@ pub struct StreamProcessor {
     /// counted under `agent_session` without reading the running session total.
     record_only: bool,
     /// The detected request matched by its path alone (shape detection, host unlisted).
-    by_shape: bool,
+    matched: MatchedBy,
     /// Capture transport of this connection; a metric label on the calls it records.
     transport: Transport,
 }
@@ -202,7 +203,7 @@ impl StreamProcessor {
             h2_gap_client: H2Gap::None,
             h2_gap_server: H2Gap::None,
             record_only: false,
-            by_shape: false,
+            matched: MatchedBy::Host,
             transport: Transport::Tls,
         }
     }
@@ -368,7 +369,7 @@ impl StreamProcessor {
         if skipped.is_none() {
             return Outcome::Pending;
         }
-        Self::count_unparsed(UnparsedReason::CaptureLost, &ctx.shaped(self.by_shape))
+        Self::count_unparsed(UnparsedReason::CaptureLost, &ctx.with_match(self.matched))
     }
 
     /// Start over from the request written mid-response, so this Read is parsed as its response.
@@ -428,13 +429,13 @@ impl StreamProcessor {
         } else {
             reason
         };
-        Self::count_unparsed(reason, &ctx.shaped(self.by_shape))
+        Self::count_unparsed(reason, &ctx.with_match(self.matched))
     }
 
     /// Count one LLM call as unparsed, in the metric and the log. A call matched by its path alone is
     /// only an LLM call once its usage shows it, so without usage it is not counted.
     fn count_unparsed(reason: UnparsedReason, ctx: &CallContext) -> Outcome {
-        if ctx.by_shape {
+        if ctx.matched == MatchedBy::Shape {
             debug!(
                 "LLM path match without usage | PID: {} | {}, not an LLM call by its response",
                 ctx.pid, reason
@@ -543,7 +544,7 @@ impl StreamProcessor {
                             state,
                             start_time,
                             background,
-                            &ctx.shaped(self.by_shape),
+                            &ctx.with_match(self.matched),
                         ) {
                             return outcome;
                         }
@@ -611,11 +612,11 @@ impl StreamProcessor {
     /// Next state for the request bytes buffered so far.
     fn detect(&mut self, background: &BackgroundCalls, ctx: &CallContext) -> ProcessorState {
         self.record_only = false;
-        self.by_shape = false;
+        self.matched = MatchedBy::Host;
         let (version, path, parser): (&str, String, Box<dyn ProtocolParser>) =
             if let Some(d) = http::Http11Parser.detect_request(&self.write_buf) {
                 self.record_only = d.record_only;
-                self.by_shape = d.by_shape;
+                self.matched = d.matched;
                 ("HTTP/1.1", d.path, Box::new(http::Http11Parser))
             } else if let Some(id) = http::Http11Parser::retrieved_response_id(&self.write_buf)
                 .filter(|id| background.contains(id))
@@ -674,7 +675,7 @@ impl StreamProcessor {
         self.h2_gap_client = H2Gap::None;
         self.h2_gap_server = H2Gap::None;
         self.record_only = false;
-        self.by_shape = false;
+        self.matched = MatchedBy::Host;
     }
 }
 

@@ -35,6 +35,7 @@ prefix. Cost metrics are on [Cost and prices](cost.md).
 | `modality` | `text`, `image`, `audio` or `video`, on tokens; text is what remains after the others |
 | `attempt` | `served`, or `declined` for an earlier fallback attempt the provider billed but routed away from (tokens and cost, no request count); see [Cost and prices](cost.md#attempt-served-or-declined) |
 | `match` | `shape` for a call to an unlisted host matched by its [shape](guides/detect-by-shape.md); absent for a call matched by its host, so `{match!="shape"}` keeps only those |
+| `hop` | `gateway` for a call to a provider entry with `gateway: true`; absent otherwise, so `{hop!="gateway"}` counts a call through an in-cluster gateway once ([Calls through a gateway](cost.md#calls-through-a-gateway)) |
 
 The collector and Prometheus add labels of their own, such as `k8s_pod_name`, `k8s_node_name` and `namespace`: those
 name the agent's pod and node and the collector's namespace, not the caller.

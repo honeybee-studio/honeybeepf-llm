@@ -1,6 +1,7 @@
 use super::super::chunk_cases;
 use super::super::test_support::{SHAPE_FLAG, tokens};
 use super::*;
+use crate::telemetry::MatchedBy;
 
 #[test]
 fn chunked_sse_usage_event_split_across_chunks() {
@@ -179,14 +180,12 @@ fn shape_detection_gates_unknown_host_by_path_then_usage() {
     assert!(!Http11Parser::has_foreign_host(head));
     let detected = Http11Parser.detect_request(head).expect("detected by path");
     assert_eq!(detected.path, "/openai/v1/chat/completions");
-    assert!(detected.by_shape);
+    assert_eq!(detected.matched, MatchedBy::Shape);
     // A listed host is matched by its host even with the flag on.
     let listed = b"POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\n\r\n{}";
-    assert!(
-        !Http11Parser
-            .detect_request(listed)
-            .expect("listed")
-            .by_shape
+    assert_eq!(
+        Http11Parser.detect_request(listed).expect("listed").matched,
+        MatchedBy::Host
     );
     // Recording still needs the usage fields: present -> read, absent -> nothing, even with the flag on.
     assert_eq!(
