@@ -488,6 +488,61 @@ fn non_llm_midjoin_connections_stay_within_a_small_buffer() {
     );
 }
 
+/// Unparsed events a mid-join connection counts from `server`, then how many of its streams stay open.
+fn midjoin_unparsed(server: &[u8]) -> (usize, usize) {
+    let mut conn = H2Conn::new_midjoin();
+    let mut unparsed = 0;
+    conn.feed(LlmDirection::Read, server, H2Gap::Resync, &mut |e| {
+        if matches!(e, H2Event::Unparsed { .. }) {
+            unparsed += 1;
+        }
+    });
+    (unparsed, conn.open_streams())
+}
+
+/// `body` as DATA frames on stream 1 cut at `cuts` (a resync needs a run of three frame heads), the last
+/// frame ending the stream when `end`.
+fn data_cut(body: &[u8], cuts: &[usize], end: bool) -> Vec<u8> {
+    let mut bounds = vec![0];
+    bounds.extend_from_slice(cuts);
+    bounds.push(body.len());
+    let last = bounds.len() - 2;
+    (0..=last)
+        .flat_map(|i| {
+            let flags = if end && i == last { 0x1 } else { 0 };
+            frame(0, flags, 1, &body[bounds[i]..bounds[i + 1]])
+        })
+        .collect()
+}
+
+#[test]
+fn a_midjoin_json_response_that_is_not_an_llm_call_counts_nothing() {
+    // Kubernetes API JSON on a joined connection (kubelet, metrics-server): no usage and no LLM keys, so
+    // it is not a missed LLM call, whether it ends, is reset or is still open when the connection closes.
+    let list = b"{\"kind\":\"PodList\",\"apiVersion\":\"v1\",\"metadata\":{},\"items\":[]}";
+    assert_eq!(midjoin_unparsed(&data_cut(list, &[16, 32], true)), (0, 0));
+    let reset = [
+        data_cut(list, &[16, 32], false),
+        frame(3, 0, 1, b"\0\0\0\x08"),
+    ]
+    .concat();
+    assert_eq!(midjoin_unparsed(&reset), (0, 0));
+    assert_eq!(midjoin_unparsed(&data_cut(list, &[16, 32], false)), (0, 0));
+}
+
+#[test]
+fn a_midjoin_llm_response_without_usage_still_counts() {
+    // An LLM response whose usage was not read, cut so `"model"` straddles two frames.
+    let body = b"{\"id\":\"chatcmpl-1\",\"model\":\"gpt-5\",\"choices\":[]}";
+    let model = body.windows(7).position(|w| w == b"\"model\"").unwrap_or(0);
+    let cuts = [model + 3, model + 20];
+    assert_eq!(midjoin_unparsed(&data_cut(body, &cuts, true)), (1, 0));
+    let reset = [data_cut(body, &cuts, false), frame(3, 0, 1, b"\0\0\0\x08")].concat();
+    assert_eq!(midjoin_unparsed(&reset), (1, 0));
+    // Still open: `open_streams` counts it when the connection closes.
+    assert_eq!(midjoin_unparsed(&data_cut(body, &cuts, false)), (0, 1));
+}
+
 #[test]
 fn a_normal_connection_does_not_speculatively_track_server_data() {
     // Without the mid-join flag, server DATA on a stream no request matched is ignored.

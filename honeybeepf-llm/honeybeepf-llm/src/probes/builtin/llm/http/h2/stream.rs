@@ -12,6 +12,19 @@ use super::super::json_ends::{Ends, array_tail_usage};
 use super::super::sse::{SseCursor, parse_sse_body};
 use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
 
+/// Keys every provider's response body carries (OpenAI, Anthropic, Gemini, Bedrock), usage or not. A speculative
+/// stream without one is some other JSON API (the Kubernetes API on a joined connection), not a missed LLM call.
+const LLM_KEYS: [&[u8]; 6] = [
+    b"\"model\"",
+    b"\"modelVersion\"",
+    b"\"choices\"",
+    b"\"candidates\"",
+    b"\"stop_reason\"",
+    b"\"stopReason\"",
+];
+/// Bytes of the previous DATA kept so a key split across frames is still found.
+const KEY_TAIL: usize = 15;
+
 /// How a stream's response body is read, chosen from its content type and coding.
 enum Body {
     /// Unencoded SSE, read event by event so a long stream is not kept (reuses the HTTP/1.1 cursor).
@@ -59,6 +72,10 @@ pub(super) struct H2Stream {
     got_data: bool,
     /// Tracked without a matched request (mid-join or lost request headers), so its host is unknown.
     speculative: bool,
+    /// A speculative stream's body showed an LLM key, so ending without usage counts as unparsed.
+    llm_keys: bool,
+    /// The last `KEY_TAIL` bytes of a speculative stream's DATA, until `llm_keys` is set.
+    key_tail: Vec<u8>,
     /// The response `:status`, read from the first HEADERS block; a 2xx with no usage is usage_absent.
     status: Option<u16>,
     /// A record-only provider (Managed Agents session): counted under `agent_session` at its end,
@@ -81,6 +98,8 @@ impl H2Stream {
             body: Body::plain_json(),
             got_data: false,
             speculative: false,
+            llm_keys: false,
+            key_tail: Vec::new(),
             status: None,
             record_only,
             by_shape: false,
@@ -126,6 +145,28 @@ impl H2Stream {
 
     pub(super) fn start(&self) -> Instant {
         self.start
+    }
+
+    /// Whether ending without usage is an unparsed LLM call: always for a matched stream, and for a
+    /// speculative one only once its body showed an LLM key.
+    pub(super) fn counts_unparsed(&self) -> bool {
+        !self.speculative || self.llm_keys
+    }
+
+    /// Look for an LLM key in a speculative stream's DATA, across the frame boundary too.
+    fn note_keys(&mut self, bytes: &[u8]) {
+        let head = &bytes[..bytes.len().min(KEY_TAIL)];
+        let seam = [self.key_tail.as_slice(), head].concat();
+        self.llm_keys = LLM_KEYS
+            .iter()
+            .any(|k| contains_pattern(&seam, k) || contains_pattern(bytes, k));
+        let keep = bytes.len().min(KEY_TAIL);
+        self.key_tail = [self.key_tail.as_slice(), &bytes[bytes.len() - keep..]].concat();
+        let excess = self.key_tail.len().saturating_sub(KEY_TAIL);
+        self.key_tail.drain(..excess);
+        if self.llm_keys {
+            self.key_tail = Vec::new();
+        }
     }
 
     /// Whether this stream was tracked speculatively (no matched request), so its host is unknown.
@@ -214,6 +255,9 @@ impl H2Stream {
     pub(super) fn data(&mut self, bytes: &[u8], room: usize) -> isize {
         self.last = Instant::now();
         self.got_data = true;
+        if self.speculative && !self.llm_keys {
+            self.note_keys(bytes);
+        }
         match &mut self.body {
             Body::Streaming(cursor) => {
                 cursor.feed(bytes);
