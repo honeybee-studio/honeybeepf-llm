@@ -19,6 +19,9 @@ pub struct BuiltinProbes {
     /// Experimental: record LLM calls to hosts no provider lists, by request path + response usage
     /// shape; off by default.
     pub llm_detect_by_shape: Option<bool>,
+    /// Experimental: scan the memory of each new process for the AEAD tables of a BoringSSL or aws-lc built
+    /// into its executable (Bun, rustls) and log them; off by default.
+    pub llm_aead: Option<bool>,
     /// Pod labels copied onto LLM metrics (k8s feature); each adds series, so none by default.
     #[serde(skip)]
     pub llm_pod_labels: Option<Vec<String>>,
@@ -145,6 +148,7 @@ mod tests {
                 llm: None,
                 llm_executables: None,
                 llm_detect_by_shape: None,
+                llm_aead: None,
                 llm_pod_labels: None,
                 interval: None,
             },

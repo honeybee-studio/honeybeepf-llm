@@ -1,3 +1,4 @@
+mod aead;
 mod background;
 mod conn_filter;
 #[cfg(feature = "k8s")]
@@ -9,7 +10,7 @@ pub mod processor;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex, OnceLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -21,9 +22,7 @@ use background::BackgroundCalls;
 use conn_filter::ConnFilter;
 use honeybeepf_llm_common::{LlmEventHeader, LlmStat};
 use honeybeepf_llm_core::types::LlmDirection;
-#[cfg(feature = "k8s")]
-use log::debug;
-use log::{info, warn};
+use log::{debug, info, warn};
 use processor::{CallContext, Outcome, StreamProcessor};
 
 use crate::audit;
@@ -34,7 +33,8 @@ use crate::probes::{
     DynamicProbe, IdentityResolver, Probe, ProcessInfo, TracepointConfig, attach_tracepoint,
     attach_uprobe, detach_uprobe,
     discovery::{
-        FileId, exported_function_offsets, file_identity, find_executables_all, find_libraries_all,
+        FileId, exported_function_offsets, file_identity, find_libraries_all,
+        find_process_executables,
     },
     load_uprobe, spawn_ringbuf_handler_var,
 };
@@ -118,6 +118,15 @@ const GO_TLS_PROGRAMS: [&str; 4] = [
     "probe_go_tls_read_return",
     "probe_go_tls_close",
 ];
+
+/// Scans of one process: each AES-GCM table is filled at the first TLS handshake that uses its cipher.
+const AEAD_SCANS: u32 = 20;
+/// Scans at every poll; after them the wait doubles, so the last scan is about half an hour later.
+const AEAD_DENSE_SCANS: u32 = 8;
+/// Age of a process at its first scan: a loader relocates the table pointers before `main`.
+const AEAD_SETTLE: Duration = Duration::from_millis(100);
+/// Processes waiting for a scan; a burst of short-lived processes beyond it is not scanned.
+const AEAD_PENDING: usize = 64;
 
 /// Every function in the probe tables, resolved in one pass over the file's symbols.
 const PROBED_FUNCTIONS: [&str; 6] = [
@@ -259,10 +268,32 @@ pub struct LlmProbe {
     attached: Arc<Mutex<HashSet<FileId>>>,
     /// Also probe main executables with OpenSSL built in (official Node.js builds).
     executables: bool,
+    /// Set when executables are also scanned for the AEAD tables of a built-in BoringSSL or aws-lc.
+    aead: Option<Mutex<AeadScans>>,
+}
+
+/// A process whose executable no SSL or Go probe fits, scanned until its AEAD tables show.
+struct AeadPending {
+    pid: u32,
+    path: String,
+    id: FileId,
+    queued: Instant,
+    scans: u32,
+    /// Polls to skip before the next scan.
+    wait: u32,
+}
+
+#[derive(Default)]
+struct AeadScans {
+    pending: Vec<AeadPending>,
+    /// Files whose first scan found no table; they are not scanned again.
+    no_tables: HashSet<FileId>,
+    /// Tables found in each file; its other processes share them.
+    found: HashSet<(FileId, aead::Table)>,
 }
 
 impl LlmProbe {
-    pub fn new(executables: bool, detect_by_shape: bool) -> Self {
+    pub fn new(executables: bool, detect_by_shape: bool, aead: bool) -> Self {
         // Shape detection is read by the host-blind parser globals, so push it once here.
         http::set_detect_by_shape(detect_by_shape);
         if detect_by_shape {
@@ -274,6 +305,40 @@ impl LlmProbe {
             known_targets: Arc::new(Mutex::new(HashSet::new())),
             attached: Arc::new(Mutex::new(HashSet::new())),
             executables,
+            aead: aead.then(Mutex::default),
+        }
+    }
+
+    /// Queue the process for an AEAD scan unless a probe is attached to its executable already, or
+    /// `limit` processes wait.
+    fn queue_aead_scan(&self, pid: u32, path: &str, limit: usize) {
+        let Some(scans) = &self.aead else { return };
+        let Some(id) = file_identity(path) else {
+            return;
+        };
+        let probed = self
+            .attached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&id);
+        let mut scans = scans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !probed
+            && !scans.no_tables.contains(&id)
+            && scans.pending.len() < limit
+            && scans.pending.iter().all(|p| p.pid != pid)
+        {
+            let mut process = AeadPending {
+                pid,
+                path: path.to_owned(),
+                id,
+                queued: Instant::now(),
+                scans: 0,
+                wait: 0,
+            };
+            scans.skip_known_tables(&mut process);
+            scans.pending.push(process);
         }
     }
 
@@ -405,7 +470,80 @@ fn log_executable(path: &str, id: FileId, result: Result<Option<ExeTls>>) {
     }
 }
 
+impl AeadScans {
+    /// The constant tables of a file are known from its first scan: only the tables this process fills
+    /// are left to find.
+    fn skip_known_tables(&self, p: &mut AeadPending) {
+        if p.scans == 0 && self.found.iter().any(|(file, _)| *file == p.id) {
+            p.scans = 1;
+        }
+    }
+
+    /// Scan each process that is due and log the tables found.
+    fn scan_pending(&mut self) {
+        for mut p in std::mem::take(&mut self.pending) {
+            if self.no_tables.contains(&p.id) {
+                continue;
+            }
+            self.skip_known_tables(&mut p);
+            if p.wait > 0 || (p.scans == 0 && p.queued.elapsed() < AEAD_SETTLE) {
+                p.wait = p.wait.saturating_sub(1);
+                if std::path::Path::new(&format!("/proc/{}", p.pid)).exists() {
+                    self.pending.push(p);
+                }
+                continue;
+            }
+            // The first scan covers all data of the file, where a library keeps its constant tables;
+            // later ones only what the process wrote.
+            let started = Instant::now();
+            let Ok(tables) = aead::scan(p.pid, p.id.ino(), p.scans > 0) else {
+                continue;
+            };
+            debug!(
+                "AEAD scan {} of PID {} took {:?}, {} tables",
+                p.scans,
+                p.pid,
+                started.elapsed(),
+                tables.len()
+            );
+            p.scans += 1;
+            if p.scans == 1 && tables.is_empty() {
+                self.no_tables.insert(p.id);
+                continue;
+            }
+            for table in tables {
+                if self.found.insert((p.id, table)) {
+                    info!(
+                        "Built-in {} AEAD table in {} (PID {}): init {:#x}/{:#x}, cleanup {:#x}, seal {:#x}, open {:#x}",
+                        table.library.name(),
+                        p.path,
+                        p.pid,
+                        table.init[0],
+                        table.init[1],
+                        table.cleanup,
+                        table.seal,
+                        table.open
+                    );
+                }
+            }
+            if p.scans < AEAD_SCANS {
+                p.wait = (1 << p.scans.saturating_sub(AEAD_DENSE_SCANS)) - 1;
+                self.pending.push(p);
+            }
+        }
+    }
+}
+
 impl DynamicProbe for LlmProbe {
+    fn poll(&self, _bpf: &mut Ebpf) {
+        if let Some(scans) = &self.aead {
+            scans
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .scan_pending();
+        }
+    }
+
     fn on_exec(&self, bpf: &mut Ebpf, process_info: &ProcessInfo) -> Result<()> {
         let ssl_libs = process_info.libs.iter().filter(|path| {
             // Match against basename with a strict prefix check
@@ -430,6 +568,9 @@ impl DynamicProbe for LlmProbe {
         let exe = process_info.exe.iter().filter(|_| self.executables);
         for (path, id, result) in self.attach_new_exes(bpf, exe) {
             log_executable(path, id, result);
+        }
+        if let Some(path) = process_info.exe.as_ref().filter(|_| self.executables) {
+            self.queue_aead_scan(process_info.pid, path, AEAD_PENDING);
         }
         Ok(())
     }
@@ -543,6 +684,11 @@ impl Probe for LlmProbe {
                 warn!("Go TLS probe {prog} failed to load: {e:#}");
             }
         }
+        if self.aead.is_some() {
+            warn!(
+                "AEAD table scan for built-in BoringSSL and aws-lc is on (experimental): tables are only logged"
+            );
+        }
 
         // Skip libcrypto for SSL_* probes as they usually don't contain them
         let ssl_libs = targets.iter().filter(|path| !path.contains("libcrypto"));
@@ -555,9 +701,16 @@ impl Probe for LlmProbe {
         }
 
         if self.executables {
-            let exes = find_executables_all();
-            for (path, id, result) in self.attach_new_exes(bpf, &exes) {
+            let processes = find_process_executables();
+            let exes: HashSet<&String> = processes.iter().map(|(_, path)| path).collect();
+            for (path, id, result) in self.attach_new_exes(bpf, exes) {
                 log_executable(path, id, result);
+            }
+            // Every running process is queued: the first scan of a file drops the others of it.
+            for (pid, path) in &processes {
+                if *pid != std::process::id() {
+                    self.queue_aead_scan(*pid, path, usize::MAX);
+                }
             }
         }
 
