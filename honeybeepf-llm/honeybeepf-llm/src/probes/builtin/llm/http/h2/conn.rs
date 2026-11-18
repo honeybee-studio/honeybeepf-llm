@@ -172,7 +172,10 @@ impl H2Conn {
     /// Tracked streams still open, each a detected call with no usage yet; counted unparsed at close.
     /// A stream matched by its path alone is left out: without usage it may not be an LLM call.
     pub(crate) fn open_streams(&self) -> usize {
-        self.streams.values().filter(|s| !s.by_shape()).count()
+        self.streams
+            .values()
+            .filter(|s| !s.by_shape() && s.counts_unparsed())
+            .count()
     }
 }
 
@@ -317,6 +320,7 @@ fn end_stream(s: H2Stream, on: &mut impl FnMut(H2Event)) {
         (s.over_limit(), s.speculative(), s.start(), s.by_shape());
     let (success, errored) = (s.is_success(), s.errored());
     let poll = s.poll().map(Box::<str>::from);
+    let counts = s.counts_unparsed();
     let (usage, background) = s.finish_named();
     if speculative {
         if let Some(usage) = usage {
@@ -326,14 +330,16 @@ fn end_stream(s: H2Stream, on: &mut impl FnMut(H2Event)) {
                 midjoin: true,
                 by_shape: false,
             });
+        } else if !counts {
+            // No LLM key in the body: another JSON API on the joined connection, not a missed call.
         } else if over {
             on(H2Event::Unparsed {
                 reason: UnparsedReason::ResponseTooLarge,
                 by_shape,
             });
         } else {
-            // A response tracked without its request (lost headers or a mid-join) that carried no usage:
-            // count it, since it may have been an LLM call we could not identify.
+            // A response tracked without its request (lost headers or a mid-join) that carried no usage
+            // but an LLM key: count it, since it was an LLM call we could not identify.
             on(H2Event::Unparsed {
                 reason: UnparsedReason::HeadersLost,
                 by_shape,
@@ -390,10 +396,12 @@ fn sweep_idle(
         let keep = !s.started() || now.duration_since(s.last()) < STREAM_IDLE;
         if !keep {
             *buffered = buffered.saturating_sub(s.held());
-            on(H2Event::Unparsed {
-                reason: UnparsedReason::ConnectionClosed,
-                by_shape: s.by_shape(),
-            });
+            if s.counts_unparsed() {
+                on(H2Event::Unparsed {
+                    reason: UnparsedReason::ConnectionClosed,
+                    by_shape: s.by_shape(),
+                });
+            }
         }
         keep
     });
@@ -409,10 +417,12 @@ fn drop_stream(
 ) {
     if let Some(s) = streams.remove(&stream) {
         *buffered = buffered.saturating_sub(s.held());
-        on(H2Event::Unparsed {
-            reason: UnparsedReason::ConnectionClosed,
-            by_shape: s.by_shape(),
-        });
+        if s.counts_unparsed() {
+            on(H2Event::Unparsed {
+                reason: UnparsedReason::ConnectionClosed,
+                by_shape: s.by_shape(),
+            });
+        }
     }
 }
 
