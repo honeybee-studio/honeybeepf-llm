@@ -28,7 +28,7 @@ use crate::settings::Settings;
 
 pub mod probes;
 use crate::probes::{
-    DynamicProbe, IdentityResolver, LibOpen, LibOpenSeen, ProcessInfo,
+    DYNAMIC_POLL_MS, DynamicProbe, IdentityResolver, LibOpen, LibOpenSeen, ProcessInfo,
     builtin::llm::{
         ExecNotify, ExecPidQueue, LibOpenQueue, LlmProbe, setup_exec_watch, setup_lib_open_watch,
     },
@@ -106,7 +106,8 @@ impl HoneyBeeEngine {
         if settings.builtin_probes.llm.unwrap_or(false) {
             let executables = settings.builtin_probes.llm_executables.unwrap_or(true);
             let detect_by_shape = settings.builtin_probes.llm_detect_by_shape.unwrap_or(false);
-            dynamic_probes.push(Box::new(LlmProbe::new(executables, detect_by_shape)));
+            let aead = settings.builtin_probes.llm_aead.unwrap_or(false);
+            dynamic_probes.push(Box::new(LlmProbe::new(executables, detect_by_shape, aead)));
         }
 
         let resolver = IdentityResolver::none();
@@ -217,6 +218,8 @@ impl HoneyBeeEngine {
 
         let beat = health::register("discovery loop");
         let mut tick = tokio::time::interval(Duration::from_secs(5));
+        let mut poll = tokio::time::interval(Duration::from_millis(DYNAMIC_POLL_MS));
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // Nested PID namespace only: event PIDs are not this /proc's, so events just ask for a rescan.
         let mut ticks = 0u32;
         let mut rescan = RescanGate::default();
@@ -228,6 +231,11 @@ impl HoneyBeeEngine {
                     ticks = ticks.wrapping_add(1);
                     if self.nested_pidns && ticks.is_multiple_of(RESCAN_EVERY_TICKS) {
                         rescan.request();
+                    }
+                },
+                _ = poll.tick() => {
+                    for probe in &self.dynamic_probes {
+                        probe.poll(&mut self.bpf);
                     }
                 },
                 () = lib_notify.notified(), if self.nested_pidns => {

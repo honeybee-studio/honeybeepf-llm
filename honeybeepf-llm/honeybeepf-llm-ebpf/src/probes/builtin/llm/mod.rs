@@ -24,6 +24,7 @@ use honeybeepf_llm_common::{
     LlmDirection, LlmEventHeader, LlmStat, MAX_SSL_BUF_SIZE, MAX_SSL_FRAGMENTS, capture_limit,
 };
 
+pub mod aead;
 mod filter;
 pub mod gotls;
 pub(crate) mod helpers;
