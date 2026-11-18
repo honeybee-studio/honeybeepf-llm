@@ -2,8 +2,8 @@ apiVersion: v2
 name: honeybeepf-llm
 description: Count LLM API tokens and USD cost per Kubernetes pod and workload with eBPF, with no gateway or SDK
 type: application
-version: 0.3.2
-appVersion: "0.3.2"
+version: 0.4.0
+appVersion: "0.4.0"
 keywords:
   - llm
   - finops
@@ -28,6 +28,25 @@ maintainers:
     url: https://github.com/jundorok
 annotations:
   artifacthub.io/category: monitoring-logging
+  # Shown per version on Artifact Hub; rewrite both for each release.
+  artifacthub.io/containsSecurityUpdates: "true"
+  artifacthub.io/changes: |
+    - kind: added
+      description: Go executables are probed through crypto/tls, so LLM calls from Go services are recorded
+    - kind: added
+      description: 18 more hosted OpenAI-compatible providers recorded with no configuration
+    - kind: added
+      description: Alert rules for spend, budgets and capture health (alerts.prometheusRule.enabled)
+    - kind: added
+      description: logFormat json and audit events of what the agent attached to and loaded
+    - kind: changed
+      description: The image is Chainguard glibc-dynamic with no shell; probes run honeybeepf-llm --check-heartbeat
+    - kind: fixed
+      description: Kubernetes API traffic no longer counts as headers_lost unparsed LLM calls
+    - kind: removed
+      description: The file-access and process-lifecycle probes and their metrics
+    - kind: security
+      description: OpenTelemetry 0.33 (GHSA-w9wp-h8wv-79jx) and an image with no known vulnerabilities
   artifacthub.io/license: Apache-2.0
   artifacthub.io/links: |
     - name: Documentation
