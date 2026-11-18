@@ -400,7 +400,7 @@ mod tests {
 7f0000000000-7f0000100000 r--p 00000000 08:01 7 /usr/lib/libc.so.6
 7f0000100000-7f0000200000 rw-p 00000000 00:00 0 
 ";
-        let maps = procfs::process::MemoryMaps::from_buf_read(maps.as_bytes()).unwrap();
+        let maps = procfs::process::MemoryMaps::from_buf_read(maps.as_bytes()).expect("maps parse");
         let (execs, regions) = regions_of(&maps.0, 42);
         assert_eq!(execs, [(0x40_0000, 0x50_0000, 0x1000)]);
         assert_eq!(
