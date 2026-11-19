@@ -10,6 +10,11 @@ pub const SSL_CLASS_ENTRIES: u32 = 32768;
 pub const SSL_RINGBUF_SIZE: u32 = 8 * 1024 * 1024; // 8MB
 pub const EXEC_RINGBUF_SIZE: u32 = 64 * 1024; // 64KB
 
+/// Cgroups of the containers whose TLS calls may be copied, when a namespace scope is set (`SCOPE_ON`);
+/// one entry otherwise.
+#[map]
+pub static SCOPE_CGROUPS: HashMap<u64, u8> = HashMap::with_max_entries(MAX_ENTRIES, 0);
+
 #[map]
 pub static SSL_EVENTS: RingBuf = RingBuf::with_byte_size(SSL_RINGBUF_SIZE, 0);
 

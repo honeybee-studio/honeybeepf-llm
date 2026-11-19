@@ -6,7 +6,7 @@
 //! 3. Caching the mapping: cgroup_id → container_id → PodInfo
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, RwLock,
         atomic::{AtomicBool, Ordering},
@@ -74,6 +74,28 @@ pub struct PodResolver {
     pid_lookup: bool,
     /// When the cgroup tree was last searched on a miss, so a burst of misses searches it once.
     last_refill: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Set when only some namespaces are recorded: their containers' cgroups go into the eBPF scope.
+    scope: Option<Scope>,
+}
+
+/// Namespaces whose pods' TLS data the probes may copy, and how a container cgroup joins or leaves the
+/// set the eBPF side checks.
+pub struct Scope {
+    namespaces: HashSet<String>,
+    /// Adds (`true`) or removes (`false`) a cgroup id.
+    update: Box<dyn Fn(u64, bool) + Send + Sync>,
+}
+
+impl Scope {
+    pub fn new(
+        namespaces: impl IntoIterator<Item = String>,
+        update: impl Fn(u64, bool) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            namespaces: namespaces.into_iter().collect(),
+            update: Box::new(update),
+        }
+    }
 }
 
 impl Default for PodResolver {
@@ -96,7 +118,31 @@ impl PodResolver {
             pod_labels: pod_label_attrs(allowlist),
             pid_lookup: true,
             last_refill: std::sync::Mutex::new(None),
+            scope: None,
         }
+    }
+
+    /// Record only the pods of the scope's namespaces: their containers' cgroups are added as they show.
+    pub fn with_scope(mut self, scope: Scope) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+
+    /// Cache the cgroup of container `cid`, and add it to the scope if its namespace is in it.
+    fn note_cgroup(&self, namespace: &str, cid: &str, cgroup_id: u64) {
+        if let Ok(mut cache) = self.cgroup_cache.write() {
+            cache.insert(cgroup_id, Some(cid.to_string()));
+        }
+        if let Some(scope) = self.scope_of(namespace) {
+            (scope.update)(cgroup_id, true);
+        }
+    }
+
+    /// The scope of `namespace`'s containers, when a scope is set and covers it.
+    fn scope_of(&self, namespace: &str) -> Option<&Scope> {
+        self.scope
+            .as_ref()
+            .filter(|s| s.namespaces.contains(namespace))
     }
 
     /// Resolve cache misses from the cgroup tree, not `/proc/<pid>/cgroup`, when event PIDs are not this /proc's.
@@ -313,7 +359,14 @@ impl PodResolver {
             }
             // Clean cgroup_cache entries that pointed to deleted containers
             if let Ok(mut cache) = self.cgroup_cache.write() {
-                cache.retain(|_, v| v.as_ref().is_none_or(|id| !container_ids.contains(id)));
+                let scope = self.scope_of(&namespace);
+                cache.retain(|cgroup_id, v| {
+                    let kept = v.as_ref().is_none_or(|id| !container_ids.contains(id));
+                    if !kept && let Some(scope) = scope {
+                        (scope.update)(*cgroup_id, false);
+                    }
+                    kept
+                });
             }
         } else {
             // Pre-warm cgroup_id cache: resolve cgroup_id from cgroup path on disk
@@ -321,10 +374,8 @@ impl PodResolver {
             // even after they exit.
             if self.cgroup_v2 {
                 for cid in &container_ids {
-                    if let Some(cgroup_id) = lookup_cgroup_id_by_container(cid)
-                        && let Ok(mut cache) = self.cgroup_cache.write()
-                    {
-                        cache.insert(cgroup_id, Some(cid.clone()));
+                    if let Some(cgroup_id) = lookup_cgroup_id_by_container(cid) {
+                        self.note_cgroup(&namespace, cid, cgroup_id);
                     }
                 }
             }
@@ -387,7 +438,7 @@ impl PodResolver {
 ///
 /// This detection matters for `bpf_get_current_cgroup_id()`: on v2, it
 /// returns a unique ID per container; on v1, it always returns 1 (root).
-fn detect_cgroup_v2() -> bool {
+pub(crate) fn detect_cgroup_v2() -> bool {
     std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists()
 }
 
@@ -799,6 +850,40 @@ mod tests {
         other.metadata.name = Some("p-2".to_string());
         other.metadata.owner_references = Some(vec![owner("Job", "vj", Some(true))]);
         assert_eq!(resolver.unresolved_job(&other), None, "not a batch/v1 Job");
+    }
+
+    #[test]
+    fn test_scope_gets_the_cgroups_of_pods_in_its_namespaces_and_loses_them_on_delete() {
+        use k8s_openapi::api::core::v1::{ContainerStatus, PodStatus};
+        let updates = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = updates.clone();
+        let resolver =
+            PodResolver::new().with_scope(Scope::new(["team-a".to_string()], move |id, add| {
+                seen.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push((id, add));
+            }));
+        let (cid, other) = ("ab".repeat(6), "cd".repeat(6));
+        resolver.note_cgroup("team-a", &cid, 7);
+        resolver.note_cgroup("team-b", &other, 8);
+        let taken = |u: &std::sync::Mutex<Vec<(u64, bool)>>| {
+            std::mem::take(&mut *u.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+        };
+        assert_eq!(taken(&updates), [(7, true)], "team-b is out of scope");
+
+        let pod = Pod {
+            metadata: pod_meta(vec![], None),
+            status: Some(PodStatus {
+                container_statuses: Some(vec![ContainerStatus {
+                    container_id: Some(format!("containerd://{}", "ab".repeat(32))),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        resolver.apply_pod_event(&pod, true, None);
+        assert_eq!(taken(&updates), [(7, false)]);
     }
 
     /// An API server that refuses every request (RBAC removed) must not be hammered with re-lists.

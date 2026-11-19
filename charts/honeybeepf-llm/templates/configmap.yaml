@@ -32,6 +32,9 @@ data:
   {{- if .Values.builtinProbes.llm.aeadExecutables }}
   BUILTIN_PROBES__LLM_AEAD_EXECUTABLES: {{ .Values.builtinProbes.llm.aeadExecutables | join "," | quote }}
   {{- end }}
+  {{- if .Values.builtinProbes.llm.namespaces }}
+  BUILTIN_PROBES__LLM_NAMESPACES: {{ .Values.builtinProbes.llm.namespaces | join "," | quote }}
+  {{- end }}
   {{- if .Values.builtinProbes.llm.podLabels }}
   BUILTIN_PROBES__LLM_POD_LABELS: {{ .Values.builtinProbes.llm.podLabels | join "," | quote }}
   {{- end }}

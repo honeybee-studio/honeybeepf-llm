@@ -54,6 +54,9 @@ builtinProbes:
     # With aead on, only scan executables of these names (with or without an extension: claude matches claude.exe),
     # e.g. [claude, codex]. Empty scans any executable with BoringSSL or aws-lc built in.
     aeadExecutables: []
+    # Record only the pods of these namespaces, e.g. [team-a, team-b]: the TLS data of every other pod and of
+    # host processes is never copied out of the kernel (docs/guides/namespace-scope.md). Needs cgroup v2.
+    namespaces: []
     # Pod labels copied onto LLM metrics as target_pod_label_<name> ("." "/" "-" become "_"), e.g. for A/B variants.
     # Each label multiplies the series by its distinct values: list only low-cardinality labels.
     podLabels: []
