@@ -28,6 +28,9 @@ pub struct BuiltinProbes {
     /// Pod labels copied onto LLM metrics (k8s feature); each adds series, so none by default.
     #[serde(skip)]
     pub llm_pod_labels: Option<Vec<String>>,
+    /// Namespaces whose pods' TLS calls are recorded (k8s feature); every pod and process when unset.
+    #[serde(skip)]
+    pub llm_namespaces: Option<Vec<String>>,
     pub interval: Option<u32>,
 }
 
@@ -66,6 +69,10 @@ impl Settings {
         let aead_executables = vars
             .get("BUILTIN_PROBES__LLM_AEAD_EXECUTABLES")
             .map(|v| split_comma_separated(v));
+        let namespaces = vars
+            .get("BUILTIN_PROBES__LLM_NAMESPACES")
+            .map(|v| split_comma_separated(v))
+            .filter(|n| !n.is_empty());
         let env = Environment::default().separator("__").try_parsing(true);
         let s = Config::builder()
             .add_source(env.source(Some(vars)))
@@ -74,6 +81,7 @@ impl Settings {
         let mut settings: Self = s.try_deserialize()?;
         settings.builtin_probes.llm_pod_labels = pod_labels;
         settings.builtin_probes.llm_aead_executables = aead_executables;
+        settings.builtin_probes.llm_namespaces = namespaces;
         Ok(settings)
     }
 
@@ -133,6 +141,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_namespaces_split_on_commas_and_an_empty_list_is_no_scope() {
+        let namespaces = |value: &str| {
+            let vars = Map::from([("BUILTIN_PROBES__LLM_NAMESPACES".into(), value.into())]);
+            Settings::from_vars(vars)
+                .expect("settings load")
+                .builtin_probes
+                .llm_namespaces
+        };
+        let expected = vec!["team-a".to_string(), "team-b".to_string()];
+        assert_eq!(namespaces("team-a, team-b,"), Some(expected));
+        assert_eq!(namespaces(""), None);
+        assert_eq!(namespaces(" , "), None);
+    }
+
     /// `try_parsing` turns a single list value that looks like a number or bool into one.
     #[test]
     fn test_single_numeric_pod_label_still_loads() {
@@ -171,6 +194,7 @@ mod tests {
                 llm_aead: None,
                 llm_aead_executables: None,
                 llm_pod_labels: None,
+                llm_namespaces: None,
                 interval: None,
             },
             custom_probe_config: None,

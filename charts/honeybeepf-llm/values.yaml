@@ -48,6 +48,9 @@ builtinProbes:
     # response carries that family's usage fields; off records listed hosts only (default).
     # Calls kept this way carry match="shape" on their metrics; host-matched calls have no match label.
     detectByShape: false
+    # Record only the pods of these namespaces, e.g. [team-a, team-b]: the TLS data of every other pod and of
+    # host processes is never copied out of the kernel (docs/guides/namespace-scope.md). Needs cgroup v2.
+    namespaces: []
     # Pod labels copied onto LLM metrics as target_pod_label_<name> ("." "/" "-" become "_"), e.g. for A/B variants.
     # Each label multiplies the series by its distinct values: list only low-cardinality labels.
     podLabels: []

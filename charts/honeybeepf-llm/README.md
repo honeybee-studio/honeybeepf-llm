@@ -46,6 +46,7 @@ a Collector and the Grafana cost dashboard, and covers uninstall.
 | `output.otlp.endpoint` | `""` | Collector to send metrics to: `host:port`, `http://` or `https://` |
 | `output.otlp.caSecret`, `output.otlp.headersSecret` | empty | CA and auth headers for a collector outside the cluster |
 | `builtinProbes.llm.enabled` | `true` | Record LLM calls; `false` loads no eBPF program |
+| `builtinProbes.llm.namespaces` | `[]` | Record only the pods of these namespaces; other pods' TLS data never leaves the kernel ([guide](https://honeybee-studio.github.io/honeybeepf-llm/guides/namespace-scope/)) |
 | `builtinProbes.llm.podLabels` | `[]` | Pod labels copied onto the metrics, e.g. `team` or `cost-center` |
 | `builtinProbes.llm.prices` | `{}` | Your prices or discounts, reloaded without a restart |
 | `builtinProbes.llm.providers` | `[]` | More providers by host, path and usage fields, incl. in-cluster plain HTTP |
