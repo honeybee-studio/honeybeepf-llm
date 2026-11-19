@@ -1,7 +1,6 @@
 #![cfg(test)]
 
 use super::super::super::set_detect_by_shape;
-use super::super::super::test_support::SHAPE_FLAG;
 use super::*;
 use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
 
@@ -70,9 +69,6 @@ fn match_request_detects_provider_posts_and_responses_polls() {
 /// Shape detection: a POST to a host no provider lists is matched by its LLM path only when the flag is on.
 #[test]
 fn shape_detection_matches_an_unlisted_host_by_path() {
-    let _flag = SHAPE_FLAG
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let post = |path: &[u8]| {
         [
             lit(b":method", b"POST"),
