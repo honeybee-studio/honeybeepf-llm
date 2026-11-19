@@ -144,6 +144,22 @@ fn emit_llm_event(ctx: &RetProbeContext, rw: u8, is_handshake: bool) -> u32 {
 #[unsafe(no_mangle)]
 static TAIL_CALL_OK: u8 = 0;
 
+/// Set by the loader when only the pods of some namespaces are recorded: see `in_scope`.
+#[unsafe(no_mangle)]
+static SCOPE_ON: u8 = 0;
+
+/// Whether the current task's TLS data may be copied: always, unless a namespace scope is set and
+/// the task's cgroup is not one of a container in scope.
+#[inline(always)]
+fn in_scope() -> bool {
+    // SAFETY: SCOPE_ON is a u8 static; the volatile read keeps the loader's value from being folded to 0.
+    if unsafe { core::ptr::read_volatile(&SCOPE_ON) } == 0 {
+        return true;
+    }
+    // SAFETY: the helper takes no arguments, and the map value is only checked for presence.
+    unsafe { SCOPE_CGROUPS.get(&aya_ebpf::helpers::bpf_get_current_cgroup_id()) }.is_some()
+}
+
 /// Tail call into the empty NO_PRIV_STACK so this preemptible program keeps its frame on the task stack.
 #[inline(always)]
 fn keep_task_stack<C: EbpfContext>(ctx: &C) {
@@ -241,6 +257,10 @@ fn emit_one(call: &SslCall, rw: u8, is_handshake: bool, truncated: u8, offset: u
 /// Send the call's data as up to MAX_SSL_FRAGMENTS events, each sized to its payload.
 #[inline(always)]
 fn emit_fragments(call: &SslCall, rw: u8, is_handshake: bool) {
+    if !in_scope() {
+        count(LlmStat::OutOfScope);
+        return;
+    }
     let limit = capture_limit(LlmDirection::from(rw));
     let truncated = (call.len as usize > limit) as u8;
     // Calls over the limit were counted as truncated at fragment 0.
