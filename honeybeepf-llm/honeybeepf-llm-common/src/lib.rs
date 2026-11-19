@@ -118,11 +118,13 @@ pub enum LlmStat {
     Filtered,
     /// Plaintext receive skb past the 16 KB capture window (loopback, GRO).
     PlainRecvTruncated,
+    /// TLS calls not copied: a namespace scope is set and the task's pod is not in it.
+    OutOfScope,
 }
 
 impl LlmStat {
     /// Every counter, in map-index order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Enter,
         Self::Submit,
         Self::ReserveFail,
@@ -133,6 +135,7 @@ impl LlmStat {
         Self::Fragment,
         Self::Filtered,
         Self::PlainRecvTruncated,
+        Self::OutOfScope,
     ];
     pub const COUNT: usize = Self::ALL.len();
 
@@ -149,6 +152,7 @@ impl LlmStat {
             Self::Fragment => "fragment",
             Self::Filtered => "filtered",
             Self::PlainRecvTruncated => "plain_recv_truncated",
+            Self::OutOfScope => "out_of_scope",
         }
     }
 }

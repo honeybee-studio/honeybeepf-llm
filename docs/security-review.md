@@ -127,6 +127,7 @@ granted but unused.
 | Logged | per call: model, request path without the query string, pid, pod, latency and token counts. Never a body or header; the model and an OpenAI background call's id are the only values taken from a body |
 | Network | no listening port. Outbound: the OTLP collector, the Kubernetes API, and DNS for plaintext hosts outside the cluster |
 | Disk | read-only root filesystem and host mounts; the only file written is the heartbeat in a 1 MiB in-memory `emptyDir` |
+| Scope | every pod and host process by default; with `builtinProbes.llm.namespaces`, TLS data is copied only from the containers of pods in those namespaces, checked in the kernel by cgroup before any byte is read ([guide](guides/namespace-scope.md)) |
 
 **Which TLS traffic reaches the agent.** The uprobes fire for every TLS connection in a probed process, not only LLM
 calls. The kernel drops a connection's bytes once it knows its class:

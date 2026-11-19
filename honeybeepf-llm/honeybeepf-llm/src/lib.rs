@@ -90,6 +90,12 @@ impl HoneyBeeEngine {
             loader
                 .verifier_log_level(aya::VerifierLogLevel::VERBOSE | aya::VerifierLogLevel::STATS);
         }
+        // Only the pods of some namespaces: their cgroups fill SCOPE_CGROUPS, and nothing else is copied.
+        let scope_on = u8::from(scope_namespaces(&settings).is_some());
+        loader.set_global("SCOPE_ON", &scope_on, false);
+        if scope_on == 0 {
+            loader.set_max_entries("SCOPE_CGROUPS", 1);
+        }
         let mut bpf = loader.load(bytecode)?;
 
         // Initialize the eBPF Logger only in debug mode
@@ -151,6 +157,14 @@ impl HoneyBeeEngine {
                 if self.nested_pidns {
                     pod_resolver = pod_resolver.without_pid_lookup();
                 }
+                if let Some(namespaces) = scope_namespaces(&self.settings) {
+                    match scope_of(&mut self.bpf, namespaces) {
+                        Ok(scope) => pod_resolver = pod_resolver.with_scope(scope),
+                        Err(e) => {
+                            warn!("Namespace scope not set up: {e:#}; no TLS data is recorded")
+                        }
+                    }
+                }
                 let pod_resolver = Arc::new(pod_resolver);
                 match pod_resolver.start_k8s_watcher(node_name).await {
                     Ok(_handle) => {
@@ -159,12 +173,18 @@ impl HoneyBeeEngine {
                     }
                     Err(e) => {
                         warn!("K8s pod watcher failed to start: {e}. Pod resolution disabled.");
+                        if scope_namespaces(&self.settings).is_some() {
+                            warn!("Namespace scope without pods: no TLS data is recorded");
+                        }
                     }
                 }
             } else {
                 info!(
                     "K8S_NODE_NAME and hostname not found. Pod resolution disabled (running outside K8s?)."
                 );
+                if scope_namespaces(&self.settings).is_some() {
+                    warn!("Namespace scope without pods: no TLS data is recorded");
+                }
             }
         }
 
@@ -375,6 +395,54 @@ impl RescanGate {
 
 /// The agent's PID namespace (st_dev, st_ino) when it is not the root one: on a node in a container (kind, k3d,
 /// minikube), the kernel's PIDs differ from the ones this /proc shows.
+/// The namespaces recording is limited to; never outside a Kubernetes build, which knows no pods.
+#[cfg(not(feature = "k8s"))]
+fn scope_namespaces(settings: &Settings) -> Option<Vec<String>> {
+    if settings.builtin_probes.llm_namespaces.is_some() {
+        warn!("A namespace scope needs the Kubernetes build: every process is recorded");
+    }
+    None
+}
+
+/// The namespaces recording is limited to. Without cgroup v2 or the pod watcher nothing is in scope, so
+/// nothing is recorded rather than everything.
+#[cfg(feature = "k8s")]
+fn scope_namespaces(settings: &Settings) -> Option<Vec<String>> {
+    let namespaces = settings.builtin_probes.llm_namespaces.clone()?;
+    if !k8s::detect_cgroup_v2() {
+        warn!("A namespace scope needs cgroup v2 to tell pods apart: no TLS data is recorded");
+    }
+    Some(namespaces)
+}
+
+/// The scope that adds the cgroups of `namespaces`' containers to `SCOPE_CGROUPS` as their pods show.
+#[cfg(feature = "k8s")]
+fn scope_of(bpf: &mut Ebpf, namespaces: Vec<String>) -> Result<k8s::Scope> {
+    use anyhow::Context as _;
+
+    let map = bpf
+        .take_map("SCOPE_CGROUPS")
+        .context("SCOPE_CGROUPS map not found")?;
+    let cgroups = std::sync::Mutex::new(aya::maps::HashMap::<_, u64, u8>::try_from(map)?);
+    info!(
+        "Recording only the TLS calls of pods in: {}",
+        namespaces.join(", ")
+    );
+    Ok(k8s::Scope::new(namespaces, move |cgroup_id, add| {
+        let mut cgroups = cgroups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = if add {
+            cgroups.insert(cgroup_id, 1, 0)
+        } else {
+            cgroups.remove(&cgroup_id)
+        };
+        if let Err(e) = result {
+            debug!("Scope cgroup {cgroup_id} (add: {add}) not updated: {e}");
+        }
+    }))
+}
+
 fn nested_pidns() -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     let ns = std::fs::metadata("/proc/self/ns/pid").ok()?;
