@@ -162,6 +162,18 @@ impl Transport {
     }
 }
 
+/// How a call's request was matched, which sets its `match` or `hop` label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MatchedBy {
+    /// A provider's host: no label.
+    #[default]
+    Host,
+    /// A host marked as a gateway: `hop="gateway"`.
+    Gateway,
+    /// The path alone, the host unlisted (shape detection): `match="shape"`.
+    Shape,
+}
+
 impl HoneyBeeMetrics {
     #[cfg(test)]
     fn new(meter: &Meter, prices: Option<Prices>) -> Self {
@@ -704,7 +716,7 @@ pub fn record_llm_request(
     latency_secs: f64,
     is_error: bool,
     transport: Transport,
-    by_shape: bool,
+    matched: MatchedBy,
     #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
 ) {
     if let Some(m) = metrics() {
@@ -719,7 +731,7 @@ pub fn record_llm_request(
                     model,
                     status,
                     attempt,
-                    by_shape,
+                    matched,
                     #[cfg(feature = "k8s")]
                     pod_info,
                 )
@@ -729,13 +741,13 @@ pub fn record_llm_request(
 }
 
 /// The model, status and attempt labels of an LLM call, `match="shape"` for a call matched by its
-/// path alone (absent otherwise, so host-matched series keep their labels), and the pod target labels
-/// when k8s is on.
+/// path alone and `hop="gateway"` for a call to a gateway (absent otherwise, so host-matched series keep
+/// their labels), and the pod target labels when k8s is on.
 fn llm_attrs(
     model: &str,
     status: &str,
     attempt: Attempt,
-    by_shape: bool,
+    matched: MatchedBy,
     #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
 ) -> Vec<KeyValue> {
     #[allow(unused_mut)]
@@ -744,8 +756,10 @@ fn llm_attrs(
         KeyValue::new("status", status.to_string()),
         KeyValue::new("attempt", attempt.as_str()),
     ];
-    if by_shape {
-        attrs.push(KeyValue::new("match", "shape"));
+    match matched {
+        MatchedBy::Host => {}
+        MatchedBy::Gateway => attrs.push(KeyValue::new("hop", "gateway")),
+        MatchedBy::Shape => attrs.push(KeyValue::new("match", "shape")),
     }
     #[cfg(feature = "k8s")]
     push_pod_attrs(&mut attrs, pod_info);

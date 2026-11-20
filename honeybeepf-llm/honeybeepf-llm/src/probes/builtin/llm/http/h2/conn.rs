@@ -1,5 +1,6 @@
 //! One HTTP/2 connection: frames demultiplexed into streams, each direction's HPACK table its own.
 
+use crate::telemetry::MatchedBy;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -42,7 +43,7 @@ pub(crate) enum H2Event {
         /// The connection was joined mid-stream, so this call's host is unknown and it is lower-confidence.
         midjoin: bool,
         /// Matched by its request path alone (shape detection, host unlisted).
-        by_shape: bool,
+        matched: MatchedBy,
     },
     /// A Responses create made with `"background": true` returned queued; its usage arrives in a later poll,
     /// so the call is kept under `id` until then.
@@ -59,7 +60,7 @@ pub(crate) enum H2Event {
     /// A tracked stream ended without usage (reset, connection going away, idle, or over a cap).
     Unparsed {
         reason: UnparsedReason,
-        by_shape: bool,
+        matched: MatchedBy,
     },
     /// A direction re-anchored its frame reader after a capture gap.
     Resynced,
@@ -174,7 +175,7 @@ impl H2Conn {
     pub(crate) fn open_streams(&self) -> usize {
         self.streams
             .values()
-            .filter(|s| !s.by_shape() && s.counts_unparsed())
+            .filter(|s| s.matched() != MatchedBy::Shape && s.counts_unparsed())
             .count()
     }
 }
@@ -230,9 +231,9 @@ fn on_frame(
                     Matched::Create {
                         path,
                         record_only,
-                        by_shape,
+                        matched,
                     } => {
-                        let s = H2Stream::open_for(Instant::now(), record_only, by_shape, &path);
+                        let s = H2Stream::open_for(Instant::now(), record_only, matched, &path);
                         (path, s)
                     }
                     Matched::Poll { path, id } => (path, H2Stream::open_poll(Instant::now(), id)),
@@ -312,12 +313,12 @@ fn end_stream(s: H2Stream, on: &mut impl FnMut(H2Event)) {
         // A Managed Agents session call: counted at its end, its running session total never read.
         on(H2Event::Unparsed {
             reason: UnparsedReason::AgentSession,
-            by_shape: s.by_shape(),
+            matched: s.matched(),
         });
         return;
     }
-    let (over, speculative, start, by_shape) =
-        (s.over_limit(), s.speculative(), s.start(), s.by_shape());
+    let (over, speculative, start, matched) =
+        (s.over_limit(), s.speculative(), s.start(), s.matched());
     let (success, errored) = (s.is_success(), s.errored());
     let poll = s.poll().map(Box::<str>::from);
     let counts = s.counts_unparsed();
@@ -328,21 +329,21 @@ fn end_stream(s: H2Stream, on: &mut impl FnMut(H2Event)) {
                 usage: Box::new(usage),
                 start,
                 midjoin: true,
-                by_shape: false,
+                matched: MatchedBy::Host,
             });
         } else if !counts {
             // No LLM key in the body: another JSON API on the joined connection, not a missed call.
         } else if over {
             on(H2Event::Unparsed {
                 reason: UnparsedReason::ResponseTooLarge,
-                by_shape,
+                matched,
             });
         } else {
             // A response tracked without its request (lost headers or a mid-join) that carried no usage
             // but an LLM key: count it, since it was an LLM call we could not identify.
             on(H2Event::Unparsed {
                 reason: UnparsedReason::HeadersLost,
-                by_shape,
+                matched,
             });
         }
         return;
@@ -358,12 +359,12 @@ fn end_stream(s: H2Stream, on: &mut impl FnMut(H2Event)) {
             usage: Box::new(usage),
             start,
             midjoin: false,
-            by_shape,
+            matched,
         });
     } else if over {
         on(H2Event::Unparsed {
             reason: UnparsedReason::ResponseTooLarge,
-            by_shape,
+            matched,
         });
     } else if let Some(BackgroundState::Running(id)) = background {
         on(H2Event::Deferred { id, start });
@@ -372,14 +373,14 @@ fn end_stream(s: H2Stream, on: &mut impl FnMut(H2Event)) {
         // from a usage-absent completion and from capture loss.
         on(H2Event::Unparsed {
             reason: UnparsedReason::StreamError,
-            by_shape,
+            matched,
         });
     } else if success {
         // A matched 2xx call whose completed stream carried no usage (an embedding with none, or a chunk
         // missed), apart from the capture-loss and too-large reasons; a non-2xx end records nothing.
         on(H2Event::Unparsed {
             reason: UnparsedReason::UsageAbsent,
-            by_shape,
+            matched,
         });
     }
 }
@@ -399,7 +400,7 @@ fn sweep_idle(
             if s.counts_unparsed() {
                 on(H2Event::Unparsed {
                     reason: UnparsedReason::ConnectionClosed,
-                    by_shape: s.by_shape(),
+                    matched: s.matched(),
                 });
             }
         }
@@ -420,7 +421,7 @@ fn drop_stream(
         if s.counts_unparsed() {
             on(H2Event::Unparsed {
                 reason: UnparsedReason::ConnectionClosed,
-                by_shape: s.by_shape(),
+                matched: s.matched(),
             });
         }
     }
@@ -433,7 +434,7 @@ enum Matched {
     Create {
         path: String,
         record_only: bool,
-        by_shape: bool,
+        matched: MatchedBy,
     },
     /// A `GET <responses path>/{id}` poll of a background Responses call.
     Poll { path: String, id: Box<str> },
@@ -468,7 +469,7 @@ fn match_request(decoder: &mut Decoder, block: &[u8]) -> Option<Matched> {
         // With shape detection on, a POST to a host no entry lists is still matched by its path alone.
         Some(b"POST") => {
             let by_host = PROVIDER_REGISTRY.find_provider(authority, path);
-            let by_shape = by_host.is_none();
+            let matched = super::super::matched_by(by_host);
             by_host
                 .or_else(|| {
                     detect_by_shape()
@@ -478,7 +479,7 @@ fn match_request(decoder: &mut Decoder, block: &[u8]) -> Option<Matched> {
                 .map(|p| Matched::Create {
                     path: base.to_string(),
                     record_only: p.record_only,
-                    by_shape,
+                    matched,
                 })
         }
         Some(b"GET") => responses_poll_id(authority, base).map(|id| Matched::Poll {

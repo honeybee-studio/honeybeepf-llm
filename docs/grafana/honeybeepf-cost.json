@@ -375,7 +375,7 @@
     },
     {
       "title": "Token Usage by Model / min",
-      "description": "Token usage by model",
+      "description": "Token usage by model Calls to a gateway are left out: the gateway's own calls carry them.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -425,7 +425,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (model) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
+          "expr": "sum by (model) (rate(honeybeepf_llm_llm_tokens_total{hop!=\"gateway\", target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
           "interval": "1m",
           "legendFormat": "{{ model }}",
           "refId": "A"
@@ -434,7 +434,7 @@
     },
     {
       "title": "Requests by Model / min",
-      "description": "Requests by model",
+      "description": "Requests by model Calls to a gateway are left out: the gateway's own calls carry them.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -483,7 +483,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (model) (rate(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
+          "expr": "sum by (model) (rate(honeybeepf_llm_llm_requests_total{hop!=\"gateway\", target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
           "interval": "1m",
           "legendFormat": "{{ model }}",
           "refId": "A"
@@ -534,11 +534,12 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[5m]))",
+          "expr": "sum(increase(honeybeepf_llm_llm_requests_total{hop!=\"gateway\", target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[5m]))",
           "legendFormat": "Total",
           "refId": "A"
         }
-      ]
+      ],
+      "description": "Calls to a gateway are left out: the gateway's own calls carry them."
     },
     {
       "title": "Total Tokens (5m)",
@@ -584,11 +585,12 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[5m]))",
+          "expr": "sum(increase(honeybeepf_llm_llm_tokens_total{hop!=\"gateway\", target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[5m]))",
           "legendFormat": "Total",
           "refId": "A"
         }
-      ]
+      ],
+      "description": "Calls to a gateway are left out: the gateway's own calls carry them."
     },
     {
       "title": "Active Probes",
@@ -1080,7 +1082,7 @@
     },
     {
       "title": "Estimated Spend by Model ($) (estimate)",
-      "description": "ESTIMATE from the price table: USD across every billed attempt summed over all cost_type parts, by model. Unpriced models never appear; their tokens are counted in llm_unpriced_tokens_total instead.",
+      "description": "ESTIMATE from the price table: USD across every billed attempt summed over all cost_type parts, by model. Unpriced models never appear; their tokens are counted in llm_unpriced_tokens_total instead. Calls to a gateway are left out: the gateway's own calls carry them.",
       "type": "bargauge",
       "datasource": {
         "type": "prometheus",
@@ -1125,7 +1127,7 @@
       },
       "targets": [
         {
-          "expr": "topk(10, sum by (model) (increase(honeybeepf_llm_llm_cost_usd_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__range])))",
+          "expr": "topk(10, sum by (model) (increase(honeybeepf_llm_llm_cost_usd_total{hop!=\"gateway\", target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__range])))",
           "legendFormat": "{{ model }}",
           "refId": "A"
         }
@@ -1133,7 +1135,7 @@
     },
     {
       "title": "Total Estimated Spend (range)",
-      "description": "ESTIMATE from the price table: total USD across every billed attempt and cost_type in the selected range and filters.",
+      "description": "ESTIMATE from the price table: total USD across every billed attempt and cost_type in the selected range and filters. Calls to a gateway are left out: the gateway's own calls carry them.",
       "type": "stat",
       "datasource": {
         "type": "prometheus",
@@ -1169,7 +1171,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(honeybeepf_llm_llm_cost_usd_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__range]))",
+          "expr": "sum(increase(honeybeepf_llm_llm_cost_usd_total{hop!=\"gateway\", target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__range]))",
           "legendFormat": "Total",
           "refId": "A"
         }
@@ -1189,7 +1191,7 @@
     },
     {
       "title": "Tokens by Modality / min",
-      "description": "Token usage per minute split by modality. Text is the remainder of each direction's total; audio / image / video appear only when a call reports them, so the series sum to the total.",
+      "description": "Token usage per minute split by modality. Text is the remainder of each direction's total; audio / image / video appear only when a call reports them, so the series sum to the total. Calls to a gateway are left out: the gateway's own calls carry them.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -1239,7 +1241,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (modality) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
+          "expr": "sum by (modality) (rate(honeybeepf_llm_llm_tokens_total{hop!=\"gateway\", target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
           "interval": "1m",
           "legendFormat": "{{ modality }}",
           "refId": "A"
@@ -1248,7 +1250,7 @@
     },
     {
       "title": "Requests by Operation / min",
-      "description": "Requests per minute by operation. chat covers text and chat generation, the Responses API included; embeddings are billed on input tokens only.",
+      "description": "Requests per minute by operation. chat covers text and chat generation, the Responses API included; embeddings are billed on input tokens only. Calls to a gateway are left out: the gateway's own calls carry them.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -1297,7 +1299,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (operation) (rate(honeybeepf_llm_llm_requests_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
+          "expr": "sum by (operation) (rate(honeybeepf_llm_llm_requests_total{hop!=\"gateway\", target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
           "interval": "1m",
           "legendFormat": "{{ operation }}",
           "refId": "A"
@@ -1306,7 +1308,7 @@
     },
     {
       "title": "Tokens by Operation / min",
-      "description": "Token usage per minute by operation (chat / embeddings).",
+      "description": "Token usage per minute by operation (chat / embeddings). Calls to a gateway are left out: the gateway's own calls carry them.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -1356,7 +1358,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (operation) (rate(honeybeepf_llm_llm_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
+          "expr": "sum by (operation) (rate(honeybeepf_llm_llm_tokens_total{hop!=\"gateway\", target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
           "interval": "1m",
           "legendFormat": "{{ operation }}",
           "refId": "A"
@@ -1365,7 +1367,7 @@
     },
     {
       "title": "Unpriced Tokens by Reason / min",
-      "description": "Tokens per minute of calls the price table could not price, by reason (unknown_model / missing_price / unsupported_modifier / inconsistent_usage). These tokens are NOT in the cost panels, so spend is understated by whatever they would cost. A rising unknown_model usually means a new model to add to the price table.",
+      "description": "Tokens per minute of calls the price table could not price, by reason (unknown_model / missing_price / unsupported_modifier / inconsistent_usage). These tokens are NOT in the cost panels, so spend is understated by whatever they would cost. A rising unknown_model usually means a new model to add to the price table. Calls to a gateway are left out: the gateway's own calls carry them.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -1414,7 +1416,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (reason) (rate(honeybeepf_llm_llm_unpriced_tokens_total{target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
+          "expr": "sum by (reason) (rate(honeybeepf_llm_llm_unpriced_tokens_total{hop!=\"gateway\", target_namespace=~\"$team\", target_pod_name=~\"$pod\", model=~\"$model\"}[$__rate_interval])) * 60",
           "interval": "1m",
           "legendFormat": "{{ reason }}",
           "refId": "A"

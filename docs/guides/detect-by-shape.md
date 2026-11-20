@@ -43,10 +43,13 @@ An in-cluster gateway reached over TLS (LiteLLM, a company proxy) is then record
 | app → gateway (`match="shape"`) | the app's | which team spent it |
 | gateway → provider | the gateway's | what the provider bills |
 
-To total spend once, leave one side out, for example the shape-matched calls:
+Spend per namespace is right either way: each record belongs to its own namespace. For a total over all of them,
+list the gateway as a provider with `gateway: true`; its calls then carry `hop="gateway"` instead of
+`match="shape"`, and the dashboard totals leave them out ([Calls through a gateway](../cost.md#calls-through-a-gateway)).
+Without that entry, leave out the shape-matched calls:
 
 ```promql
-sum by (target_namespace) (increase(honeybeepf_llm_llm_cost_usd_total{match!="shape"}[1d]))
+sum(increase(honeybeepf_llm_llm_cost_usd_total{match!="shape"}[1d]))
 ```
 
 A gateway outside the cluster (OpenRouter, a hosted proxy), or one called over plain HTTP without a `plaintext`

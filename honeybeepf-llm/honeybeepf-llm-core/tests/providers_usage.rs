@@ -16,6 +16,7 @@ fn openai_config() -> ProviderConfig {
         operation: Operation::Chat,
         plaintext: None,
         record_only: false,
+        gateway: false,
     }
 }
 
@@ -42,6 +43,7 @@ fn gemini_config() -> ProviderConfig {
         operation: Operation::Chat,
         plaintext: None,
         record_only: false,
+        gateway: false,
     }
 }
 
@@ -281,6 +283,7 @@ fn provider_without_billed_categories() -> ConfigurableProvider {
         operation: Operation::Chat,
         plaintext: None,
         record_only: false,
+        gateway: false,
     })
 }
 

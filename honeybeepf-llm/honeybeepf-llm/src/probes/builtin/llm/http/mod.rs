@@ -27,15 +27,25 @@ pub use provider_report::report_provider_config;
 pub(crate) use registry::set_detect_by_shape;
 pub use sse_stream::SseStream;
 
-use honeybeepf_llm_core::types::UsageInfo;
+use honeybeepf_llm_core::{providers::ProviderConfig, types::UsageInfo};
+
+pub(crate) use crate::telemetry::MatchedBy;
 
 /// A matched LLM request: the logged path, whether its provider is record-only (detected but never
-/// parsed for usage, counted under the `agent_session` reason), and whether only its path matched
-/// (shape detection, host unlisted).
+/// parsed for usage, counted under the `agent_session` reason), and how it was matched.
 pub struct Detected {
     pub path: String,
     pub record_only: bool,
-    pub by_shape: bool,
+    pub matched: MatchedBy,
+}
+
+/// How a request matched: by a listed host (a gateway's or not), else by its path alone.
+fn matched_by(by_host: Option<&ProviderConfig>) -> MatchedBy {
+    match by_host {
+        Some(p) if p.gateway => MatchedBy::Gateway,
+        Some(_) => MatchedBy::Host,
+        None => MatchedBy::Shape,
+    }
 }
 
 /// Protocol-specific parser interface
@@ -166,4 +176,27 @@ pub(crate) mod test_support {
         "event: response.output_text.delta\n",
         "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use honeybeepf_llm_core::providers::ProviderRegistry;
+
+    use super::*;
+
+    #[test]
+    fn test_calls_to_a_gateway_entry_are_marked_and_other_calls_are_not() {
+        let registry = ProviderRegistry::from_json(
+            r#"{"providers": [
+                {"name": "litellm", "hosts": ["litellm.ai.svc"], "paths": ["/chat/completions"], "gateway": true},
+                {"name": "ollama", "hosts": ["ollama.internal"], "paths": ["/api/chat"]}
+            ]}"#,
+        )
+        .expect("providers parse");
+        let gateway = registry.find_provider("litellm.ai.svc", "/v1/chat/completions");
+        assert_eq!(matched_by(gateway), MatchedBy::Gateway);
+        let direct = registry.find_provider("ollama.internal", "/api/chat");
+        assert_eq!(matched_by(direct), MatchedBy::Host);
+        assert_eq!(matched_by(None), MatchedBy::Shape);
+    }
 }

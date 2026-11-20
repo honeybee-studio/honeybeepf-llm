@@ -31,6 +31,31 @@ sum by (target_namespace, target_workload_name) (rate(honeybeepf_llm_llm_cost_us
 
 USD per minute, by namespace and workload.
 
+## Calls through a gateway
+
+A call that goes through a gateway inside the cluster (LiteLLM, a company proxy) is made twice: by the app to the
+gateway, and by the gateway to the provider. When the agent records both, list the gateway as a
+[provider](guides/custom-providers.md) with `gateway: true`, so the two records can be told apart:
+
+| Record | Labels | Use it for |
+|---|---|---|
+| app → gateway | the app's pod, `hop="gateway"` | spend per team or workload |
+| gateway → provider | the gateway's pod, no `hop` | total spend: the provider's own model and usage |
+
+Each workload's series are its own calls, so spend per namespace or workload needs no filter, and the gateway shows
+as one more workload. A sum over all workloads counts each call once without the gateway hop:
+
+```promql
+sum(increase(honeybeepf_llm_llm_cost_usd_total{hop!="gateway"}[1d]))
+```
+
+The bundled cost dashboard does this in its totals and its per-model, per-modality and per-operation panels.
+
+!!! warning
+    Set `gateway: true` only for a gateway whose calls to the providers this agent records: one that runs on the
+    cluster's nodes and calls the providers over TLS or a `plaintext` entry. For a gateway outside the cluster, its
+    record is the only one, and the filter above would drop it.
+
 ## The cost metrics
 
 | Metric | What it counts | Extra labels |

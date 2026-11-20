@@ -19,6 +19,17 @@ builtinProbes:
         request_extractor: "messages"        # how to read the prompt: messages, contents, prompt or input
 ```
 
+A gateway in the cluster, such as LiteLLM, is listed the same way with `gateway: true`. Its calls then carry
+`hop="gateway"`, so totals do not count them a second time next to the gateway's own calls to the providers; see
+[Calls through a gateway](../cost.md#calls-through-a-gateway).
+
+```yaml
+      - name: "litellm"
+        hosts: ["litellm.ai-platform.svc"]
+        paths: ["/chat/completions", "/v1/messages"]
+        gateway: true
+```
+
 An OpenAI-compatible API needs no `response` block. If the server is reached over plain HTTP inside the cluster, add
 `plaintext` as well; see [Self-hosted models over plain HTTP](plaintext.md). To cost its calls, add the model's
 [prices](prices.md).

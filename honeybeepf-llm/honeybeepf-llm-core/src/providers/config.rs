@@ -292,6 +292,11 @@ pub struct ProviderConfig {
     /// reason, because the response carries a running session total, not one call's tokens.
     #[serde(default)]
     pub record_only: bool,
+
+    /// A gateway inside the cluster (LiteLLM, a company proxy), whose own calls to the providers are
+    /// recorded too: calls to it are labeled `hop="gateway"` so totals can leave them out.
+    #[serde(default)]
+    pub gateway: bool,
 }
 
 /// Registry of all configured providers
