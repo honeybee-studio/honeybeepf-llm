@@ -1,2 +1,2 @@
 # zig for cargo-zigbuild in binaries.yml; `pip-compile --generate-hashes requirements.in` writes requirements.txt.
-ziglang==0.14.1
+ziglang==0.17.1
