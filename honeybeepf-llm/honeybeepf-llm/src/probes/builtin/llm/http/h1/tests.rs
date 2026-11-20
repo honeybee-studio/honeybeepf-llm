@@ -521,3 +521,15 @@ fn json_array_uses_the_last_elements_usage() {
         Some((11, 4))
     );
 }
+
+#[test]
+fn response_status_is_the_final_head_past_any_1xx() {
+    let head = b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 529 Overloaded\r\nContent-Length: 0\r\n\r\n";
+    assert_eq!(Http11Parser::response_status(head), Some(529));
+    assert_eq!(
+        Http11Parser::response_status(b"HTTP/1.1 200 OK\r\n\r\n"),
+        Some(200)
+    );
+    assert_eq!(Http11Parser::response_status(b"HTTP/1.1 4"), None);
+    assert_eq!(Http11Parser::response_status(b"data: {}\n\n"), None);
+}

@@ -136,6 +136,11 @@ impl H2Stream {
         self.matched
     }
 
+    /// The response's `:status`, if its headers were read.
+    pub(super) fn status(&self) -> Option<u16> {
+        self.status
+    }
+
     /// Whether the matched provider is record-only, so its end is counted without reading usage.
     pub(super) fn record_only(&self) -> bool {
         self.record_only

@@ -40,6 +40,8 @@ pub(crate) enum H2Event {
     Recorded {
         usage: Box<UsageInfo>,
         start: Instant,
+        /// The response's `:status`, if its headers were read.
+        status: Option<u16>,
         /// The connection was joined mid-stream, so this call's host is unknown and it is lower-confidence.
         midjoin: bool,
         /// Matched by its request path alone (shape detection, host unlisted).
@@ -317,8 +319,13 @@ fn end_stream(s: H2Stream, on: &mut impl FnMut(H2Event)) {
         });
         return;
     }
-    let (over, speculative, start, matched) =
-        (s.over_limit(), s.speculative(), s.start(), s.matched());
+    let (over, speculative, start, matched, status) = (
+        s.over_limit(),
+        s.speculative(),
+        s.start(),
+        s.matched(),
+        s.status(),
+    );
     let (success, errored) = (s.is_success(), s.errored());
     let poll = s.poll().map(Box::<str>::from);
     let counts = s.counts_unparsed();
@@ -328,6 +335,7 @@ fn end_stream(s: H2Stream, on: &mut impl FnMut(H2Event)) {
             on(H2Event::Recorded {
                 usage: Box::new(usage),
                 start,
+                status,
                 midjoin: true,
                 matched: MatchedBy::Host,
             });
@@ -358,6 +366,7 @@ fn end_stream(s: H2Stream, on: &mut impl FnMut(H2Event)) {
         on(H2Event::Recorded {
             usage: Box::new(usage),
             start,
+            status,
             midjoin: false,
             matched,
         });

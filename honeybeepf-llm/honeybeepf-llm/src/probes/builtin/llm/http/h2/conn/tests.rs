@@ -138,6 +138,33 @@ fn a_finished_stream_returns_its_bytes_to_the_connection_budget() {
 }
 
 #[test]
+fn a_recorded_stream_carries_its_response_status() {
+    for status in [&b"200"[..], b"529"] {
+        let mut conn = H2Conn::new();
+        let mut seen = Vec::new();
+        let mut on = |event| {
+            if let H2Event::Recorded { status, .. } = event {
+                seen.push(status);
+            }
+        };
+        conn.feed(LlmDirection::Write, PREFACE, H2Gap::None, &mut on);
+        conn.feed(LlmDirection::Write, &req(1), H2Gap::None, &mut on);
+        let head = frame(1, 0x4, 1, &lit(b":status", status));
+        conn.feed(LlmDirection::Read, &head, H2Gap::None, &mut on);
+        conn.feed(
+            LlmDirection::Read,
+            &frame(0, 0x1, 1, JSON),
+            H2Gap::None,
+            &mut on,
+        );
+        let code = std::str::from_utf8(status)
+            .ok()
+            .and_then(|s| s.parse().ok());
+        assert_eq!(seen, [code]);
+    }
+}
+
+#[test]
 fn a_trailers_block_does_not_discard_the_body() {
     let head = frame(1, 0x4, 1, &lit(b":status", b"200"));
     let body = frame(0, 0, 1, JSON);
