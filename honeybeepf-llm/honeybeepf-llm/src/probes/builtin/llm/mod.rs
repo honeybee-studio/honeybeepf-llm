@@ -304,14 +304,25 @@ struct AeadScans {
     found: HashSet<(FileId, aead::Table)>,
 }
 
-/// Whether the executable at `path` is one of `names`, with or without its extension (`claude.exe`).
+/// Folders a version-named executable sits in under its program's folder (`claude/versions/2.1.328`).
+const VERSION_DIRS: [&str; 4] = ["versions", "version", "releases", "bin"];
+
+/// Whether the executable at `path` is one of `names`, with or without its extension (`claude.exe`). A
+/// file named only by its version (`~/.local/share/claude/versions/2.1.328`) is named by its program's folder.
 fn named(names: &[String], path: &str) -> bool {
     // A removed executable is reached through /proc/<pid>/exe: its name is that link's target.
     let target = exe_link_target(path);
     let path = target.as_deref().unwrap_or(path);
-    let file = path.rsplit('/').next().unwrap_or(path);
+    let mut parts = path.rsplit('/').filter(|p| !p.is_empty());
+    let file = parts.next().unwrap_or(path);
     let stem = file.split('.').next().unwrap_or(file);
-    names.is_empty() || names.iter().any(|n| n == file || n == stem)
+    let program = (!file.contains(|c: char| c.is_ascii_alphabetic()))
+        .then(|| parts.find(|dir| !VERSION_DIRS.contains(dir)))
+        .flatten();
+    names.is_empty()
+        || names
+            .iter()
+            .any(|n| n == file || n == stem || program == Some(n.as_str()))
 }
 
 impl LlmProbe {
@@ -949,6 +960,22 @@ mod tests {
         assert!(!named(&names, "/usr/sbin/sshd"));
         assert!(!named(&names, "/opt/claude-tools/bin/helper"));
         assert!(named(&[], "/usr/sbin/sshd"));
+    }
+
+    #[test]
+    fn test_aead_names_match_a_version_named_executable_by_its_program_folder() {
+        let names = vec!["claude".to_string()];
+        assert!(named(
+            &names,
+            "/proc/9/root/home/u/.local/share/claude/versions/2.1.328"
+        ));
+        assert!(named(&names, "/opt/claude/2.1.328"));
+        // Only a file named by its version takes its folder's name: not every file under a `claude` folder.
+        assert!(!named(&names, "/home/claude/bin/python3"));
+        assert!(!named(
+            &names,
+            "/home/u/.local/share/codex/versions/0.170.0"
+        ));
     }
 
     #[test]

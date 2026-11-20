@@ -22,7 +22,8 @@ pub struct BuiltinProbes {
     /// Experimental: scan the memory of each new process for the AEAD tables of a BoringSSL or aws-lc built
     /// into its executable (Bun, rustls) and log them; off by default.
     pub llm_aead: Option<bool>,
-    /// Executable names the AEAD scan is limited to (`claude`, `codex`); any with the library when unset.
+    /// Executable names the AEAD scan is limited to (`claude`, `codex`); any with the library when unset. A
+    /// file named only by its version (`claude/versions/2.1.328`) goes by its program's folder.
     #[serde(skip)]
     pub llm_aead_executables: Option<Vec<String>>,
     /// Pod labels copied onto LLM metrics (k8s feature); each adds series, so none by default.
