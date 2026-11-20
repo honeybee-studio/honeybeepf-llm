@@ -72,7 +72,7 @@ to the agent's own `/sys/fs/cgroup` and see only the agent pod; the log names th
 | `BPF` | create the maps and load the programs |
 | `PERFMON` | attach uprobes, tracepoints and fentry, and read user memory |
 | `SYS_ADMIN` | the uprobe `perf_event_open`, which Ubuntu's 7.0 kernel refuses with `PERFMON` alone |
-| `SYS_PTRACE` | read other processes' `/proc/<pid>/root` and `/proc/<pid>/maps` to find their libssl |
+| `SYS_PTRACE` | read other processes' `/proc/<pid>/root` and `/proc/<pid>/maps` to find their libssl; with the experimental AEAD scan on, also `/proc/<pid>/mem` of some processes ([Data handling](#3-data-handling)) |
 | `NET_ADMIN` | create the plaintext sockhash at start, even with plaintext off; kernels before 6.9 only |
 | `SYS_RESOURCE` | raise `RLIMIT_MEMLOCK`; kernels before 5.11 only |
 
@@ -128,6 +128,16 @@ granted but unused.
 | Network | no listening port. Outbound: the OTLP collector, the Kubernetes API, and DNS for plaintext hosts outside the cluster |
 | Disk | read-only root filesystem and host mounts; the only file written is the heartbeat in a 1 MiB in-memory `emptyDir` |
 | Scope | every pod and host process by default; with `builtinProbes.llm.namespaces`, TLS data is copied only from the containers of pods in those namespaces, checked in the kernel by cgroup before any byte is read ([guide](guides/namespace-scope.md)) |
+
+**Process memory read by the AEAD table scan.** Experimental and off by default (`BUILTIN_PROBES__LLM_AEAD`). It
+finds the cipher table of a BoringSSL or aws-lc built into a program such as Claude Code, which exports no TLS function.
+
+| | |
+|---|---|
+| Which processes | only those whose executable file has `BoringSSL` or `AWS-LC` in its `.rodata`, checked once per file by reading the file; with `BUILTIN_PROBES__LLM_AEAD_EXECUTABLES` (e.g. `claude,codex`), only executables of those names |
+| Which memory | the executable's own mappings and the one zero-filled mapping right after them, read-only through `/proc/<pid>/mem`. Never the heap, stacks, libraries or other mappings. Rescans read only the pages of those mappings the process wrote (`/proc/<pid>/pagemap`) |
+| How long | until a table filled at run time is found, once per executable file; its later processes are not read. Otherwise up to 20 scans per process over about 30 minutes |
+| Kept | the file offsets of the table's functions, logged. The bytes read are dropped |
 
 **Which TLS traffic reaches the agent.** The uprobes fire for every TLS connection in a probed process, not only LLM
 calls. The kernel drops a connection's bytes once it knows its class:

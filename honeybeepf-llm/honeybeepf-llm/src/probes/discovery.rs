@@ -265,14 +265,17 @@ pub fn get_process_exe(pid: u32) -> Option<String> {
         .then(|| host_path.to_string_lossy().into_owned())
 }
 
-/// Host paths of the main executables of all running processes.
-pub fn find_executables_all() -> HashSet<String> {
+/// Each running process with the host path of its main executable.
+pub fn find_process_executables() -> Vec<(u32, String)> {
     let Ok(procs) = procfs::process::all_processes() else {
-        return HashSet::new();
+        return Vec::new();
     };
     procs
         .filter_map(std::result::Result::ok)
-        .filter_map(|p| get_process_exe(p.pid as u32))
+        .filter_map(|p| {
+            let pid = p.pid as u32;
+            Some((pid, get_process_exe(pid)?))
+        })
         .collect()
 }
 

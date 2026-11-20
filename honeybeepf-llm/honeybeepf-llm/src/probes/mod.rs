@@ -102,7 +102,12 @@ pub struct ProcessInfo {
 pub trait DynamicProbe: Probe {
     /// Called when a new process is executed, providing shared process info.
     fn on_exec(&self, bpf: &mut Ebpf, process_info: &ProcessInfo) -> Result<()>;
+
+    /// Called every `DYNAMIC_POLL_MS`, for work on a process that cannot be done at its exec.
+    fn poll(&self, _bpf: &mut Ebpf) {}
 }
+
+pub const DYNAMIC_POLL_MS: u64 = 500;
 
 pub struct TracepointConfig<'a> {
     pub program_name: &'a str,

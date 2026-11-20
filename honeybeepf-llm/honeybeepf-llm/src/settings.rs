@@ -19,6 +19,12 @@ pub struct BuiltinProbes {
     /// Experimental: record LLM calls to hosts no provider lists, by request path + response usage
     /// shape; off by default.
     pub llm_detect_by_shape: Option<bool>,
+    /// Experimental: scan the memory of each new process for the AEAD tables of a BoringSSL or aws-lc built
+    /// into its executable (Bun, rustls) and log them; off by default.
+    pub llm_aead: Option<bool>,
+    /// Executable names the AEAD scan is limited to (`claude`, `codex`); any with the library when unset.
+    #[serde(skip)]
+    pub llm_aead_executables: Option<Vec<String>>,
     /// Pod labels copied onto LLM metrics (k8s feature); each adds series, so none by default.
     #[serde(skip)]
     pub llm_pod_labels: Option<Vec<String>>,
@@ -60,6 +66,9 @@ impl Settings {
         let pod_labels = vars
             .get("BUILTIN_PROBES__LLM_POD_LABELS")
             .map(|v| split_comma_separated(v));
+        let aead_executables = vars
+            .get("BUILTIN_PROBES__LLM_AEAD_EXECUTABLES")
+            .map(|v| split_comma_separated(v));
         let namespaces = vars
             .get("BUILTIN_PROBES__LLM_NAMESPACES")
             .map(|v| split_comma_separated(v))
@@ -71,6 +80,7 @@ impl Settings {
 
         let mut settings: Self = s.try_deserialize()?;
         settings.builtin_probes.llm_pod_labels = pod_labels;
+        settings.builtin_probes.llm_aead_executables = aead_executables;
         settings.builtin_probes.llm_namespaces = namespaces;
         Ok(settings)
     }
@@ -160,6 +170,19 @@ mod tests {
     }
 
     #[test]
+    fn test_aead_executables_split_on_commas() {
+        let vars = Map::from([(
+            "BUILTIN_PROBES__LLM_AEAD_EXECUTABLES".into(),
+            "claude, codex,".into(),
+        )]);
+        let names = Settings::from_vars(vars)
+            .expect("settings load")
+            .builtin_probes
+            .llm_aead_executables;
+        assert_eq!(names, Some(vec!["claude".to_string(), "codex".to_string()]));
+    }
+
+    #[test]
     fn test_to_common_config() {
         let settings = Settings {
             otel_exporter_otlp_endpoint: None,
@@ -168,6 +191,8 @@ mod tests {
                 llm: None,
                 llm_executables: None,
                 llm_detect_by_shape: None,
+                llm_aead: None,
+                llm_aead_executables: None,
                 llm_pod_labels: None,
                 llm_namespaces: None,
                 interval: None,
