@@ -2,6 +2,7 @@
 
 use crate::probes::builtin::llm::background::PendingCall;
 use crate::probes::builtin::llm::http::BackgroundState;
+use crate::telemetry::MatchedBy;
 
 use super::*;
 
@@ -93,7 +94,7 @@ fn record_poll_result(
             pid: call.pid,
             #[cfg(feature = "k8s")]
             pod_info: call.pod_info,
-            by_shape: false,
+            matched: MatchedBy::Host,
         },
     );
     Outcome::Recorded
@@ -170,7 +171,7 @@ pub(crate) fn give_up(call: PendingCall) -> Outcome {
             pid: call.pid,
             #[cfg(feature = "k8s")]
             pod_info: call.pod_info,
-            by_shape: false,
+            matched: MatchedBy::Host,
         },
     )
 }
@@ -193,7 +194,7 @@ pub(super) fn record_usage(
         latency_secs,
         is_error,
         transport,
-        ctx.by_shape,
+        ctx.matched,
         #[cfg(feature = "k8s")]
         ctx.pod_info.as_ref(),
     );
@@ -202,10 +203,10 @@ pub(super) fn record_usage(
     let pod_str = fmt_pod(ctx.pod_info.as_ref());
     #[cfg(not(feature = "k8s"))]
     let pod_str = "";
-    let shape_str = if ctx.by_shape {
-        " | Matched by shape"
-    } else {
-        ""
+    let shape_str = match ctx.matched {
+        MatchedBy::Host => "",
+        MatchedBy::Gateway => " | To a gateway",
+        MatchedBy::Shape => " | Matched by shape",
     };
 
     if is_error {

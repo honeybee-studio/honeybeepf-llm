@@ -1,7 +1,6 @@
 #![cfg(test)]
 
 use super::super::super::set_detect_by_shape;
-use super::super::super::test_support::SHAPE_FLAG;
 use super::*;
 use crate::probes::builtin::llm::processor::MAX_RESPONSE_BUFFER_SIZE;
 
@@ -40,13 +39,13 @@ fn match_request_detects_provider_posts_and_responses_polls() {
     let openai = block(b"POST", "api.openai.com", "/v1/chat/completions?x=1");
     assert!(matches!(
         m(&openai),
-        Some(Matched::Create { path, record_only: false, by_shape: false }) if path == "/v1/chat/completions"
+        Some(Matched::Create { path, record_only: false, matched: MatchedBy::Host }) if path == "/v1/chat/completions"
     ));
     // A Managed Agents session POST is matched as record-only.
     let session = block(b"POST", "api.anthropic.com", "/v1/sessions");
     assert!(matches!(
         m(&session),
-        Some(Matched::Create { path, record_only: true, by_shape: false }) if path == "/v1/sessions"
+        Some(Matched::Create { path, record_only: true, matched: MatchedBy::Host }) if path == "/v1/sessions"
     ));
     assert!(m(&block(b"POST", "noise.internal", "/p")).is_none());
     // A background poll: GET /v1/responses/{id} to a provider host, query stripped.
@@ -70,9 +69,6 @@ fn match_request_detects_provider_posts_and_responses_polls() {
 /// Shape detection: a POST to a host no provider lists is matched by its LLM path only when the flag is on.
 #[test]
 fn shape_detection_matches_an_unlisted_host_by_path() {
-    let _flag = SHAPE_FLAG
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let post = |path: &[u8]| {
         [
             lit(b":method", b"POST"),
@@ -90,7 +86,7 @@ fn shape_detection_matches_an_unlisted_host_by_path() {
     set_detect_by_shape(true);
     assert!(matches!(
         m(&chat),
-        Some(Matched::Create { path, record_only: false, by_shape: true }) if path == "/openai/v1/chat/completions"
+        Some(Matched::Create { path, record_only: false, matched: MatchedBy::Shape }) if path == "/openai/v1/chat/completions"
     ));
     // A path that is not an LLM pattern stays unmatched even with the flag on.
     assert!(m(&post(b"/api/data")).is_none());

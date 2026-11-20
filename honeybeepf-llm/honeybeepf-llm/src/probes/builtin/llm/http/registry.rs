@@ -1,5 +1,6 @@
 //! Provider registry loaded from config and shared by the HTTP parsers.
 
+#[cfg(not(test))]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use once_cell::sync::Lazy;
@@ -8,14 +9,27 @@ use honeybeepf_llm_core::providers::{ConfigurableProvider, ProviderRegistry, pat
 
 /// Shape detection: when on, an LLM call to a host no entry lists is still admitted and
 /// recorded by request path plus response usage shape. Off by default; set once at probe start.
+#[cfg(not(test))]
 static DETECT_BY_SHAPE: AtomicBool = AtomicBool::new(false);
 
+// Per thread in tests: a test that turns it on must not change what tests running beside it detect.
+#[cfg(test)]
+thread_local! {
+    static DETECT_BY_SHAPE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub(crate) fn set_detect_by_shape(on: bool) {
+    #[cfg(not(test))]
     DETECT_BY_SHAPE.store(on, Ordering::Relaxed);
+    #[cfg(test)]
+    DETECT_BY_SHAPE.set(on);
 }
 
 pub(super) fn detect_by_shape() -> bool {
-    DETECT_BY_SHAPE.load(Ordering::Relaxed)
+    #[cfg(not(test))]
+    return DETECT_BY_SHAPE.load(Ordering::Relaxed);
+    #[cfg(test)]
+    DETECT_BY_SHAPE.get()
 }
 
 /// Cached providers - built once at initialization

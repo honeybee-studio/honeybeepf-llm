@@ -6,6 +6,7 @@ mod stream;
 pub(crate) use conn::{H2Conn, H2Event, starts_preface};
 pub(crate) use honeybeepf_llm_core::h2::frame::looks_like_http2;
 
+use crate::telemetry::MatchedBy;
 use serde_json::Value;
 
 use honeybeepf_llm_core::byte_utils;
@@ -23,7 +24,7 @@ fn detected(path: &str) -> Detected {
     Detected {
         path: path.to_string(),
         record_only: false,
-        by_shape: false,
+        matched: MatchedBy::Host,
     }
 }
 

@@ -7,6 +7,7 @@ pub mod gotls;
 pub mod http;
 pub mod processor;
 
+use crate::telemetry::MatchedBy;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex, OnceLock},
@@ -722,7 +723,7 @@ fn route_event(
                 pid: header.metadata.pid,
                 #[cfg(feature = "k8s")]
                 pod_info: pod_info(),
-                by_shape: false,
+                matched: MatchedBy::Host,
             }),
             _ => Outcome::Pending,
         };
@@ -736,7 +737,7 @@ fn route_event(
         pid: header.metadata.pid,
         #[cfg(feature = "k8s")]
         pod_info: pod_info(),
-        by_shape: false,
+        matched: MatchedBy::Host,
     };
     stream.handle_fragment(
         LlmDirection::from(header.rw),
