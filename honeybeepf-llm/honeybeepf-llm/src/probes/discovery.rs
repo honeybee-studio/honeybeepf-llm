@@ -10,6 +10,23 @@ use log::{debug, warn};
 use object::{Object, ObjectSection, ObjectSymbol, read::ReadCache};
 use regex::Regex;
 
+/// What the kernel appends to the target of a `/proc/<pid>/exe` link whose file is gone.
+pub const DELETED: &str = " (deleted)";
+
+/// The path a `/proc/<pid>/exe` link names, without the deleted mark; `None` for any other path.
+pub fn exe_link_target(path: &str) -> Option<String> {
+    if !(path.starts_with("/proc/") && path.ends_with("/exe")) {
+        return None;
+    }
+    let target = std::fs::read_link(path).ok()?;
+    Some(
+        target
+            .to_string_lossy()
+            .trim_end_matches(DELETED)
+            .to_owned(),
+    )
+}
+
 /// Resolves a path from a process's namespace to the host filesystem.
 /// Handles containerized processes by looking through /proc/<PID>/root.
 pub fn resolve_host_path(pid: i32, container_path: &std::path::Path) -> PathBuf {
@@ -256,9 +273,14 @@ pub fn exported_function_offsets<'n>(
     Ok(offsets)
 }
 
-/// Host path of a process's main executable.
+/// Host path of a process's main executable. One removed or replaced since the process started (an
+/// auto-update) has no path left, so it is `/proc/<pid>/exe`, which still opens it for reads and uprobes.
 pub fn get_process_exe(pid: u32) -> Option<String> {
     let exe = procfs::process::Process::new(pid as i32).ok()?.exe().ok()?;
+    if exe.to_string_lossy().ends_with(DELETED) {
+        let link = format!("/proc/{pid}/exe");
+        return Path::new(&link).exists().then_some(link);
+    }
     let host_path = resolve_host_path(pid as i32, &exe);
     host_path
         .exists()
@@ -313,7 +335,7 @@ pub fn get_process_libraries(pid: u32) -> Result<HashSet<String>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A `/proc/<pid>/root` path resolves against that process's mounts, innermost first.
@@ -344,6 +366,52 @@ mod tests {
             Some(&(addr - map.address.0 + map.offset))
         );
         assert!(!offsets.contains_key("hb_no_such_fn"));
+        Ok(())
+    }
+
+    /// A running copy of `sleep` whose file was then removed, as after an auto-update; killed on drop.
+    pub(crate) struct RemovedExe(pub std::process::Child);
+
+    impl RemovedExe {
+        pub(crate) fn spawn(name: &str) -> std::io::Result<Self> {
+            let file = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+            std::fs::copy("/bin/sleep", &file)?;
+            let removed = Self(std::process::Command::new(&file).arg("30").spawn()?);
+            // spawn() can return before the child has exec'd: until then /proc/<pid>/exe is this test binary.
+            let link = format!("/proc/{}/exe", removed.0.id());
+            for _ in 0..200 {
+                if std::fs::read_link(&link).is_ok_and(|t| t == file) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            std::fs::remove_file(&file)?;
+            Ok(removed)
+        }
+    }
+
+    impl Drop for RemovedExe {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// An executable removed after its process started is still found, through /proc/<pid>/exe.
+    #[test]
+    fn test_removed_executable_is_reached_through_proc_exe() -> Result<()> {
+        let removed = RemovedExe::spawn("hb-removed-exe")?;
+        let pid = removed.0.id();
+        let exe =
+            get_process_exe(pid).ok_or_else(|| anyhow::anyhow!("no exe for a removed file"))?;
+        assert_eq!(exe, format!("/proc/{pid}/exe"));
+        assert!(file_identity(&exe).is_some());
+        let target = exe_link_target(&exe).ok_or_else(|| anyhow::anyhow!("no link target"))?;
+        assert!(
+            target.ends_with(&format!("hb-removed-exe-{}", std::process::id())),
+            "{target}"
+        );
+        assert_eq!(exe_link_target("/usr/bin/sleep"), None);
         Ok(())
     }
 
