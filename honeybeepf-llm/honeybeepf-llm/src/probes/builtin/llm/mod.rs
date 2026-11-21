@@ -34,7 +34,7 @@ use crate::probes::{
     DynamicProbe, IdentityResolver, Probe, ProcessInfo, TracepointConfig, attach_tracepoint,
     attach_uprobe, detach_uprobe,
     discovery::{
-        FileId, exported_function_offsets, file_identity, find_libraries_all,
+        FileId, exe_link_target, exported_function_offsets, file_identity, find_libraries_all,
         find_process_executables,
     },
     load_uprobe, spawn_ringbuf_handler_var,
@@ -306,6 +306,9 @@ struct AeadScans {
 
 /// Whether the executable at `path` is one of `names`, with or without its extension (`claude.exe`).
 fn named(names: &[String], path: &str) -> bool {
+    // A removed executable is reached through /proc/<pid>/exe: its name is that link's target.
+    let target = exe_link_target(path);
+    let path = target.as_deref().unwrap_or(path);
     let file = path.rsplit('/').next().unwrap_or(path);
     let stem = file.split('.').next().unwrap_or(file);
     names.is_empty() || names.iter().any(|n| n == file || n == stem)
@@ -946,6 +949,16 @@ mod tests {
         assert!(!named(&names, "/usr/sbin/sshd"));
         assert!(!named(&names, "/opt/claude-tools/bin/helper"));
         assert!(named(&[], "/usr/sbin/sshd"));
+    }
+
+    #[test]
+    fn test_aead_names_match_a_removed_executable_by_its_original_name() -> std::io::Result<()> {
+        let removed = crate::probes::discovery::tests::RemovedExe::spawn("hb-named-exe")?;
+        let path = format!("/proc/{}/exe", removed.0.id());
+        let name = format!("hb-named-exe-{}", std::process::id());
+        assert!(named(&[name], &path));
+        assert!(!named(&["exe".to_string()], &path));
+        Ok(())
     }
 
     #[test]
