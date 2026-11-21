@@ -94,6 +94,39 @@ fn file_offset(execs: &[ExecRange], ptr: u64) -> Option<u64> {
         .map(|&(start, _, offset)| ptr - start + offset)
 }
 
+/// Bytes an x86-64 function starts with: `endbr64`, or `push rbp; mov rbp, rsp`.
+#[cfg(target_arch = "x86_64")]
+const FUNCTION_STARTS: [[u8; 4]; 2] = [[0xf3, 0x0f, 0x1e, 0xfa], [0x55, 0x48, 0x89, 0xe5]];
+
+impl Table {
+    /// Whether each function is where one starts in `exe`, read from the file, which a process cannot change:
+    /// a table only comes from process memory, and a probe inside an instruction breaks every process of the file.
+    pub fn starts_functions(&self, exe: &File) -> bool {
+        [
+            self.init[0],
+            self.init[1],
+            self.cleanup,
+            self.seal,
+            self.open,
+        ]
+        .into_iter()
+        .filter(|&at| at != 0)
+        .all(|at| starts_function(exe, at))
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn starts_function(exe: &File, at: u64) -> bool {
+    let mut code = [0u8; 4];
+    exe.read_exact_at(&mut code, at).is_ok() && FUNCTION_STARTS.contains(&code)
+}
+
+/// arm64, the other target: every instruction is 4 bytes.
+#[cfg(not(target_arch = "x86_64"))]
+fn starts_function(_exe: &File, at: u64) -> bool {
+    at % 4 == 0
+}
+
 /// The table of `library` at the start of `bytes`, if its pointers make one.
 fn table_of(library: Library, bytes: &[u8], execs: &[ExecRange], writable: bool) -> Option<Table> {
     let (at, count) = library.pointers();
@@ -221,6 +254,7 @@ fn regions_of(maps: &[MemoryMap], ino: u64) -> (Vec<ExecRange>, Vec<(u64, u64, b
 pub fn scan(pid: u32, ino: u64, written_only: bool) -> Result<Vec<Table>> {
     let (execs, mut regions) = regions_of(&Process::new(pid as i32)?.maps()?.0, ino);
     let mem = File::open(format!("/proc/{pid}/mem")).context("process memory not readable")?;
+    let exe = File::open(format!("/proc/{pid}/exe")).context("executable not readable")?;
     if written_only {
         let pagemap = File::open(format!("/proc/{pid}/pagemap")).ok();
         regions = regions
@@ -239,7 +273,11 @@ pub fn scan(pid: u32, ino: u64, written_only: bool) -> Result<Vec<Table>> {
             let want = usize::try_from(end - pos).map_or(buf.len(), |left| left.min(buf.len()));
             let got = read_at(&mem, &mut buf[..want], pos);
             for table in tables_in(&buf[..got], &execs, writable) {
-                if !tables.contains(&table) {
+                if !table.starts_functions(&exe) {
+                    log::debug!(
+                        "AEAD table of PID {pid} skipped: a function is not where one starts"
+                    );
+                } else if !tables.contains(&table) {
                     tables.push(table);
                 }
             }
@@ -280,6 +318,35 @@ mod tests {
         out.extend([0, 0, extra_in, 0, 0, 0, 0, 0, 0, 0]);
         out.extend(pointers.iter().flat_map(|p| p.to_le_bytes()));
         out
+    }
+
+    #[test]
+    fn test_a_table_is_probed_only_where_functions_start_in_the_file() -> std::io::Result<()> {
+        let path = std::env::temp_dir().join(format!("hb-aead-code-{}", std::process::id()));
+        let mut code = vec![0xcc_u8; 0x40];
+        code[0x10..0x14].copy_from_slice(&[0xf3, 0x0f, 0x1e, 0xfa]);
+        code[0x20..0x24].copy_from_slice(&[0x55, 0x48, 0x89, 0xe5]);
+        std::fs::write(&path, &code)?;
+        let exe = File::open(&path)?;
+        std::fs::remove_file(&path)?;
+        let table = Table {
+            library: Library::BoringSsl,
+            init: [0x10, 0],
+            cleanup: 0x20,
+            seal: 0x10,
+            open: 0x20,
+            filled_at_run_time: true,
+        };
+        assert!(table.starts_functions(&exe));
+        // One byte into `push rbp; mov rbp, rsp`: inside an instruction on x86-64, off the grid on arm64.
+        assert!(
+            !Table {
+                open: 0x21,
+                ..table
+            }
+            .starts_functions(&exe)
+        );
+        Ok(())
     }
 
     #[test]
