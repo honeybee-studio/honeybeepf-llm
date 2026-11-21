@@ -114,6 +114,7 @@ nav:
   - Reference:
       - Metrics: metrics.md
       - Helm values: reference-values.md
+      - Experimental features: experimental.md
   - Operations:
       - Overhead benchmark: benchmark.md
       - Security review: security-review.md

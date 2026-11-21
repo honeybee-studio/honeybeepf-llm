@@ -2,7 +2,8 @@
 
 !!! warning "Experimental"
     Off by default and may change. Tested against a mock server with Claude Code (Bun) on a VM, with AES-128-GCM,
-    AES-256-GCM and ChaCha20-Poly1305, and in k3s pods. Not yet tested on arm64.
+    AES-256-GCM and ChaCha20-Poly1305, and in k3s pods. Not yet tested on arm64. See
+    [experimental features](../experimental.md).
 
 Some programs carry their own TLS library and export no TLS function, so the usual probes see none of their calls:
 Bun builds such as Claude Code and OpenCode (BoringSSL), and Rust programs on rustls with aws-lc such as Codex and
