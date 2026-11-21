@@ -1078,8 +1078,8 @@ fn test_bedrock_converse_prompt_adds_cache_read_and_write() {
 #[test]
 fn test_new_defaults_parse_existing_bodies_like_before() {
     let registry = ProviderRegistry::with_defaults();
-    // Entries 0-7 are the OpenAI (embeddings, chat, image, Responses, transcription), Anthropic and Gemini (embeddings, chat) first-party providers.
-    let (before, _) = registry.providers.split_at(8);
+    // Entries 0-8 are the OpenAI (embeddings, chat, image, Responses, transcription, Realtime), Anthropic and Gemini (embeddings, chat) first-party providers.
+    let (before, _) = registry.providers.split_at(9);
 
     for response in [
         json!({"model": "gpt-4o", "usage": {"prompt_tokens": 2000, "completion_tokens": 40,
@@ -1099,6 +1099,24 @@ fn test_new_defaults_parse_existing_bodies_like_before() {
         assert!(now.is_some(), "{response}");
         assert_eq!(now, parse_in_order(before, &response), "{response}");
     }
+}
+
+// A Realtime response.done's usage: `input_token_details` (singular) splits audio out, and no other entry takes it.
+#[test]
+fn test_realtime_usage_is_read_with_its_audio_tokens() {
+    let registry = ProviderRegistry::with_defaults();
+    let response = json!({"object": "realtime.response", "id": "resp_1", "status": "completed",
+        "usage": {"total_tokens": 330, "input_tokens": 250, "output_tokens": 80,
+            "input_token_details": {"text_tokens": 50, "audio_tokens": 200, "cached_tokens": 64},
+            "output_token_details": {"text_tokens": 20, "audio_tokens": 60}}});
+    let usage = parse_in_order(&registry.providers, &response).expect("realtime usage");
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (250, 80));
+    assert_eq!(
+        (usage.input_modalities.audio, usage.output_modalities.audio),
+        (200, 60)
+    );
+    assert_eq!(usage.cache_read_tokens, Some(64));
+    assert_eq!(usage.model, None);
 }
 
 #[test]

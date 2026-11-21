@@ -54,7 +54,8 @@ impl ConnFilter {
         true
     }
 
-    fn skip_connection(&mut self, header: &LlmEventHeader) {
+    /// Drop the connection's later calls in the kernel.
+    pub(super) fn skip_connection(&mut self, header: &LlmEventHeader) {
         let key = [u64::from(header.metadata.pid), header.ssl_ptr];
         if let Some(entry) = self
             .map

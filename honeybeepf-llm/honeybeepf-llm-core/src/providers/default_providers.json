@@ -110,6 +110,22 @@
       "request_extractor": "none"
     },
     {
+      "name": "openai",
+      "note": "OpenAI Realtime over a WebSocket (OpenAI and Azure): usage of each response.done message, with input_token_details and output_token_details (singular `token`, unlike Responses) splitting text and audio. required_field keeps it before and apart from anthropic, which shares input_tokens/output_tokens. The response names no model: it comes from the URL query or the session.",
+      "hosts": ["api.openai.com", "openai.azure.com", "services.ai.azure.com"],
+      "paths": ["/v1/realtime$", "/openai/realtime$", "/openai/v1/realtime$"],
+      "response": {
+        "usage_path": "usage",
+        "prompt_tokens": "input_tokens",
+        "completion_tokens": "output_tokens",
+        "cache_read_tokens": "input_token_details.cached_tokens",
+        "required_field": "input_token_details",
+        "input_modality_details": "input_token_details",
+        "output_modality_details": "output_token_details"
+      },
+      "request_extractor": "none"
+    },
+    {
       "name": "anthropic",
       "note": "Anthropic Messages across Claude API, Claude Platform on AWS, Bedrock Mantle /anthropic/v1, Claude on Google Cloud, and Claude in Microsoft Foundry /anthropic/v1. `$` keeps /v1/messages/count_tokens and /v1/messages/batches out.",
       "hosts": [

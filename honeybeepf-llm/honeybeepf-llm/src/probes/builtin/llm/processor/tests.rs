@@ -1891,3 +1891,42 @@ fn response_without_model_takes_the_request_model() {
         "the response's model wins"
     );
 }
+
+const UPGRADE: &[u8] = b"GET /v1/realtime?model=gpt-realtime HTTP/1.1\r\nHost: api.openai.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\r\n";
+
+/// A connection after the upgrade request and one server read.
+fn upgraded(answer: &[u8]) -> (StreamProcessor, Vec<Outcome>) {
+    let mut p = StreamProcessor::new();
+    let mut out = send(&mut p, LlmDirection::Write, UPGRADE, None);
+    assert!(p.is_websocket());
+    out.extend(send(&mut p, LlmDirection::Read, answer, None));
+    (p, out)
+}
+
+#[test]
+fn a_websocket_whose_frames_are_not_read_is_skipped_and_counted_nowhere() {
+    for answer in [
+        &b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n"[..],
+        b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n\x81\x02{}",
+    ] {
+        let (mut p, out) = upgraded(answer);
+        assert!(out.iter().all(|o| *o == Outcome::Pending), "{out:?}");
+        assert!(!p.is_websocket() && p.take_skip());
+    }
+}
+
+#[test]
+fn a_websocket_closed_before_its_answer_is_no_call() {
+    let (mut p, out) = upgraded(b"HTTP/1.1 101 Swi");
+    assert!(out.iter().all(|o| *o == Outcome::Pending), "{out:?}");
+    assert_eq!(p.close(&ctx()), Outcome::Pending);
+    assert!(!p.take_skip());
+}
+
+#[test]
+fn a_get_without_upgrade_on_a_realtime_path_is_not_read() {
+    let mut p = StreamProcessor::new();
+    let get = b"GET /v1/realtime?model=gpt-realtime HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
+    send(&mut p, LlmDirection::Write, get, None);
+    assert!(!p.is_websocket() && !p.is_llm());
+}
