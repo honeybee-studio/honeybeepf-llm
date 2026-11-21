@@ -31,6 +31,9 @@ builtinProbes:
 
 Outside Kubernetes: `BUILTIN_PROBES__LLM_AEAD_EXECUTABLES=claude,codex`.
 
+A name is compared with the file the process runs (the target of `/proc/<pid>/exe`), not with a symlink to it or the
+command typed, so a program installed under another name is left out. An empty list finds it by the library alone.
+
 ## How it works
 
 1. The agent first reads the executable file of each new process, and of each running one when it starts. Only a
