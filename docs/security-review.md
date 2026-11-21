@@ -142,6 +142,7 @@ finds the cipher table of a BoringSSL or aws-lc built into a program such as Cla
 | Which processes | only those whose executable file has `BoringSSL` or `AWS-LC` in its `.rodata`, checked once per file by reading the file; with `BUILTIN_PROBES__LLM_AEAD_EXECUTABLES` (e.g. `claude,codex`), only executables of those names |
 | Which memory | the executable's own mappings and the one zero-filled mapping right after them, read-only through `/proc/<pid>/mem`. Never the heap, stacks, libraries or other mappings. Rescans read only the pages of those mappings the process wrote (`/proc/<pid>/pagemap`) |
 | How long | until a table filled at run time is found, once per executable file; its later processes are not read. Otherwise up to 20 scans per process over about 30 minutes |
+| Where probes go | only at a table's functions, and only if each starts, in the executable file (which a process cannot change), with `endbr64` or `push rbp; mov rbp, rsp` on x86-64, or on the 4-byte grid on arm64. So a forged or chance table cannot put a probe inside an instruction, which would break every process of that file |
 | Kept | the file offsets of the table's functions, logged. The bytes read are dropped |
 
 **Which TLS traffic reaches the agent.** The uprobes fire for every TLS connection in a probed process, not only LLM
