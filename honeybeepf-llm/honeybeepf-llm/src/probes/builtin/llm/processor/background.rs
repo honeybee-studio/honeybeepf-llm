@@ -7,7 +7,8 @@ use crate::telemetry::MatchedBy;
 use super::*;
 
 impl StreamProcessor {
-    /// Record, defer or drop the call once its response parsed to `usage` and `state`; None keeps waiting.
+    /// Record, defer or drop the call once its response (HTTP `status`) parsed to `usage` and `state`;
+    /// None keeps waiting.
     pub(super) fn settle(
         &mut self,
         usage: Option<UsageInfo>,
@@ -15,10 +16,19 @@ impl StreamProcessor {
         start_time: Instant,
         background: &mut BackgroundCalls,
         ctx: &CallContext,
+        status: Option<u16>,
     ) -> Option<Outcome> {
         match self.continuation.take() {
             Some(id) => self.settle_poll(id, usage, state, background),
-            None => settle_create(usage, state, start_time, background, self.transport, ctx),
+            None => settle_create(
+                usage,
+                state,
+                start_time,
+                background,
+                self.transport,
+                ctx,
+                status,
+            ),
         }
     }
 
@@ -89,6 +99,7 @@ fn record_poll_result(
     record_usage(
         &usage,
         call.start_time,
+        None,
         transport,
         &CallContext {
             pid: call.pid,
@@ -108,10 +119,11 @@ fn settle_create(
     background: &mut BackgroundCalls,
     transport: Transport,
     ctx: &CallContext,
+    status: Option<u16>,
 ) -> Option<Outcome> {
     match (usage, state) {
         (Some(usage), _) => {
-            record_usage(&usage, start_time, transport, ctx);
+            record_usage(&usage, start_time, status, transport, ctx);
             Some(Outcome::Recorded)
         }
         (None, Some(BackgroundState::Running(id))) => {
@@ -177,9 +189,11 @@ pub(crate) fn give_up(call: PendingCall) -> Outcome {
 }
 
 /// Export one finished call's usage and log it.
+/// Record one call; `status` is its HTTP response status where known, logged with a failed call.
 pub(super) fn record_usage(
     usage: &UsageInfo,
     start_time: Instant,
+    status: Option<u16>,
     transport: Transport,
     ctx: &CallContext,
 ) {
@@ -211,9 +225,10 @@ pub(super) fn record_usage(
 
     if is_error {
         info!(
-            "LLM FAILED/ERROR | PID: {} | Model: {} | Transport: {} | Latency: {:.2}s{}{}",
+            "LLM FAILED/ERROR | PID: {} | Model: {} | HTTP {} | Transport: {} | Latency: {:.2}s{}{}",
             ctx.pid,
             model_str,
+            status.map_or_else(|| "status unknown".to_string(), |s| s.to_string()),
             transport.as_str(),
             latency.as_secs_f64(),
             shape_str,

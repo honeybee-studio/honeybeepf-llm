@@ -151,6 +151,13 @@ impl Http11Parser {
         })
     }
 
+    /// The status of the final response head at the start of the buffer, past any 1xx.
+    pub fn response_status(buffer: &[u8]) -> Option<u16> {
+        final_head(buffer)
+            .map(|head| head.status)
+            .filter(|&s| s != 0)
+    }
+
     /// Whether the buffer starts with a final response head that has headers; body text that merely starts with
     /// `HTTP/1.` parses with none, since SSE and JSON bodies have raw newlines only between events.
     pub fn starts_with_response_head(buffer: &[u8]) -> bool {
