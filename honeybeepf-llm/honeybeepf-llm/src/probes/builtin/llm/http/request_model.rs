@@ -68,6 +68,11 @@ pub(crate) fn from_body(body: &[u8]) -> Option<String> {
         .and_then(checked)
 }
 
+/// A model named by a URL query value (`?model=`, Azure `?deployment=`) or a WebSocket session.
+pub(crate) fn from_query(value: &str) -> Option<String> {
+    percent_decode(value).and_then(checked)
+}
+
 fn checked(model: String) -> Option<String> {
     (!model.is_empty()
         && model.len() <= MAX_MODEL_LEN
