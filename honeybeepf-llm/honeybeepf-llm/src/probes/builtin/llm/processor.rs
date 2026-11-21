@@ -539,12 +539,14 @@ impl StreamProcessor {
                             self.state = ProcessorState::ProcessingResponse { start_time, parser };
                             return self.drop_response(UnparsedReason::UsageAbsent, ctx);
                         }
+                        let status = http::Http11Parser::response_status(&self.read_buf);
                         if let Some(outcome) = self.settle(
                             usage,
                             state,
                             start_time,
                             background,
                             &ctx.with_match(self.matched),
+                            status,
                         ) {
                             return outcome;
                         }

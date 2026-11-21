@@ -66,10 +66,17 @@ impl StreamProcessor {
             http::H2Event::Recorded {
                 usage,
                 start,
+                status,
                 midjoin,
                 matched,
             } => {
-                record_usage(&usage, start, self.transport, &ctx.with_match(matched));
+                record_usage(
+                    &usage,
+                    start,
+                    status,
+                    self.transport,
+                    &ctx.with_match(matched),
+                );
                 if midjoin {
                     crate::telemetry::record_h2_midjoin(
                         #[cfg(feature = "k8s")]
