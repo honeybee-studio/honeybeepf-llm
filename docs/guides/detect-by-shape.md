@@ -2,7 +2,8 @@
 
 !!! warning "Experimental"
     Off by default and may change. On a test VM, 44 ordinary HTTPS calls (GitHub, PyPI, npm, Docker Hub and echo
-    services on LLM paths) and 15 non-LLM JSON responses on LLM paths recorded nothing with it on.
+    services on LLM paths) and 15 non-LLM JSON responses on LLM paths recorded nothing with it on. See
+    [experimental features](../experimental.md).
 
 Normally only calls to known hosts are recorded. With detection by shape, the agent also records calls to hosts no
 provider lists, such as a new provider, a gateway or an in-cluster model server, when they look like an LLM call.
