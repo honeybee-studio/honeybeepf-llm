@@ -47,6 +47,9 @@ pub use crate::probes::{
 // Timing constants
 const CLEANUP_INTERVAL_SECS: u64 = 30; // How often to run cleanup
 const CONNECTION_RETENTION_SECS: u64 = 300; // Keep idle connections for 5 minutes
+/// An idle WebSocket is kept longer: a voice or agent session waits between turns, and a stream forgotten
+/// mid-session cannot be read again (its compression window is gone).
+const WEBSOCKET_RETENTION_SECS: u64 = 3600;
 const STATS_LOG_INTERVAL_SECS: u64 = 60; // How often to log event counters (only when changed)
 
 /// Kernel-side event pipeline counters (LLM_STATS map), set once when the probe attaches.
@@ -720,13 +723,15 @@ type StreamMap = Arc<Mutex<HashMap<StreamKey, StreamProcessor>>>;
 /// Locked after the StreamMap whenever both are held.
 type BackgroundMap = Arc<Mutex<BackgroundCalls>>;
 
-/// Feed one ringbuf event to its connection's stream, or end the stream on SSL_free.
+/// Feed one ringbuf event to its connection's stream, or end the stream on SSL_free. A stream left unread is
+/// forgotten, and with `filter` the kernel drops its connection's later calls.
 fn route_event(
     streams: &mut HashMap<StreamKey, StreamProcessor>,
     background: &mut BackgroundCalls,
     header: &LlmEventHeader,
     data: &[u8],
     transport: Transport,
+    filter: Option<&mut ConnFilter>,
     // Called only for events that use it: a pod lookup miss reads /proc.
     #[cfg(feature = "k8s")] pod_info: impl FnOnce() -> Option<Arc<crate::k8s::PodInfo>>,
 ) -> Outcome {
@@ -753,7 +758,7 @@ fn route_event(
         pod_info: pod_info(),
         matched: MatchedBy::Host,
     };
-    stream.handle_fragment(
+    let outcome = stream.handle_fragment(
         LlmDirection::from(header.rw),
         data,
         header.offset,
@@ -761,7 +766,14 @@ fn route_event(
         header.truncated != 0,
         background,
         &ctx,
-    )
+    );
+    if stream.take_skip() {
+        streams.remove(&key);
+        if let Some(filter) = filter {
+            filter.skip_connection(header);
+        }
+    }
+    outcome
 }
 
 /// Parse plaintext (non-TLS) capture records with the same stream machinery as the SSL path. The
@@ -788,9 +800,15 @@ pub(crate) fn spawn_plaintext_parser(bpf: &mut Ebpf, resolver: IdentityResolver)
             let mut calls = handler_background
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            route_event(&mut map, &mut calls, header, data, Transport::Plain, || {
-                resolver.resolve_pod(header.metadata.pid, header.metadata.cgroup_id)
-            });
+            route_event(
+                &mut map,
+                &mut calls,
+                header,
+                data,
+                Transport::Plain,
+                None,
+                || resolver.resolve_pod(header.metadata.pid, header.metadata.cgroup_id),
+            );
         },
     )?;
     start_cleanup_task(state, background);
@@ -900,6 +918,7 @@ impl Probe for LlmProbe {
                     header,
                     data,
                     Transport::Tls,
+                    Some(&mut conn_filter),
                     #[cfg(feature = "k8s")]
                     || _resolver.resolve_pod(header.metadata.pid, header.metadata.cgroup_id),
                 );
@@ -923,7 +942,12 @@ fn start_cleanup_task(state: StreamMap, background: BackgroundMap) {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .retain(|_, v| {
-                    now.duration_since(v.last_activity()).as_secs() < CONNECTION_RETENTION_SECS
+                    let keep = if v.is_websocket() {
+                        WEBSOCKET_RETENTION_SECS
+                    } else {
+                        CONNECTION_RETENTION_SECS
+                    };
+                    now.duration_since(v.last_activity()).as_secs() < keep
                 });
             // Counted after both locks are released: the ringbuf handler waits on them.
             let expired: Vec<_> = background
@@ -1025,6 +1049,7 @@ mod tests {
                     &e.header,
                     e.payload(),
                     Transport::Tls,
+                    None,
                     #[cfg(feature = "k8s")]
                     || None,
                 )
@@ -1158,6 +1183,7 @@ mod tests {
                 &e.header,
                 e.payload(),
                 Transport::Tls,
+                None,
                 #[cfg(feature = "k8s")]
                 || None,
             );

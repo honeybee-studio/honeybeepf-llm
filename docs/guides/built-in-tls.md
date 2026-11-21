@@ -8,9 +8,9 @@ Some programs carry their own TLS library and export no TLS function, so the usu
 Bun builds such as Claude Code and OpenCode (BoringSSL), and Rust programs on rustls with aws-lc such as Codex and
 Goose. With this setting the agent also probes the cipher those libraries encrypt each TLS record with.
 
-Claude Code is recorded. Codex is not yet: it calls the API over a WebSocket, which is not parsed yet
-([#322](https://github.com/honeybee-studio/honeybeepf-llm/issues/322)), and its HTTP fallback is recorded only
-with `SSL_CERT_FILE` set ([#323](https://github.com/honeybee-studio/honeybeepf-llm/issues/323)).
+Claude Code is recorded. Codex is recorded, over its WebSocket and its HTTP fallback, when it runs on rustls, as
+with `SSL_CERT_FILE` set; otherwise it uses a static OpenSSL that is not probed yet
+([#323](https://github.com/honeybee-studio/honeybeepf-llm/issues/323)).
 If Claude Code is all you need to cost, its own OpenTelemetry export (`CLAUDE_CODE_ENABLE_TELEMETRY=1`) reports its
 tokens and cost without this setting.
 
@@ -59,7 +59,6 @@ few milliseconds each. What is read, and for how long, is in the
 | Limit | Effect |
 |---|---|
 | TLS 1.3 only | A connection over TLS 1.2, such as through an old TLS-inspecting proxy, is not recorded. Provider endpoints use TLS 1.3. |
-| WebSocket | Not parsed yet, so Codex's default calls are not recorded. |
 | Connections open before the probes attach | A connection that rustls opened earlier may lose its first request. |
 | TCP kprobes | Once a table is found, every TCP send and receive on the node runs one map lookup. |
 | Function starts | On x86-64, a library built without both CET and frame pointers starts its functions otherwise, so its tables are skipped (debug log). |

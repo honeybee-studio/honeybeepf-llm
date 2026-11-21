@@ -11,6 +11,7 @@ use crate::telemetry::Transport;
 
 mod background;
 mod h2_route;
+mod ws_route;
 pub(crate) use self::background::give_up;
 
 // Buffer size constants
@@ -34,6 +35,8 @@ enum ProcessorState {
     },
     /// An HTTP/2 connection: frames demultiplexed into streams, recorded per stream.
     Http2(Box<http::H2Conn>),
+    /// A WebSocket upgrade to a Realtime or Responses path: each response recorded as it ends.
+    WebSocket(Box<ws_route::WsConn>),
     /// Finished or Invalid
     Finished,
 }
@@ -178,6 +181,8 @@ pub struct StreamProcessor {
     matched: MatchedBy,
     /// Capture transport of this connection; a metric label on the calls it records.
     transport: Transport,
+    /// The kernel should drop this connection's later calls: a WebSocket left unread.
+    skip: bool,
 }
 
 impl Default for StreamProcessor {
@@ -205,6 +210,7 @@ impl StreamProcessor {
             record_only: false,
             matched: MatchedBy::Host,
             transport: Transport::Tls,
+            skip: false,
         }
     }
 
@@ -215,6 +221,16 @@ impl StreamProcessor {
 
     pub fn last_activity(&self) -> Instant {
         self.last_activity
+    }
+
+    /// Whether the connection is an upgraded WebSocket, which stays open and idle far longer than HTTP.
+    pub fn is_websocket(&self) -> bool {
+        matches!(self.state, ProcessorState::WebSocket(_))
+    }
+
+    /// Whether the kernel should now drop this connection's calls; asked once.
+    pub fn take_skip(&mut self) -> bool {
+        std::mem::take(&mut self.skip)
     }
 
     pub fn is_llm(&self) -> bool {
@@ -236,6 +252,9 @@ impl StreamProcessor {
         background: &mut BackgroundCalls,
         ctx: &CallContext,
     ) -> Outcome {
+        if self.is_websocket() {
+            return self.feed_websocket(direction, data, offset, len, truncated, ctx);
+        }
         let end = offset.saturating_add(data.len() as u32);
         let limit = match self.transport {
             Transport::Tls => capture_limit(direction),
@@ -325,6 +344,9 @@ impl StreamProcessor {
                 outcome = Self::count_unparsed(UnparsedReason::ConnectionClosed, ctx);
             }
             return outcome;
+        }
+        if self.is_websocket() {
+            return self.end_websocket(Some(UnparsedReason::ConnectionClosed), false, ctx);
         }
         self.drop_response(UnparsedReason::ConnectionClosed, ctx)
     }
@@ -554,8 +576,9 @@ impl StreamProcessor {
                 }
                 self.state = ProcessorState::ProcessingResponse { start_time, parser };
             }
-            // handle_fragment routes HTTP/2 before this point, so it is never reached here.
+            // handle_fragment routes HTTP/2 and WebSocket before this point, so they are never reached here.
             ProcessorState::Http2(conn) => self.state = ProcessorState::Http2(conn),
+            ProcessorState::WebSocket(ws) => self.state = ProcessorState::WebSocket(ws),
             ProcessorState::Finished => {}
         }
         Outcome::Pending
@@ -615,6 +638,21 @@ impl StreamProcessor {
     fn detect(&mut self, background: &BackgroundCalls, ctx: &CallContext) -> ProcessorState {
         self.record_only = false;
         self.matched = MatchedBy::Host;
+        if let Some(upgrade) = http::websocket::detect_upgrade(&self.write_buf) {
+            debug!(
+                "[LLM] Detected WebSocket: {} (PID: {})",
+                upgrade.path, ctx.pid
+            );
+            self.write_buf = Vec::new();
+            return match ws_route::WsConn::new(upgrade) {
+                Some(ws) => ProcessorState::WebSocket(Box::new(ws)),
+                None => {
+                    debug!("WebSocket of PID {} not read: too many open", ctx.pid);
+                    self.skip = true;
+                    ProcessorState::Finished
+                }
+            };
+        }
         let (version, path, parser): (&str, String, Box<dyn ProtocolParser>) =
             if let Some(d) = http::Http11Parser.detect_request(&self.write_buf) {
                 self.record_only = d.record_only;

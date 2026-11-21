@@ -1891,3 +1891,134 @@ fn response_without_model_takes_the_request_model() {
         "the response's model wins"
     );
 }
+
+const UPGRADE: &[u8] = b"GET /v1/realtime?model=gpt-realtime HTTP/1.1\r\nHost: api.openai.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Extensions: permessage-deflate\r\n\r\n";
+const SWITCHED: &[u8] = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nsec-websocket-extensions: permessage-deflate\r\n\r\n";
+const RT_CREATED: &str = r#"{"type":"response.created","event_id":"e2","response":{"object":"realtime.response","id":"resp_1","status":"in_progress","output":[],"usage":null}}"#;
+const RT_DONE: &str = r#"{"type":"response.done","event_id":"e9","response":{"object":"realtime.response","id":"resp_1","status":"completed","output":[],"usage":{"total_tokens":30,"input_tokens":20,"output_tokens":10,"input_token_details":{"cached_tokens":0,"audio_tokens":12},"output_token_details":{"audio_tokens":8}}}}"#;
+
+/// Server messages compressed with one shared window, as OpenAI sends them, one frame each.
+fn compressed_frames(messages: &[String]) -> Vec<Vec<u8>> {
+    let mut deflate = flate2::Compress::new(flate2::Compression::default(), false);
+    let mut frames = Vec::new();
+    for message in messages {
+        let mut stream = Vec::new();
+        let mut out = Vec::with_capacity(message.len() * 2 + 64);
+        deflate
+            .compress_vec(message.as_bytes(), &mut out, flate2::FlushCompress::Sync)
+            .expect("in-memory compression");
+        out.truncate(out.len() - 4);
+        stream.push(0xc1);
+        match out.len() {
+            n if n < 126 => stream.push(n as u8),
+            n => {
+                stream.push(126);
+                stream.extend((n as u16).to_be_bytes());
+            }
+        }
+        stream.extend(out);
+        frames.push(stream);
+    }
+    frames
+}
+
+fn compressed(messages: &[String]) -> Vec<u8> {
+    compressed_frames(messages).concat()
+}
+
+/// A client frame: masked, as every client sends; never read.
+fn client_frame(len: usize) -> Vec<u8> {
+    let mut frame = vec![0x81, 0xfe];
+    frame.extend((len as u16).to_be_bytes());
+    frame.extend([1, 2, 3, 4]);
+    frame.extend(std::iter::repeat_n(0x55, len));
+    frame
+}
+
+/// An upgraded Realtime connection with its first response started.
+fn realtime_started() -> (StreamProcessor, Vec<Outcome>) {
+    let mut p = StreamProcessor::new();
+    let mut out = send(&mut p, LlmDirection::Write, UPGRADE, None);
+    let mut first = SWITCHED.to_vec();
+    first.extend(compressed(&[RT_CREATED.to_string()]));
+    out.extend(send(&mut p, LlmDirection::Read, &first, None));
+    (p, out)
+}
+
+#[test]
+fn a_realtime_websocket_records_each_response_from_the_server_frames_only() {
+    let mut p = StreamProcessor::new();
+    let mut out = send(&mut p, LlmDirection::Write, UPGRADE, None);
+    assert!(p.is_websocket());
+    // The 101 head, then every server message in one compressed stream, read by 16 KB TLS records.
+    let delta = format!(
+        r#"{{"type":"response.output_audio.delta","response_id":"resp_1","delta":"{}"}}"#,
+        "QUJD".repeat(9000)
+    );
+    let frames = compressed_frames(&[
+        RT_CREATED.to_string(),
+        delta.clone(),
+        delta,
+        RT_DONE.to_string(),
+        RT_CREATED.replace("resp_1", "resp_2"),
+        RT_DONE.replace("resp_1", "resp_2"),
+    ]);
+    // Each response in its own reads, split at 7 bytes so every frame head is cut.
+    for response in [
+        [SWITCHED.to_vec(), frames[..4].concat()].concat(),
+        frames[4..].concat(),
+    ] {
+        for (n, record) in response.chunks(7).enumerate() {
+            out.extend(send(&mut p, LlmDirection::Read, record, None));
+            // The client streams audio between the server's records; its frames are dropped unread.
+            if n % 50 == 0 {
+                out.extend(send(&mut p, LlmDirection::Write, &client_frame(9000), None));
+            }
+        }
+    }
+    assert_eq!(count(&out, Outcome::Recorded), 2);
+    assert!(unparsed(&out).is_empty());
+    assert!(p.is_websocket() && !p.take_skip());
+}
+
+#[test]
+fn a_lost_server_record_ends_the_reading_and_skips_the_connection() {
+    let (mut p, _) = realtime_started();
+    let record = compressed(&[RT_DONE.to_string()]).repeat(400);
+    let out = send(&mut p, LlmDirection::Read, &record, Some(1));
+    assert_eq!(unparsed(&out), [UnparsedReason::CaptureLost]);
+    assert!(!p.is_websocket() && p.take_skip());
+}
+
+#[test]
+fn a_websocket_closed_mid_response_counts_it_unparsed() {
+    let (mut p, out) = realtime_started();
+    assert!(unparsed(&out).is_empty());
+    assert_eq!(
+        p.close(&ctx()),
+        Outcome::Unparsed(UnparsedReason::ConnectionClosed)
+    );
+    assert!(!p.take_skip());
+}
+
+#[test]
+fn a_refused_upgrade_is_no_call_and_skips_the_connection() {
+    let mut p = StreamProcessor::new();
+    let mut out = send(&mut p, LlmDirection::Write, UPGRADE, None);
+    out.extend(send(
+        &mut p,
+        LlmDirection::Read,
+        b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n",
+        None,
+    ));
+    assert!(out.iter().all(|o| *o == Outcome::Pending), "{out:?}");
+    assert!(!p.is_websocket() && p.take_skip());
+}
+
+#[test]
+fn a_get_without_upgrade_on_a_realtime_path_is_not_read() {
+    let mut p = StreamProcessor::new();
+    let get = b"GET /v1/realtime?model=gpt-realtime HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
+    send(&mut p, LlmDirection::Write, get, None);
+    assert!(!p.is_websocket() && !p.is_llm());
+}
