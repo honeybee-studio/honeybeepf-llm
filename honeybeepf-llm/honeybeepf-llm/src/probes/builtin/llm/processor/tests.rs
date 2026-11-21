@@ -1907,12 +1907,90 @@ fn upgraded(answer: &[u8]) -> (StreamProcessor, Vec<Outcome>) {
 fn a_websocket_whose_frames_are_not_read_is_skipped_and_counted_nowhere() {
     for answer in [
         &b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n"[..],
-        b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n\x81\x02{}",
+        b"HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Extensions: permessage-deflate\r\n\r\n",
     ] {
         let (mut p, out) = upgraded(answer);
         assert!(out.iter().all(|o| *o == Outcome::Pending), "{out:?}");
         assert!(!p.is_websocket() && p.take_skip());
     }
+}
+
+const SWITCHED: &[u8] = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n";
+const RT_CREATED: &str = r#"{"type":"response.created","event_id":"e2","response":{"object":"realtime.response","id":"resp_1","status":"in_progress","output":[],"usage":null}}"#;
+const RT_DONE: &str = r#"{"type":"response.done","event_id":"e9","response":{"object":"realtime.response","id":"resp_1","status":"completed","output":[],"usage":{"total_tokens":30,"input_tokens":20,"output_tokens":10,"input_token_details":{"cached_tokens":0,"audio_tokens":12},"output_token_details":{"audio_tokens":8}}}}"#;
+
+/// A server text frame.
+fn ws_text(message: &str) -> Vec<u8> {
+    let mut frame = vec![0x81];
+    match message.len() {
+        n if n < 126 => frame.push(n as u8),
+        n => {
+            frame.push(126);
+            frame.extend((n as u16).to_be_bytes());
+        }
+    }
+    frame.extend(message.as_bytes());
+    frame
+}
+
+/// A client frame: masked, as every client sends; never read.
+fn client_frame(len: usize) -> Vec<u8> {
+    let mut frame = vec![0x81, 0xfe];
+    frame.extend((len as u16).to_be_bytes());
+    frame.extend([1, 2, 3, 4]);
+    frame.extend(std::iter::repeat_n(0x55, len));
+    frame
+}
+
+#[test]
+fn a_realtime_websocket_records_each_response_from_the_server_frames_only() {
+    let (mut p, mut out) = upgraded(&[SWITCHED, &ws_text(RT_CREATED)].concat());
+    let delta = format!(
+        r#"{{"type":"response.output_audio.delta","delta":"{}"}}"#,
+        "QUJD".repeat(4000)
+    );
+    let second = [
+        ws_text(&RT_CREATED.replace("resp_1", "resp_2")),
+        ws_text(&RT_DONE.replace("resp_1", "resp_2")),
+    ];
+    // Each response in its own reads, cut every 7 bytes so every frame head is split, with client audio between.
+    for response in [
+        [ws_text(&delta), ws_text(RT_DONE)].concat(),
+        second.concat(),
+    ] {
+        for (n, record) in response.chunks(7).enumerate() {
+            out.extend(send(&mut p, LlmDirection::Read, record, None));
+            if n % 50 == 0 {
+                out.extend(send(&mut p, LlmDirection::Write, &client_frame(9000), None));
+            }
+        }
+    }
+    assert_eq!(count(&out, Outcome::Recorded), 2);
+    assert!(unparsed(&out).is_empty());
+    assert!(p.is_websocket() && !p.take_skip());
+}
+
+#[test]
+fn a_lost_server_record_ends_the_reading_and_counts_the_open_response() {
+    let (mut p, _) = upgraded(&[SWITCHED, &ws_text(RT_CREATED)].concat());
+    let out = send(
+        &mut p,
+        LlmDirection::Read,
+        &ws_text(RT_DONE).repeat(60),
+        Some(1),
+    );
+    assert_eq!(unparsed(&out), [UnparsedReason::CaptureLost]);
+    assert!(!p.is_websocket() && p.take_skip());
+}
+
+#[test]
+fn a_websocket_closed_mid_response_counts_it_unparsed() {
+    let (mut p, _) = upgraded(&[SWITCHED, &ws_text(RT_CREATED)].concat());
+    assert_eq!(
+        p.close(&ctx()),
+        Outcome::Unparsed(UnparsedReason::ConnectionClosed)
+    );
+    assert!(!p.take_skip());
 }
 
 #[test]

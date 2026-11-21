@@ -35,7 +35,7 @@ enum ProcessorState {
     },
     /// An HTTP/2 connection: frames demultiplexed into streams, recorded per stream.
     Http2(Box<http::H2Conn>),
-    /// A WebSocket upgrade to a Realtime or Responses path.
+    /// A WebSocket upgrade to a Realtime or Responses path: each response recorded as it ends.
     WebSocket(Box<ws_route::WsConn>),
     /// Finished or Invalid
     Finished,
@@ -223,7 +223,7 @@ impl StreamProcessor {
         self.last_activity
     }
 
-    /// Whether the connection is an upgraded WebSocket.
+    /// Whether the connection is an upgraded WebSocket, which stays open and idle far longer than HTTP.
     pub fn is_websocket(&self) -> bool {
         matches!(self.state, ProcessorState::WebSocket(_))
     }
@@ -346,7 +346,7 @@ impl StreamProcessor {
             return outcome;
         }
         if self.is_websocket() {
-            return self.end_websocket(false);
+            return self.end_websocket(Some(UnparsedReason::ConnectionClosed), false, ctx);
         }
         self.drop_response(UnparsedReason::ConnectionClosed, ctx)
     }
@@ -644,7 +644,14 @@ impl StreamProcessor {
                 upgrade.path, ctx.pid
             );
             self.write_buf = Vec::new();
-            return ProcessorState::WebSocket(Box::new(ws_route::WsConn::new(upgrade)));
+            return match ws_route::WsConn::new(upgrade) {
+                Some(ws) => ProcessorState::WebSocket(Box::new(ws)),
+                None => {
+                    debug!("WebSocket of PID {} not read: too many open", ctx.pid);
+                    self.skip = true;
+                    ProcessorState::Finished
+                }
+            };
         }
         let (version, path, parser): (&str, String, Box<dyn ProtocolParser>) =
             if let Some(d) = http::Http11Parser.detect_request(&self.write_buf) {
