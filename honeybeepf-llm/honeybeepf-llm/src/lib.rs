@@ -119,6 +119,9 @@ impl HoneyBeeEngine {
                     .clone()
                     .unwrap_or_default()
             });
+            if let Some(on) = experimental_on(detect_by_shape, aead.is_some()) {
+                info!("{on}");
+            }
             dynamic_probes.push(Box::new(LlmProbe::new(executables, detect_by_shape, aead)));
         }
 
@@ -486,12 +489,34 @@ fn tail_call_allowed(kernel: KernelVersion) -> bool {
         || cfg!(target_arch = "x86_64") && kernel >= KernelVersion::new(5, 10, 0)
 }
 
+/// The startup line naming the experimental features that are on, by their chart names; none when all are off.
+fn experimental_on(detect_by_shape: bool, aead: bool) -> Option<String> {
+    let on: Vec<&str> = [("detectByShape", detect_by_shape), ("aead", aead)]
+        .into_iter()
+        .filter_map(|(name, on)| on.then_some(name))
+        .collect();
+    (!on.is_empty()).then(|| format!("experimental features on: {}", on.join(", ")))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
 
     use super::*;
     use crate::{probes::POLL_INTERVAL_MS, settings::BuiltinProbes};
+
+    #[test]
+    fn experimental_features_that_are_on_are_named_at_startup() {
+        assert_eq!(experimental_on(false, false), None);
+        assert_eq!(
+            experimental_on(false, true).as_deref(),
+            Some("experimental features on: aead")
+        );
+        assert_eq!(
+            experimental_on(true, true).as_deref(),
+            Some("experimental features on: detectByShape, aead")
+        );
+    }
 
     #[test]
     fn rescans_run_once_per_debounce_and_only_when_asked() {
