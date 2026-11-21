@@ -19,8 +19,8 @@ pub struct BuiltinProbes {
     /// Experimental: record LLM calls to hosts no provider lists, by request path + response usage
     /// shape; off by default.
     pub llm_detect_by_shape: Option<bool>,
-    /// Experimental: scan the memory of each new process for the AEAD tables of a BoringSSL or aws-lc built
-    /// into its executable (Bun, rustls) and log them; off by default.
+    /// Experimental: probe the AEAD cipher of a BoringSSL or aws-lc built into an executable (Bun, rustls),
+    /// found by scanning the memory of each new process; off by default.
     pub llm_aead: Option<bool>,
     /// Executable names the AEAD scan is limited to (`claude`, `codex`); any with the library when unset. A
     /// file named only by its version (`claude/versions/2.1.328`) goes by its program's folder.

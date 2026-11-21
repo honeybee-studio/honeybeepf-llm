@@ -48,6 +48,13 @@ builtinProbes:
     # response carries that family's usage fields; off records listed hosts only (default).
     # Calls kept this way carry match="shape" on their metrics; host-matched calls have no match label.
     detectByShape: false
+    # Experimental: also record programs with their own BoringSSL or aws-lc and no TLS symbols, such as Claude
+    # Code, by probing the cipher of each TLS 1.3 record (docs/guides/built-in-tls.md).
+    aead: false
+    # With aead on, only scan executables of these names (with or without an extension: claude matches claude.exe),
+    # e.g. [claude, codex]. Empty scans any executable with BoringSSL or aws-lc built in.
+    # A name is compared with the file a process runs, not a symlink to it: a renamed install is left out.
+    aeadExecutables: []
     # Record only the pods of these namespaces, e.g. [team-a, team-b]: the TLS data of every other pod and of
     # host processes is never copied out of the kernel (docs/guides/namespace-scope.md). Needs cgroup v2.
     namespaces: []

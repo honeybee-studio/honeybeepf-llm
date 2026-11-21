@@ -26,6 +26,12 @@ data:
   {{- if not (kindIs "invalid" .Values.builtinProbes.llm.detectByShape) }}
   BUILTIN_PROBES__LLM_DETECT_BY_SHAPE: {{ .Values.builtinProbes.llm.detectByShape | quote }}
   {{- end }}
+  {{- if not (kindIs "invalid" .Values.builtinProbes.llm.aead) }}
+  BUILTIN_PROBES__LLM_AEAD: {{ .Values.builtinProbes.llm.aead | quote }}
+  {{- end }}
+  {{- if .Values.builtinProbes.llm.aeadExecutables }}
+  BUILTIN_PROBES__LLM_AEAD_EXECUTABLES: {{ .Values.builtinProbes.llm.aeadExecutables | join "," | quote }}
+  {{- end }}
   {{- if .Values.builtinProbes.llm.namespaces }}
   BUILTIN_PROBES__LLM_NAMESPACES: {{ .Values.builtinProbes.llm.namespaces | join "," | quote }}
   {{- end }}

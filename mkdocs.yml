@@ -105,6 +105,7 @@ nav:
       - Add your own prices: guides/prices.md
       - Self-hosted models over plain HTTP: guides/plaintext.md
       - Detect unlisted hosts by shape: guides/detect-by-shape.md
+      - Programs with built-in TLS: guides/built-in-tls.md
       - Compare workload variants: guides/pod-labels.md
       - Record only some namespaces: guides/namespace-scope.md
       - Logs and audit events: guides/logs.md

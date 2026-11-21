@@ -39,7 +39,7 @@ fn goroutine_key(g: u64) -> [u64; 2] {
 }
 
 #[inline(always)]
-fn emit(call: &SslCall, rw: u8) {
+pub(super) fn emit(call: &SslCall, rw: u8) {
     if filter::drops(call, rw) {
         count(LlmStat::Filtered);
     } else {

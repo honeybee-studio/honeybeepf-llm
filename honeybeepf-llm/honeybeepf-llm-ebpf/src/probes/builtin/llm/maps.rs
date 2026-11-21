@@ -33,6 +33,38 @@ pub static READBYTES_PTRS: HashMap<u32, u64> = HashMap::with_max_entries(MAX_ENT
 #[map]
 pub static GO_READS: LruHashMap<[u64; 2], [u64; 3]> = LruHashMap::with_max_entries(MAX_ENTRIES, 0);
 
+/// Most TLS records kept per thread between two TCP sends; a client's first send holds its handshake
+/// record and two full records.
+pub const SEAL_QUEUE: usize = 4;
+
+/// The TLS records a thread sealed with a context of unknown socket since its last TCP send, each as
+/// [buf, len, context]. A null `buf` has no data: `len` 0 starts or ends a TLS session, any other only binds.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SealQueue {
+    pub len: u64,
+    pub records: [[u64; 3]; SEAL_QUEUE],
+}
+
+#[map]
+pub static AEAD_SEALS: LruHashMap<u32, SealQueue> = LruHashMap::with_max_entries(MAX_ENTRIES, 0);
+
+/// TCP socket of each cipher context, keyed by [tgid, context].
+#[map]
+pub static AEAD_CTX: LruHashMap<[u64; 2], u64> = LruHashMap::with_max_entries(MAX_ENTRIES, 0);
+
+/// [buf, len, context] of the TLS record a thread is opening.
+#[map]
+pub static AEAD_OPENS: LruHashMap<u32, [u64; 3]> = LruHashMap::with_max_entries(MAX_ENTRIES, 0);
+
+/// Socket of each thread's last TCP receive, in the processes of `AEAD_TGIDS`.
+#[map]
+pub static AEAD_RECV_SOCK: LruHashMap<u32, u64> = LruHashMap::with_max_entries(MAX_ENTRIES, 0);
+
+/// Processes that called a probed AEAD function, or that userspace saw start from a probed executable.
+#[map]
+pub static AEAD_TGIDS: LruHashMap<u32, u8> = LruHashMap::with_max_entries(MAX_ENTRIES, 0);
+
 /// `ssl_class::ClassEntry` of each connection, keyed by [tgid, SSL*]; userspace adds SkipConnection by Host.
 #[map]
 pub static SSL_CLASS: LruHashMap<[u64; 2], u64> =

@@ -17,7 +17,7 @@ use std::{
 use anyhow::{Context, Result};
 use aya::{
     Ebpf,
-    maps::{MapData, PerCpuArray},
+    maps::{HashMap as BpfHashMap, MapData, PerCpuArray},
 };
 use background::BackgroundCalls;
 use conn_filter::ConnFilter;
@@ -31,8 +31,8 @@ use crate::telemetry::Transport;
 use regex::Regex;
 
 use crate::probes::{
-    DynamicProbe, IdentityResolver, Probe, ProcessInfo, TracepointConfig, attach_tracepoint,
-    attach_uprobe, detach_uprobe,
+    DynamicProbe, IdentityResolver, Probe, ProcessInfo, TracepointConfig, attach_kprobe,
+    attach_tracepoint, attach_uprobe, detach_uprobe,
     discovery::{
         FileId, exe_link_target, exported_function_offsets, file_identity, find_libraries_all,
         find_process_executables,
@@ -118,6 +118,22 @@ const GO_TLS_PROGRAMS: [&str; 4] = [
     "probe_go_tls_read_enter",
     "probe_go_tls_read_return",
     "probe_go_tls_close",
+];
+
+/// AEAD programs for a TLS library built into an executable: context init and cleanup, seal entry,
+/// open entry and open return.
+const AEAD_PROGRAMS: [&str; 5] = [
+    "probe_aead_init",
+    "probe_aead_cleanup",
+    "probe_aead_seal",
+    "probe_aead_open_enter",
+    "probe_aead_open_exit",
+];
+
+/// Kernel functions that tie a sealed or opened record to its TCP socket, with their programs.
+const AEAD_SOCKET_PROBES: [(&str, &str); 2] = [
+    ("probe_aead_tcp_sendmsg", "tcp_sendmsg"),
+    ("probe_aead_tcp_recvmsg", "tcp_recvmsg"),
 ];
 
 /// Scans of one process: each AES-GCM table is filled at the first TLS handshake that uses its cipher.
@@ -302,6 +318,10 @@ struct AeadScans {
     files: HashMap<FileId, FileScan>,
     /// Tables found in each file; its other processes share them.
     found: HashSet<(FileId, aead::Table)>,
+    /// (file, program, offset) of each attached probe, since tables share functions.
+    attached: HashSet<(FileId, &'static str, u64)>,
+    /// Whether the socket probes attached; `None` until the first table is found.
+    socket_probes: Option<bool>,
 }
 
 /// Folders a version-named executable sits in under its program's folder (`claude/versions/2.1.328`).
@@ -350,7 +370,7 @@ impl LlmProbe {
 
     /// Queue the process for an AEAD scan unless a probe is attached to its executable already, or
     /// `limit` processes wait.
-    fn queue_aead_scan(&self, pid: u32, path: &str, limit: usize) {
+    fn queue_aead_scan(&self, bpf: &mut Ebpf, pid: u32, path: &str, limit: usize) {
         let Some(scans) = &self.aead else { return };
         let Some(id) = file_identity(path) else {
             return;
@@ -363,8 +383,13 @@ impl LlmProbe {
         let mut scans = scans
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !probed
-            && scans.pending.len() < limit
+        if probed || scans.socket_probes == Some(false) {
+            return;
+        }
+        if scans.files.get(&id) == Some(&FileScan::Done) {
+            // Its probes are live in every process of the file; only the sockets are left to learn.
+            track_receives(bpf, pid);
+        } else if scans.pending.len() < limit
             && scans.pending.iter().all(|p| p.pid != pid)
             && scans.should_scan(id, path)
         {
@@ -376,7 +401,7 @@ impl LlmProbe {
                 scans: 0,
                 wait: 0,
             };
-            scans.skip_known_tables(&mut process);
+            scans.skip_known_tables(bpf, &mut process);
             scans.pending.push(process);
         }
     }
@@ -509,6 +534,18 @@ fn log_executable(path: &str, id: FileId, result: Result<Option<ExeTls>>) {
     }
 }
 
+/// Track the TCP receives of `pid`, so a cipher context it keys is bound to the socket just read.
+fn track_receives(bpf: &mut Ebpf, pid: u32) {
+    let tracked = bpf
+        .map_mut("AEAD_TGIDS")
+        .context("AEAD_TGIDS map not found")
+        .and_then(|map| Ok(BpfHashMap::<_, u32, u8>::try_from(map)?))
+        .and_then(|mut map| Ok(map.insert(pid, 1, 0)?));
+    if let Err(e) = tracked {
+        debug!("TCP receives of PID {pid} not tracked: {e:#}");
+    }
+}
+
 impl AeadScans {
     /// Whether processes of the file are scanned: it is named (when names are set), has a BoringSSL or
     /// aws-lc built in, and not all of its tables are known. The file is read once, no process memory.
@@ -525,19 +562,20 @@ impl AeadScans {
 
     /// The constant tables of a file are known from its first scan: only the tables this process fills
     /// are left to find.
-    fn skip_known_tables(&self, p: &mut AeadPending) {
+    fn skip_known_tables(&self, bpf: &mut Ebpf, p: &mut AeadPending) {
         if p.scans == 0 && self.found.iter().any(|(file, _)| *file == p.id) {
+            track_receives(bpf, p.pid);
             p.scans = 1;
         }
     }
 
-    /// Scan each process that is due and log the tables found.
-    fn scan_pending(&mut self) {
+    /// Scan each process that is due and probe the tables found.
+    fn scan_pending(&mut self, bpf: &mut Ebpf) {
         for mut p in std::mem::take(&mut self.pending) {
             if self.files.get(&p.id) != Some(&FileScan::Scan) {
                 continue;
             }
-            self.skip_known_tables(&mut p);
+            self.skip_known_tables(bpf, &mut p);
             if p.wait > 0 || (p.scans == 0 && p.queued.elapsed() < AEAD_SETTLE) {
                 p.wait = p.wait.saturating_sub(1);
                 if std::path::Path::new(&format!("/proc/{}", p.pid)).exists() {
@@ -560,30 +598,39 @@ impl AeadScans {
                 tables.len()
             );
             p.scans += 1;
-            if p.scans == 1 && tables.is_empty() {
-                self.files.insert(p.id, FileScan::Skip);
-                continue;
+            if p.scans == 1 {
+                if tables.is_empty() {
+                    self.files.insert(p.id, FileScan::Skip);
+                    continue;
+                }
+                track_receives(bpf, p.pid);
             }
             for &table in &tables {
-                if self.found.insert((p.id, table)) {
-                    info!(
-                        "Built-in {} AEAD table in {} (PID {}): init {:#x}/{:#x}, cleanup {:#x}, seal {:#x}, open {:#x}",
-                        table.library.name(),
-                        p.path,
-                        p.pid,
-                        table.init[0],
-                        table.init[1],
-                        table.cleanup,
-                        table.seal,
-                        table.open
-                    );
+                if !self.found.insert((p.id, table)) {
+                    continue;
+                }
+                match self.attach(bpf, &p, &table) {
+                    Ok(0) => {}
+                    Ok(_) => audit::attach(
+                        "exe_aead",
+                        &p.path,
+                        p.id.ino(),
+                        &format!(
+                            "built-in {}, seal {:#x}, open {:#x}, PID {}",
+                            table.library.name(),
+                            table.seal,
+                            table.open,
+                            p.pid
+                        ),
+                    ),
+                    Err(e) => audit::attach_failed(&p.path, &e),
                 }
             }
             if tables.iter().any(|t| t.filled_at_run_time) {
                 self.files.insert(p.id, FileScan::Done);
                 continue;
             }
-            if p.scans < AEAD_SCANS {
+            if p.scans < AEAD_SCANS && self.socket_probes != Some(false) {
                 p.wait = (1 << p.scans.saturating_sub(AEAD_DENSE_SCANS)) - 1;
                 self.pending.push(p);
             }
@@ -591,13 +638,47 @@ impl AeadScans {
     }
 }
 
+impl AeadScans {
+    /// Attach the programs to the table's functions not probed yet; returns how many were attached.
+    fn attach(&mut self, bpf: &mut Ebpf, p: &AeadPending, table: &aead::Table) -> Result<usize> {
+        if self.socket_probes.is_none() {
+            let attached = AEAD_SOCKET_PROBES
+                .iter()
+                .try_for_each(|(prog, func)| attach_kprobe(bpf, prog, func));
+            self.socket_probes = Some(attached.is_ok());
+            attached.context("AEAD probes need tcp_sendmsg and tcp_recvmsg")?;
+        }
+        if self.socket_probes != Some(true) {
+            return Ok(0);
+        }
+        let [init, cleanup, seal, open_enter, open_exit] = AEAD_PROGRAMS;
+        // Seal and open come first: they work without the other two.
+        let sites = [
+            (seal, "AEAD seal", table.seal),
+            (open_enter, "AEAD open", table.open),
+            (open_exit, "AEAD open", table.open),
+            (init, "AEAD init", table.init[0]),
+            (init, "AEAD init", table.init[1]),
+            (cleanup, "AEAD cleanup", table.cleanup),
+        ];
+        let mut attached = 0;
+        for (prog, func, offset) in sites {
+            if offset != 0 && self.attached.insert((p.id, prog, offset)) {
+                attach_uprobe(bpf, prog, func, &p.path, offset)?;
+                attached += 1;
+            }
+        }
+        Ok(attached)
+    }
+}
+
 impl DynamicProbe for LlmProbe {
-    fn poll(&self, _bpf: &mut Ebpf) {
+    fn poll(&self, bpf: &mut Ebpf) {
         if let Some(scans) = &self.aead {
             scans
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .scan_pending();
+                .scan_pending(bpf);
         }
     }
 
@@ -627,7 +708,7 @@ impl DynamicProbe for LlmProbe {
             log_executable(path, id, result);
         }
         if let Some(path) = process_info.exe.as_ref().filter(|_| self.executables) {
-            self.queue_aead_scan(process_info.pid, path, AEAD_PENDING);
+            self.queue_aead_scan(bpf, process_info.pid, path, AEAD_PENDING);
         }
         Ok(())
     }
@@ -747,13 +828,18 @@ impl Probe for LlmProbe {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .names;
             warn!(
-                "AEAD table scan for built-in BoringSSL and aws-lc is on (experimental): tables are only logged; executables: {}",
+                "AEAD probes for built-in BoringSSL and aws-lc are on (experimental); executables: {}",
                 if names.is_empty() {
                     "any with the library".to_owned()
                 } else {
                     names.join(", ")
                 }
             );
+            for prog in AEAD_PROGRAMS {
+                if let Err(e) = load_uprobe(bpf, prog) {
+                    warn!("AEAD probe {prog} failed to load: {e:#}");
+                }
+            }
         }
 
         // Skip libcrypto for SSL_* probes as they usually don't contain them
@@ -775,7 +861,7 @@ impl Probe for LlmProbe {
             // Every running process is queued: the first scan of a file drops the others of it.
             for (pid, path) in &processes {
                 if *pid != std::process::id() {
-                    self.queue_aead_scan(*pid, path, usize::MAX);
+                    self.queue_aead_scan(bpf, *pid, path, usize::MAX);
                 }
             }
         }
@@ -1236,7 +1322,11 @@ mod tests {
                 programs.insert(sym.name()?);
             }
         }
-        let tabled: HashSet<&str> = tabled.into_keys().chain(GO_TLS_PROGRAMS).collect();
+        let tabled: HashSet<&str> = tabled
+            .into_keys()
+            .chain(GO_TLS_PROGRAMS)
+            .chain(AEAD_PROGRAMS)
+            .collect();
         assert_eq!(programs, tabled, "uprobe programs vs probe tables");
         Ok(())
     }
