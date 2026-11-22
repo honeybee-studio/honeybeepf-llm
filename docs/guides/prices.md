@@ -43,6 +43,19 @@ With the built-in table `2026-10-26`, the example above gives (USD per million t
 | `my-vllm-llama` | none (`unknown_model`) | 0.10 / 0.20 / none | added |
 | `claude-sonnet-4-5` | 3.00 / 15.00 / 0.30 | unchanged | another provider |
 
+## Audio, image and video tokens
+
+A model that bills a modality apart from text lists it under `modalities`; text is what remains of each count:
+
+```yaml
+gpt-realtime-mini: {input: 0.6, cache_read: 0.06, output: 2.4,
+                    modalities: {audio: {input: 10, cache_read: 0.3, output: 20}, image: {input: 0.8}}}
+```
+
+A modality without its own price pays the base `input`, `cache_read` or `output`. The modality split comes from the
+response's usage (OpenAI `*_tokens_details`, Realtime `input_token_details.cached_tokens_details` for cache reads,
+Gemini `*TokensDetails`).
+
 ## When it applies
 
 - The chart mounts the table as a file (`LLM_PRICES_CONFIG_FILE`) that the agent rereads every 10 seconds: after a

@@ -183,17 +183,26 @@ impl PriceTable {
         let uncached = uncached_input(usage)?;
         let price = |tokens: u64, rate: Option<f64>| token_cost(tokens, rate, factor);
         Ok(Cost {
-            // Input and output are split by modality (text is the remainder); cache reads and writes
-            // keep the base cache rates, so a modality above the uncached input bills there as text.
+            // Input, cache reads and output are split by modality (text is the remainder); the uncached
+            // input's split leaves out the cached modalities. Cache writes keep the base rates.
             input: direction_cost(
                 uncached,
-                usage.input_modalities,
+                usage
+                    .input_modalities
+                    .saturating_sub(usage.cache_read_modalities),
                 rates.input,
                 &rates.modalities,
                 |rate| rate.input,
                 factor,
             )?,
-            cache_read: price(read, rates.cache_read)?,
+            cache_read: direction_cost(
+                read,
+                usage.cache_read_modalities,
+                rates.cache_read,
+                &rates.modalities,
+                |rate| rate.cache_read,
+                factor,
+            )?,
             cache_write: price(write - long, rates.cache_write)?
                 + price(long, rates.cache_write_long)?,
             output: direction_cost(

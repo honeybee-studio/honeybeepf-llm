@@ -38,6 +38,9 @@ pub struct ModalityConfig {
     pub input_details: Option<String>,
     /// OpenAI: object holding output `audio_tokens`/`image_tokens` (e.g. `completion_tokens_details`).
     pub output_details: Option<String>,
+    /// OpenAI: object holding the cached input's `audio_tokens`/`image_tokens` (Realtime
+    /// `input_token_details.cached_tokens_details`).
+    pub cache_read_details: Option<String>,
     /// Gemini: array of `{modality, tokenCount}` for input (e.g. `promptTokensDetails`).
     pub input_array: Option<String>,
     /// Gemini: array of `{modality, tokenCount}` for output (e.g. `candidatesTokensDetails`).
@@ -160,6 +163,7 @@ struct FlatResponseConfig {
     root_object: Option<String>,
     input_modality_details: Option<String>,
     output_modality_details: Option<String>,
+    cache_read_modality_details: Option<String>,
     input_modality_array: Option<String>,
     output_modality_array: Option<String>,
     required_root_field: Option<String>,
@@ -199,6 +203,7 @@ impl From<FlatResponseConfig> for ResponseConfig {
             modalities: ModalityConfig {
                 input_details: flat.input_modality_details,
                 output_details: flat.output_modality_details,
+                cache_read_details: flat.cache_read_modality_details,
                 input_array: flat.input_modality_array,
                 output_array: flat.output_modality_array,
             },

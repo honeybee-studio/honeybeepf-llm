@@ -39,11 +39,13 @@ pub(super) struct Modalities {
     pub(super) video: Option<ModalityRate>,
 }
 
-/// One modality's input and output price in USD per million tokens.
+/// One modality's input, cached input and output price in USD per million tokens.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ModalityRate {
     pub(super) input: Option<f64>,
+    /// A cache read of this modality; without it, the base `cache_read`.
+    pub(super) cache_read: Option<f64>,
     pub(super) output: Option<f64>,
 }
 
@@ -75,7 +77,7 @@ impl Rates {
         ]
         .into_iter()
         .flatten()
-        .flat_map(|rate| [rate.input, rate.output]);
+        .flat_map(|rate| [rate.input, rate.cache_read, rate.output]);
         let in_range = |p: f64| p.is_sign_positive() && p <= MAX_PRICE;
         if !base.into_iter().chain(modality).flatten().all(in_range) {
             return Err("prices must be between 0 and 1e6");
