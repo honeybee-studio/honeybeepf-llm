@@ -1135,7 +1135,8 @@ fn test_realtime_usage_is_read_with_its_audio_tokens() {
     let registry = ProviderRegistry::with_defaults();
     let response = json!({"object": "realtime.response", "id": "resp_1", "status": "completed",
         "usage": {"total_tokens": 330, "input_tokens": 250, "output_tokens": 80,
-            "input_token_details": {"text_tokens": 50, "audio_tokens": 200, "cached_tokens": 64},
+            "input_token_details": {"text_tokens": 50, "audio_tokens": 200, "cached_tokens": 64,
+                "cached_tokens_details": {"text_tokens": 0, "audio_tokens": 64}},
             "output_token_details": {"text_tokens": 20, "audio_tokens": 60}}});
     let usage = parse_in_order(&registry.providers, &response).expect("realtime usage");
     assert_eq!((usage.prompt_tokens, usage.completion_tokens), (250, 80));
@@ -1144,6 +1145,8 @@ fn test_realtime_usage_is_read_with_its_audio_tokens() {
         (200, 60)
     );
     assert_eq!(usage.cache_read_tokens, Some(64));
+    // The cached audio pays its own cache price on the mini models.
+    assert_eq!(usage.cache_read_modalities.audio, 64);
     assert_eq!(usage.model, None);
 }
 

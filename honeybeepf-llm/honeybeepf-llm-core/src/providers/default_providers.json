@@ -121,6 +121,7 @@
         "cache_read_tokens": "input_token_details.cached_tokens",
         "required_field": "input_token_details",
         "input_modality_details": "input_token_details",
+        "cache_read_modality_details": "input_token_details.cached_tokens_details",
         "output_modality_details": "output_token_details"
       },
       "request_extractor": "none"
