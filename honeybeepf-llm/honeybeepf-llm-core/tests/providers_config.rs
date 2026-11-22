@@ -30,7 +30,7 @@ struct ProviderUrls {
 #[test]
 fn test_default_providers() {
     let registry = ProviderRegistry::with_defaults();
-    assert_eq!(registry.providers.len(), 17);
+    assert_eq!(registry.providers.len(), 18);
 }
 
 // Shape detection: the path-only fallback matches an LLM path on a host no entry lists.
@@ -152,12 +152,17 @@ fn test_default_provider_hosts() {
         "api.upstage.ai",
         "api.ai21.com",
     ];
-    let expected: [&[&str]; 17] = [
+    let expected: [&[&str]; 18] = [
         &openai,
         &openai,
         &media,
         &openai,
         &media,
+        &[
+            "api.openai.com",
+            "openai.azure.com",
+            "services.ai.azure.com",
+        ],
         &[
             "api.anthropic.com",
             "aws-external-anthropic.*.api.aws",
@@ -382,6 +387,7 @@ fn test_user_providers_are_added_to_the_defaults() {
             "openai",
             "openai",
             "openai",
+            "openai",
             "anthropic",
             "gemini",
             "gemini",
@@ -432,6 +438,7 @@ fn test_user_provider_replaces_defaults_with_its_name_in_their_place() {
             "openai",
             "openai",
             "openai",
+            "openai",
             "anthropic",
             "anthropic",
             "gemini",
@@ -447,7 +454,7 @@ fn test_user_provider_replaces_defaults_with_its_name_in_their_place() {
             "ollama"
         ]
     );
-    assert_eq!(registry.providers[6].paths, [":rawPredict$"]);
+    assert_eq!(registry.providers[7].paths, [":rawPredict$"]);
     assert_eq!(
         provider_for(&registry, "api.anthropic.com/v1/messages"),
         None

@@ -16,6 +16,7 @@ mod registry;
 pub(crate) mod request_model;
 mod sse;
 mod sse_stream;
+pub(crate) mod websocket;
 
 // Re-export main types
 pub use body::BackgroundState;

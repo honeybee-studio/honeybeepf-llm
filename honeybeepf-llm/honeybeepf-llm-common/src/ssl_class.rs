@@ -5,7 +5,8 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SslClass {
     Unknown = 0,
-    /// Last request is a POST, or a GET of a Responses object whose usage may arrive only there.
+    /// Last request is a POST, a GET of a Responses object whose usage may arrive only there, or a GET that
+    /// may open a Realtime or Responses WebSocket.
     Send = 1,
     /// Last request is another method: drop until the next request.
     SkipRequest = 2,
@@ -69,24 +70,35 @@ impl ClassEntry {
 /// `GET /openai/v1/responses/`.
 pub type GetHead = [u64; 4];
 
-/// Whether a GET head asks for a stored Responses object, which carries a background call's usage.
+/// Whether a GET head asks for a stored Responses object, which carries a background call's usage, or may
+/// open a WebSocket on a Realtime or Responses path; userspace reads the Upgrade header and skips the rest.
 #[inline(always)]
 pub fn requests_response(head: &GetHead) -> bool {
-    // Where `/responses/` starts after `GET `, `/v1`, `/openai`, `/openai/v1`; the prefix bytes are not
+    // Where the path starts after `GET `, `/v1`, `/openai`, `/openai/v1`; the prefix bytes are not
     // compared, so another prefix of the same length only sends a GET userspace ignores.
-    responses_at(head, 4)
-        || responses_at(head, 7)
-        || responses_at(head, 11)
-        || responses_at(head, 14)
+    path_at(head, 4) || path_at(head, 7) || path_at(head, 11) || path_at(head, 14)
 }
 
-/// Whether `/responses/` starts at byte `at`, read by shifting aligned words: eBPF rejects unaligned stack loads.
+/// Whether `/responses` then `/`, ` ` or `?`, or `/realtime` then ` ` or `?`, starts at byte `at`, read by
+/// shifting aligned words: eBPF rejects unaligned stack loads.
 #[inline(always)]
-fn responses_at(head: &GetHead, at: usize) -> bool {
-    const P: &[u8; 11] = b"/responses/";
-    const FIRST: u64 = u64::from_le_bytes([P[0], P[1], P[2], P[3], P[4], P[5], P[6], P[7]]);
-    const REST: u64 = u32::from_le_bytes([P[8], P[9], P[10], 0]) as u64;
-    word_at(head, at) == FIRST && word_at(head, at + 8) & 0xff_ffff == REST
+fn path_at(head: &GetHead, at: usize) -> bool {
+    /// The first 8 bytes of `p`.
+    const fn first(p: &[u8]) -> u64 {
+        u64::from_le_bytes([p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]])
+    }
+    const fn rest(a: u8, b: u8, c: u8) -> u64 {
+        u32::from_le_bytes([a, b, c, 0]) as u64
+    }
+    const RESPONSES: u64 = first(b"/responses");
+    const REALTIME: u64 = first(b"/realtime");
+    let (word, next) = (word_at(head, at), word_at(head, at + 8));
+    let (three, two) = (next & 0xff_ffff, next & 0xffff);
+    word == RESPONSES
+        && (three == rest(b'e', b's', b'/')
+            || three == rest(b'e', b's', b' ')
+            || three == rest(b'e', b's', b'?'))
+        || word == REALTIME && (two == rest(b'e', b' ', 0) || two == rest(b'e', b'?', 0))
 }
 
 /// The 8 bytes from byte `at`; `at` is a constant of at most 22, so the indexes fold away.
@@ -241,12 +253,28 @@ mod tests {
     }
 
     #[test]
+    fn a_get_that_may_open_a_websocket_is_sent() {
+        for req in [
+            &b"GET /v1/realtime?model=gpt-realtime HTTP/1.1\r\nHost: api.openai.com\r\n"[..],
+            b"GET /openai/v1/realtime?model=rt HTTP/1.1\r\nHost: x.openai.azure.com\r\n",
+            b"GET /openai/realtime?api-version=2025-04-01-preview&deployment=rt HTTP/1.1\r\n",
+            b"GET /realtime HTTP/1.1\r\nHost: litellm:4000\r\nUpgrade: websocket\r\n",
+            b"GET /v1/responses HTTP/1.1\r\nHost: api.openai.com\r\nUpgrade: websocket\r\n",
+            b"GET /openai/v1/responses?api-version=1 HTTP/1.1\r\nHost: x.openai.azure.com\r\n",
+        ] {
+            assert_eq!(class_after(Unknown, req), Send, "{req:?}");
+            assert_eq!(class_after(SkipRequest, req), Send, "{req:?}");
+        }
+    }
+
+    #[test]
     fn other_gets_on_provider_paths_stay_skipped() {
         for req in [
             &b"GET /v1/files/file-1/content HTTP/1.1\r\nHost: api.openai.com\r\n"[..],
             b"GET /v1/models HTTP/1.1\r\nHost: api.openai.com\r\n\r\n",
-            b"GET /v1/responses HTTP/1.1\r\nHost: api.openai.com\r\n\r\n",
             b"GET /v1/responsesX/resp_1 HTTP/1.1\r\nHost: api.openai.com\r\n",
+            b"GET /v1/realtime/sessions HTTP/1.1\r\nHost: api.openai.com\r\n",
+            b"GET /v1/realtimeX?model=a HTTP/1.1\r\nHost: api.openai.com\r\n",
             b"GET /v1/chat/completions/chatcmpl-1 HTTP/1.1\r\nHost: a\r\n",
             b"GET /api/openai/v1/responses/resp_1 HTTP/1.1\r\nHost: a\r\n",
         ] {
