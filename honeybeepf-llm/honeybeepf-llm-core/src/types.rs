@@ -41,6 +41,15 @@ impl ModalityTokens {
             .saturating_add(self.video)
     }
 
+    /// The counts left after taking `other` out of these, each at least zero.
+    pub fn saturating_sub(self, other: Self) -> Self {
+        Self {
+            audio: self.audio.saturating_sub(other.audio),
+            image: self.image.saturating_sub(other.image),
+            video: self.video.saturating_sub(other.video),
+        }
+    }
+
     /// Drop the split when the modalities exceed the direction's total (bad data), so text (the
     /// remainder) is never negative and the modality counts always sum to the total.
     pub fn clamped_to(self, total: u64) -> Self {
@@ -63,6 +72,9 @@ pub struct UsageInfo {
     pub input_modalities: ModalityTokens,
     /// Non-text output modalities (audio/image/video); text is `completion_tokens` minus these.
     pub output_modalities: ModalityTokens,
+    /// Non-text modalities among the cache reads, which some models bill apart from cached text (OpenAI
+    /// Realtime); text is `cache_read_tokens` minus these. Also part of `input_modalities`.
+    pub cache_read_modalities: ModalityTokens,
     /// Reasoning tokens, a subset of `completion_tokens`.
     pub thoughts_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,

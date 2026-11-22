@@ -102,6 +102,33 @@ fn openai_responses_provider() -> ConfigurableProvider {
     ConfigurableProvider::new(config)
 }
 
+// The Realtime usage shape: cache reads split by modality under `cached_tokens_details`.
+#[test]
+fn cached_modalities_are_read_from_their_details() {
+    let registry = ProviderRegistry::from_json(
+        r#"{"providers": [{"name": "openai", "hosts": ["api.openai.com"], "paths": ["/v1/realtime$"],
+            "response": {"usage_path": "usage", "prompt_tokens": "input_tokens", "completion_tokens": "output_tokens",
+                "cache_read_tokens": "input_token_details.cached_tokens",
+                "input_modality_details": "input_token_details",
+                "cache_read_modality_details": "input_token_details.cached_tokens_details",
+                "output_modality_details": "output_token_details"}}]}"#,
+    )
+    .expect("config loads");
+    let provider = ConfigurableProvider::new(registry.providers[0].clone());
+    let usage = provider
+        .parse_usage(&json!({"usage": {"input_tokens": 250, "output_tokens": 80,
+            "input_token_details": {"text_tokens": 50, "audio_tokens": 200, "cached_tokens": 64,
+                "cached_tokens_details": {"text_tokens": 0, "audio_tokens": 64}},
+            "output_token_details": {"text_tokens": 20, "audio_tokens": 60}}}))
+        .expect("usage parses");
+    assert_eq!(usage.input_modalities.audio, 200);
+    assert_eq!(
+        (usage.cache_read_tokens, usage.cache_read_modalities.audio),
+        (Some(64), 64)
+    );
+    assert_eq!(usage.output_modalities.audio, 60);
+}
+
 #[test]
 fn test_openai_responses_parse_usage() {
     let provider = openai_responses_provider();
@@ -877,6 +904,7 @@ fn test_custom_provider_reads_every_flat_field() -> Result<(), serde_json::Error
         completion_tokens: 5,
         input_modalities: ModalityTokens::default(),
         output_modalities: ModalityTokens::default(),
+        cache_read_modalities: ModalityTokens::default(),
         thoughts_tokens: Some(5),
         cache_read_tokens: Some(3),
         cache_write_tokens: Some(4),

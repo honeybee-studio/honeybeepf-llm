@@ -31,6 +31,7 @@ pub trait CallExt {
     fn geo(self, geo: &str) -> Self;
     fn in_modalities(self, m: ModalityTokens) -> Self;
     fn out_modalities(self, m: ModalityTokens) -> Self;
+    fn read_modalities(self, m: ModalityTokens) -> Self;
 }
 
 #[rustfmt::skip]
@@ -44,6 +45,7 @@ impl CallExt for UsageInfo {
     fn geo(self, geo: &str) -> Self { UsageInfo { inference_geo: Some(geo.into()), ..self } }
     fn in_modalities(self, m: ModalityTokens) -> Self { UsageInfo { input_modalities: m, ..self } }
     fn out_modalities(self, m: ModalityTokens) -> Self { UsageInfo { output_modalities: m, ..self } }
+    fn read_modalities(self, m: ModalityTokens) -> Self { UsageInfo { cache_read_modalities: m, ..self } }
 }
 
 /// Total USD rounded to 1e-12, so hand-computed amounts compare exactly.
