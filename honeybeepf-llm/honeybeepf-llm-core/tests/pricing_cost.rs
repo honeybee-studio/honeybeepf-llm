@@ -113,6 +113,36 @@ fn test_modality_prices_split_each_direction() {
 }
 
 #[test]
+fn a_cached_modality_pays_its_own_cache_price_or_the_base_one() {
+    let table = PriceTable::from_json(
+        r#"{"version": "t", "providers": [{"name": "openai", "source": "t", "checked": "2026-11-22", "models": {
+            "rt": {"input": 1, "cache_read": 0.1, "output": 2,
+                   "modalities": {"audio": {"input": 10, "cache_read": 1, "output": 20}}},
+            "rt-no-audio-cache": {"input": 1, "cache_read": 0.1, "output": 2,
+                                  "modalities": {"audio": {"input": 10, "output": 20}}}}}]}"#,
+    )
+    .expect("test table loads");
+    let audio = |tokens| ModalityTokens {
+        audio: tokens,
+        ..Default::default()
+    };
+    let session = |model| {
+        call(model, 1000, 100)
+            .in_modalities(audio(600))
+            .read(400)
+            .read_modalities(audio(300))
+            .out_modalities(audio(50))
+    };
+    // Uncached 300 audio ×$10 + 300 text ×$1; cached 300 audio ×$1 + 100 text ×$0.10; out 50×$20 + 50×$2.
+    assert_eq!(table.cost(&session("rt")).map(total), Ok(0.00471));
+    // Without an audio cache price the cached audio pays the base cache read: 400×$0.10 instead.
+    assert_eq!(
+        table.cost(&session("rt-no-audio-cache")).map(total),
+        Ok(0.00444)
+    );
+}
+
+#[test]
 fn cache_savings_ceiling_uses_the_model_cache_price_or_a_conservative_bound() {
     let table = PriceTable::from_json(TABLE).expect("test table loads");
     let micro = |u: &UsageInfo| {

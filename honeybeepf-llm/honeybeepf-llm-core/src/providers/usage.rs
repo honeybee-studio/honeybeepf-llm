@@ -135,6 +135,8 @@ impl ConfigurableProvider {
                 &modalities.output_array,
             )
             .clamped_to(tokens.completion),
+            cache_read_modalities: read_modalities(usage, &modalities.cache_read_details, &None)
+                .clamped_to(cache.read.unwrap_or(0)),
             thoughts_tokens: tokens.thoughts,
             cache_read_tokens: cache.read,
             cache_write_tokens: cache.write,

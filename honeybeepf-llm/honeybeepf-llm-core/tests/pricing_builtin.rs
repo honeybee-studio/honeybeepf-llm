@@ -2,6 +2,7 @@ mod common;
 
 use common::{CallExt, MISSING, UNKNOWN, UNSUPPORTED, call, total};
 use honeybeepf_llm_core::pricing::PriceTable;
+use honeybeepf_llm_core::types::ModalityTokens;
 
 const NOV_21: u32 = 20_778; // 2026-11-21
 const NOV_30: u32 = 20_787; // 2026-11-30
@@ -9,7 +10,7 @@ const NOV_30: u32 = 20_787; // 2026-11-30
 #[test]
 fn test_builtin_prices_match_the_pricing_pages() {
     let table = PriceTable::builtin().expect("built-in table loads");
-    assert_eq!(table.version(), "2026-11-14");
+    assert_eq!(table.version(), "2026-11-22");
     let sources: Vec<_> = table
         .sources()
         .iter()
@@ -19,7 +20,7 @@ fn test_builtin_prices_match_the_pricing_pages() {
         sources,
         [
             ("anthropic", "2026-11-10"),
-            ("openai", "2026-11-07"),
+            ("openai", "2026-11-22"),
             ("gemini", "2026-11-14")
         ]
     );
@@ -113,6 +114,41 @@ fn test_builtin_prices_match_the_pricing_pages() {
         (NOV_30, million("text-embedding-3-large"), Ok(0.13)),
         (NOV_30, million("text-embedding-ada-002"), Ok(0.1)),
         (NOV_30, call("text-embedding-3-small", 1000, 0), Ok(0.00002)),
+    ];
+    for (day, call, want) in cases {
+        assert_eq!(table.cost_on(&call, day).map(total), want, "{call:?}");
+    }
+}
+
+#[test]
+fn test_builtin_realtime_and_audio_prices_split_audio_from_text() {
+    let table = PriceTable::builtin().expect("built-in table loads");
+    let million = |model: &str| call(model, 1_000_000, 0);
+    let audio = |tokens| ModalityTokens {
+        audio: tokens,
+        ..Default::default()
+    };
+    // A Realtime voice turn: 250 input (200 audio, 64 of it cached), 80 output (60 audio).
+    let voice = |model: &str| {
+        call(model, 250, 80)
+            .in_modalities(audio(200))
+            .read(64)
+            .read_modalities(audio(64))
+            .out_modalities(audio(60))
+    };
+    #[rustfmt::skip]
+    let cases = [
+        // Realtime mini, a voice turn: uncached 136 audio ×$10 + 50 text ×$0.60, cached 64 audio ×$0.30,
+        // output 60 audio ×$20 + 20 text ×$2.40.
+        (NOV_30, voice("gpt-realtime-mini"), Ok(0.0026572)),
+        (NOV_30, voice("gpt-realtime-2.1-mini"), Ok(0.0026572)),
+        // gpt-realtime-2, the same turn: 136×$32 + 50×$4 + 64×$0.40 + 60×$64 + 20×$24.
+        (NOV_30, voice("gpt-realtime-2"), Ok(0.0088976)),
+        (NOV_30, million("gpt-realtime-2025-08-28"), Ok(4.0)),
+        (NOV_30, call("gpt-realtime-1.5", 0, 1_000_000), Ok(16.0)),
+        // Chat Completions audio: 1M audio input ×$32; gpt-audio has no cached-input price.
+        (NOV_30, million("gpt-audio").in_modalities(audio(1_000_000)), Ok(32.0)),
+        (NOV_30, call("gpt-audio-mini", 1000, 0).read(500), MISSING),
     ];
     for (day, call, want) in cases {
         assert_eq!(table.cost_on(&call, day).map(total), want, "{call:?}");
