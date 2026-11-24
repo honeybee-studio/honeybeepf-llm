@@ -106,6 +106,7 @@ pub enum UnparsedReason {
     UsageAbsent,
     StreamError,
     AgentSession,
+    TooManyWebsockets,
 }
 
 impl UnparsedReason {
@@ -122,6 +123,7 @@ impl UnparsedReason {
             Self::UsageAbsent => "usage_absent",
             Self::StreamError => "stream_error",
             Self::AgentSession => "agent_session",
+            Self::TooManyWebsockets => "too_many_websockets",
         }
     }
 }
@@ -150,6 +152,9 @@ impl std::fmt::Display for UnparsedReason {
             Self::StreamError => f.write_str("response stream ended on a provider error event"),
             Self::AgentSession => {
                 f.write_str("Managed Agents session call; its usage is a running total, not read")
+            }
+            Self::TooManyWebsockets => {
+                f.write_str("more WebSockets open at once than the agent reads")
             }
         }
     }
@@ -647,7 +652,7 @@ impl StreamProcessor {
             return match ws_route::WsConn::new(upgrade) {
                 Some(ws) => ProcessorState::WebSocket(Box::new(ws)),
                 None => {
-                    debug!("WebSocket of PID {} not read: too many open", ctx.pid);
+                    ws_route::count_too_many(ctx);
                     self.skip = true;
                     ProcessorState::Finished
                 }
