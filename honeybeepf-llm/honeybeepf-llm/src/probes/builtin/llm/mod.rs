@@ -47,6 +47,8 @@ pub use crate::probes::{
 // Timing constants
 const CLEANUP_INTERVAL_SECS: u64 = 30; // How often to run cleanup
 const CONNECTION_RETENTION_SECS: u64 = 300; // Keep idle connections for 5 minutes
+/// An idle WebSocket is kept longer: a voice or agent session waits between turns.
+const WEBSOCKET_RETENTION_SECS: u64 = 3600;
 const STATS_LOG_INTERVAL_SECS: u64 = 60; // How often to log event counters (only when changed)
 
 /// Kernel-side event pipeline counters (LLM_STATS map), set once when the probe attaches.
@@ -939,7 +941,12 @@ fn start_cleanup_task(state: StreamMap, background: BackgroundMap) {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .retain(|_, v| {
-                    now.duration_since(v.last_activity()).as_secs() < CONNECTION_RETENTION_SECS
+                    let keep = if v.is_websocket() {
+                        WEBSOCKET_RETENTION_SECS
+                    } else {
+                        CONNECTION_RETENTION_SECS
+                    };
+                    now.duration_since(v.last_activity()).as_secs() < keep
                 });
             // Counted after both locks are released: the ringbuf handler waits on them.
             let expired: Vec<_> = background
