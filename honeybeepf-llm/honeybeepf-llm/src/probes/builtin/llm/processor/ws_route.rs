@@ -2,7 +2,7 @@
 //! unread. Anything that leaves the server's bytes unreadable ends the reading, and the connection is skipped.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::probes::builtin::llm::http::websocket::{
     Handshake, ServerFrames, Upgrade, WsError, WsEvent, read_handshake,
@@ -11,22 +11,24 @@ use crate::probes::builtin::llm::http::websocket::{
 use super::background::record_usage;
 use super::*;
 
-/// WebSocket connections read at once; a later one is left alone.
-const MAX_SOCKETS: usize = 256;
+/// WebSocket connections read at once, about 45 KB each with compression: at most about 46 MB. A later one is
+/// left alone and counted under `too_many_websockets`.
+const MAX_SOCKETS: usize = 1024;
 /// Responses started and not yet ended per connection; the oldest goes first.
 const MAX_STARTED: usize = 16;
 
 static SOCKETS: AtomicUsize = AtomicUsize::new(0);
+static WARNED: AtomicBool = AtomicBool::new(false);
 
-/// One of the `MAX_SOCKETS` reading slots, given back on drop.
-struct Slot;
+/// One of `cap` reading slots counted in `open`, given back on drop.
+struct Slot(&'static AtomicUsize);
 
 impl Slot {
-    fn take() -> Option<Self> {
-        if SOCKETS.fetch_add(1, Ordering::Relaxed) < MAX_SOCKETS {
-            Some(Self)
+    fn take(open: &'static AtomicUsize, cap: usize) -> Option<Self> {
+        if open.fetch_add(1, Ordering::Relaxed) < cap {
+            Some(Self(open))
         } else {
-            SOCKETS.fetch_sub(1, Ordering::Relaxed);
+            open.fetch_sub(1, Ordering::Relaxed);
             None
         }
     }
@@ -34,8 +36,23 @@ impl Slot {
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        SOCKETS.fetch_sub(1, Ordering::Relaxed);
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
+}
+
+/// Count a WebSocket left alone because `MAX_SOCKETS` are already read; the first one is also a warning.
+pub(super) fn count_too_many(ctx: &CallContext) {
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        log::warn!(
+            "More than {MAX_SOCKETS} WebSockets open at once; later ones are not read (reason too_many_websockets)"
+        );
+    }
+    crate::telemetry::record_llm_unparsed(
+        UnparsedReason::TooManyWebsockets.as_str(),
+        #[cfg(feature = "k8s")]
+        ctx.pod_info.as_ref(),
+    );
+    debug!("WebSocket of PID {} not read: too many open", ctx.pid);
 }
 
 /// An upgraded connection's server side.
@@ -73,7 +90,7 @@ impl WsConn {
             matched: upgrade.matched,
             started: VecDeque::new(),
             read_next: 0,
-            _slot: Slot::take()?,
+            _slot: Slot::take(&SOCKETS, MAX_SOCKETS)?,
         })
     }
 
@@ -218,5 +235,22 @@ impl StreamProcessor {
             }
         }
         outcome
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slots_past_the_cap_are_refused_until_one_is_given_back() {
+        static OPEN: AtomicUsize = AtomicUsize::new(0);
+        let first = Slot::take(&OPEN, 2);
+        let second = Slot::take(&OPEN, 2);
+        assert!(first.is_some() && second.is_some());
+        assert!(Slot::take(&OPEN, 2).is_none());
+        drop(first);
+        assert!(Slot::take(&OPEN, 2).is_some());
+        assert_eq!(OPEN.load(Ordering::Relaxed), 1);
     }
 }
