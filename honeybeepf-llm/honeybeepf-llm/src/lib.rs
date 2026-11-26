@@ -30,7 +30,8 @@ pub mod probes;
 use crate::probes::{
     DYNAMIC_POLL_MS, DynamicProbe, IdentityResolver, LibOpen, LibOpenSeen, ProcessInfo,
     builtin::llm::{
-        ExecNotify, ExecPidQueue, LibOpenQueue, LlmProbe, setup_exec_watch, setup_lib_open_watch,
+        ExecNotify, ExecPidQueue, InScope, LibOpenQueue, LlmProbe, setup_exec_watch,
+        setup_lib_open_watch,
     },
     discovery::resolve_in_root,
     request_shutdown, shutdown_flag,
@@ -51,6 +52,9 @@ pub struct HoneyBeeEngine {
     /// The agent runs in a nested PID namespace (node in a container: kind, k3d, minikube). The kernel reports
     /// root-namespace PIDs, which this /proc does not show, so discovery rescans /proc instead of using them.
     nested_pidns: bool,
+    /// The containers of a namespace scope, shared by the pod watcher and the AEAD scan.
+    #[cfg(feature = "k8s")]
+    scope_containers: Option<std::sync::Arc<k8s::ScopeContainers>>,
 }
 
 impl HoneyBeeEngine {
@@ -109,6 +113,18 @@ impl HoneyBeeEngine {
             debug!("eBPF logger disabled (production mode)");
         }
         let mut dynamic_probes: Vec<Box<dyn DynamicProbe>> = Vec::new();
+        #[cfg(feature = "k8s")]
+        let scope_containers = settings
+            .builtin_probes
+            .llm_namespaces
+            .is_some()
+            .then(|| std::sync::Arc::new(k8s::ScopeContainers::default()));
+        #[cfg(feature = "k8s")]
+        let in_scope = scope_containers.clone().map(|containers| -> InScope {
+            std::sync::Arc::new(move |pid| containers.contains_pid(pid))
+        });
+        #[cfg(not(feature = "k8s"))]
+        let in_scope: Option<InScope> = None;
         if settings.builtin_probes.llm.unwrap_or(false) {
             let executables = settings.builtin_probes.llm_executables.unwrap_or(true);
             let detect_by_shape = settings.builtin_probes.llm_detect_by_shape.unwrap_or(false);
@@ -122,7 +138,12 @@ impl HoneyBeeEngine {
             if let Some(on) = experimental_on(detect_by_shape, aead.is_some()) {
                 info!("{on}");
             }
-            dynamic_probes.push(Box::new(LlmProbe::new(executables, detect_by_shape, aead)));
+            dynamic_probes.push(Box::new(LlmProbe::new(
+                executables,
+                detect_by_shape,
+                aead,
+                in_scope,
+            )));
         }
 
         let resolver = IdentityResolver::none();
@@ -133,6 +154,8 @@ impl HoneyBeeEngine {
             dynamic_probes,
             resolver,
             nested_pidns,
+            #[cfg(feature = "k8s")]
+            scope_containers,
         })
     }
 
@@ -168,7 +191,8 @@ impl HoneyBeeEngine {
                     pod_resolver = pod_resolver.without_pid_lookup();
                 }
                 if let Some(namespaces) = scope_namespaces(&self.settings) {
-                    match scope_of(&mut self.bpf, namespaces) {
+                    let containers = self.scope_containers.clone().unwrap_or_default();
+                    match scope_of(&mut self.bpf, namespaces, containers) {
                         Ok(scope) => pod_resolver = pod_resolver.with_scope(scope),
                         Err(e) => {
                             warn!("Namespace scope not set up: {e:#}; no TLS data is recorded")
@@ -434,7 +458,11 @@ fn scope_namespaces(settings: &Settings) -> Option<Vec<String>> {
 
 /// The scope that adds the cgroups of `namespaces`' containers to `SCOPE_CGROUPS` as their pods show.
 #[cfg(feature = "k8s")]
-fn scope_of(bpf: &mut Ebpf, namespaces: Vec<String>) -> Result<k8s::Scope> {
+fn scope_of(
+    bpf: &mut Ebpf,
+    namespaces: Vec<String>,
+    containers: std::sync::Arc<k8s::ScopeContainers>,
+) -> Result<k8s::Scope> {
     use anyhow::Context as _;
 
     let map = bpf
@@ -445,19 +473,23 @@ fn scope_of(bpf: &mut Ebpf, namespaces: Vec<String>) -> Result<k8s::Scope> {
         "Recording only the TLS calls of pods in: {}",
         namespaces.join(", ")
     );
-    Ok(k8s::Scope::new(namespaces, move |cgroup_id, add| {
-        let mut cgroups = cgroups
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let result = if add {
-            cgroups.insert(cgroup_id, 1, 0)
-        } else {
-            cgroups.remove(&cgroup_id)
-        };
-        if let Err(e) = result {
-            debug!("Scope cgroup {cgroup_id} (add: {add}) not updated: {e}");
-        }
-    }))
+    Ok(k8s::Scope::new(
+        namespaces,
+        containers,
+        move |cgroup_id, add| {
+            let mut cgroups = cgroups
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let result = if add {
+                cgroups.insert(cgroup_id, 1, 0)
+            } else {
+                cgroups.remove(&cgroup_id)
+            };
+            if let Err(e) = result {
+                debug!("Scope cgroup {cgroup_id} (add: {add}) not updated: {e}");
+            }
+        },
+    ))
 }
 
 fn nested_pidns() -> Option<(u64, u64)> {

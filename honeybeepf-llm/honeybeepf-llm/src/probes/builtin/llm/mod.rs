@@ -147,6 +147,11 @@ const AEAD_DENSE_SCANS: u32 = 8;
 const AEAD_SETTLE: Duration = Duration::from_millis(100);
 /// Processes waiting for a scan; a burst of short-lived processes beyond it is not scanned.
 const AEAD_PENDING: usize = 64;
+/// How long a process outside the namespace scope waits for its pod to join it before it is dropped.
+const SCOPE_WAIT: Duration = Duration::from_secs(30);
+
+/// Whether a process is in the namespace scope, by PID.
+pub type InScope = Arc<dyn Fn(u32) -> bool + Send + Sync>;
 
 /// Every function in the probe tables, resolved in one pass over the file's symbols.
 const PROBED_FUNCTIONS: [&str; 6] = [
@@ -317,6 +322,8 @@ enum FileScan {
 struct AeadScans {
     /// Executable names to scan; empty scans every executable with the library built in.
     names: Vec<String>,
+    /// With a namespace scope, whether a process is in it: only those have their memory read.
+    in_scope: Option<InScope>,
     pending: Vec<AeadPending>,
     files: HashMap<FileId, FileScan>,
     /// Tables found in each file; its other processes share them.
@@ -350,7 +357,12 @@ fn named(names: &[String], path: &str) -> bool {
 
 impl LlmProbe {
     /// `aead`: scan executables for AEAD tables, only those named when the list is not empty.
-    pub fn new(executables: bool, detect_by_shape: bool, aead: Option<Vec<String>>) -> Self {
+    pub fn new(
+        executables: bool,
+        detect_by_shape: bool,
+        aead: Option<Vec<String>>,
+        in_scope: Option<InScope>,
+    ) -> Self {
         // Shape detection is read by the host-blind parser globals, so push it once here.
         http::set_detect_by_shape(detect_by_shape);
         if detect_by_shape {
@@ -365,6 +377,7 @@ impl LlmProbe {
             aead: aead.map(|names| {
                 Mutex::new(AeadScans {
                     names,
+                    in_scope,
                     ..AeadScans::default()
                 })
             }),
@@ -572,9 +585,25 @@ impl AeadScans {
         }
     }
 
+    /// The pending processes whose memory may be read. One outside the namespace scope is kept back unread:
+    /// a new pod's process waits up to `SCOPE_WAIT` for the pod watcher to add its pod.
+    fn readable_pending(&mut self) -> Vec<AeadPending> {
+        let pending = std::mem::take(&mut self.pending);
+        let Some(in_scope) = self.in_scope.clone() else {
+            return pending;
+        };
+        let (readable, outside): (Vec<_>, Vec<_>) =
+            pending.into_iter().partition(|p| in_scope(p.pid));
+        self.pending.extend(outside.into_iter().filter(|p| {
+            p.queued.elapsed() < SCOPE_WAIT
+                && std::path::Path::new(&format!("/proc/{}", p.pid)).exists()
+        }));
+        readable
+    }
+
     /// Scan each process that is due and probe the tables found.
     fn scan_pending(&mut self, bpf: &mut Ebpf) {
-        for mut p in std::mem::take(&mut self.pending) {
+        for mut p in self.readable_pending() {
             if self.files.get(&p.id) != Some(&FileScan::Scan) {
                 continue;
             }
@@ -1096,6 +1125,36 @@ mod tests {
         let name = format!("hb-named-exe-{}", std::process::id());
         assert!(named(&[name], &path));
         assert!(!named(&["exe".to_string()], &path));
+        Ok(())
+    }
+
+    #[test]
+    fn test_aead_scan_reads_only_processes_in_the_namespace_scope() -> anyhow::Result<()> {
+        let me = std::process::id();
+        let id = file_identity("/proc/self/exe").context("no identity for this test binary")?;
+        let pending = |pid, waited: u64| AeadPending {
+            pid,
+            path: String::new(),
+            id,
+            queued: Instant::now()
+                .checked_sub(Duration::from_secs(waited))
+                .unwrap_or_else(Instant::now),
+            scans: 0,
+            wait: 0,
+        };
+        let mut scans = AeadScans {
+            in_scope: Some(Arc::new(move |pid| pid == me)),
+            pending: vec![pending(me, 0), pending(1, 0), pending(1, 31)],
+            ..AeadScans::default()
+        };
+        let readable: Vec<u32> = scans.readable_pending().iter().map(|p| p.pid).collect();
+        assert_eq!(readable, [me]);
+        // PID 1 is outside: kept back while its pod may still join, dropped once it waited 30 s.
+        let waiting: Vec<u32> = scans.pending.iter().map(|p| p.pid).collect();
+        assert_eq!(waiting, [1]);
+        // Without a scope every process is readable.
+        scans.in_scope = None;
+        assert_eq!(scans.readable_pending().len(), 1);
         Ok(())
     }
 
