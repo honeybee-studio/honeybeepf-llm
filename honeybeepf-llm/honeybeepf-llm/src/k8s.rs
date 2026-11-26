@@ -82,6 +82,8 @@ pub struct PodResolver {
 /// set the eBPF side checks.
 pub struct Scope {
     namespaces: HashSet<String>,
+    /// The same containers by id, for userspace: the AEAD scan reads the memory of these only.
+    containers: Arc<ScopeContainers>,
     /// Adds (`true`) or removes (`false`) a cgroup id.
     update: Box<dyn Fn(u64, bool) + Send + Sync>,
 }
@@ -89,11 +91,38 @@ pub struct Scope {
 impl Scope {
     pub fn new(
         namespaces: impl IntoIterator<Item = String>,
+        containers: Arc<ScopeContainers>,
         update: impl Fn(u64, bool) + Send + Sync + 'static,
     ) -> Self {
         Self {
             namespaces: namespaces.into_iter().collect(),
+            containers,
             update: Box::new(update),
+        }
+    }
+}
+
+/// Short ids of the containers in the scope's pods; empty until the pod watcher adds them.
+#[derive(Default)]
+pub struct ScopeContainers(RwLock<HashSet<String>>);
+
+impl ScopeContainers {
+    /// Whether `pid` runs in a container of the scope; false when its container cannot be read.
+    pub fn contains_pid(&self, pid: u32) -> bool {
+        extract_container_id(pid).is_some_and(|cid| self.contains(&cid))
+    }
+
+    fn contains(&self, cid: &str) -> bool {
+        self.0.read().is_ok_and(|ids| ids.contains(cid))
+    }
+
+    fn set(&self, cid: &str, add: bool) {
+        if let Ok(mut ids) = self.0.write() {
+            if add {
+                ids.insert(cid.to_string());
+            } else {
+                ids.remove(cid);
+            }
         }
     }
 }
@@ -134,6 +163,7 @@ impl PodResolver {
             cache.insert(cgroup_id, Some(cid.to_string()));
         }
         if let Some(scope) = self.scope_of(namespace) {
+            scope.containers.set(cid, true);
             (scope.update)(cgroup_id, true);
         }
     }
@@ -355,6 +385,11 @@ impl PodResolver {
             if let Ok(mut store) = self.pod_store.write() {
                 for cid in &container_ids {
                     store.remove(cid);
+                }
+            }
+            if let Some(scope) = self.scope_of(&namespace) {
+                for cid in &container_ids {
+                    scope.containers.set(cid, false);
                 }
             }
             // Clean cgroup_cache entries that pointed to deleted containers
@@ -857,12 +892,16 @@ mod tests {
         use k8s_openapi::api::core::v1::{ContainerStatus, PodStatus};
         let updates = Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = updates.clone();
-        let resolver =
-            PodResolver::new().with_scope(Scope::new(["team-a".to_string()], move |id, add| {
+        let containers = Arc::new(ScopeContainers::default());
+        let resolver = PodResolver::new().with_scope(Scope::new(
+            ["team-a".to_string()],
+            containers.clone(),
+            move |id, add| {
                 seen.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push((id, add));
-            }));
+            },
+        ));
         let (cid, other) = ("ab".repeat(6), "cd".repeat(6));
         resolver.note_cgroup("team-a", &cid, 7);
         resolver.note_cgroup("team-b", &other, 8);
@@ -870,6 +909,7 @@ mod tests {
             std::mem::take(&mut *u.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
         };
         assert_eq!(taken(&updates), [(7, true)], "team-b is out of scope");
+        assert!(containers.contains(&cid) && !containers.contains(&other));
 
         let pod = Pod {
             metadata: pod_meta(vec![], None),
@@ -884,6 +924,10 @@ mod tests {
         };
         resolver.apply_pod_event(&pod, true, None);
         assert_eq!(taken(&updates), [(7, false)]);
+        assert!(
+            !containers.contains(&cid),
+            "a deleted pod's containers leave the scope"
+        );
     }
 
     /// An API server that refuses every request (RBAC removed) must not be hammered with re-lists.

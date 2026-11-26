@@ -41,7 +41,8 @@ command typed, so a program installed under another name is left out. An empty l
 
 1. The agent first reads the executable file of each new process, and of each running one when it starts. Only a
    file with BoringSSL or aws-lc in its read-only data (and, if set, one of the listed names) goes on. For those it
-   reads the memory of the program's own data, not its heap, for the library's table of cipher functions. A table
+   reads the memory of the program's own data, not its heap, for the library's table of cipher functions; with
+   [`namespaces`](namespace-scope.md), only of processes in those pods. A table
    is found by its sizes (key, nonce, tag) followed by pointers into the program's code, so no symbols are needed.
 2. It attaches uprobes to the table's encrypt (`seal`) and decrypt (`open`) functions. Other processes of the same
    program use the same probes. A table comes from process memory, so each function must also start where the file

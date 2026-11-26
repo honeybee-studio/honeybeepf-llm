@@ -15,6 +15,7 @@ Outside the chart, set `BUILTIN_PROBES__LLM_NAMESPACES=team-a,team-b`.
 | TLS data copied out of the kernel | from every process that uses a probed TLS library | only from the containers of pods in the listed namespaces |
 | Calls recorded | every pod and host process | only those pods |
 | Host processes (not in a pod) | recorded | never |
+| Process memory read by the [built-in TLS](built-in-tls.md) scan | of any program with the library | only of programs in those pods |
 
 ## How it works
 
