@@ -1907,7 +1907,7 @@ fn upgraded(answer: &[u8]) -> (StreamProcessor, Vec<Outcome>) {
 fn a_websocket_whose_frames_are_not_read_is_skipped_and_counted_nowhere() {
     for answer in [
         &b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n"[..],
-        b"HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Extensions: permessage-deflate\r\n\r\n",
+        b"HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Extensions: x-webkit-deflate-frame\r\n\r\n",
     ] {
         let (mut p, out) = upgraded(answer);
         assert!(out.iter().all(|o| *o == Outcome::Pending), "{out:?}");
@@ -2007,4 +2007,27 @@ fn a_get_without_upgrade_on_a_realtime_path_is_not_read() {
     let get = b"GET /v1/realtime?model=gpt-realtime HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
     send(&mut p, LlmDirection::Write, get, None);
     assert!(!p.is_websocket() && !p.is_llm());
+}
+
+#[test]
+fn a_compressed_realtime_websocket_is_recorded() {
+    let mut deflate = flate2::Compress::new(flate2::Compression::default(), false);
+    let mut compressed = |message: &str| {
+        let mut out = Vec::with_capacity(message.len() + 64);
+        deflate
+            .compress_vec(message.as_bytes(), &mut out, flate2::FlushCompress::Sync)
+            .expect("in-memory compression");
+        out.truncate(out.len() - 4);
+        [vec![0xc1, out.len() as u8], out].concat()
+    };
+    let answer =
+        b"HTTP/1.1 101 Switching Protocols\r\nsec-websocket-extensions: permessage-deflate\r\n\r\n";
+    let created = compressed(RT_CREATED);
+    let done = compressed(RT_DONE);
+    let (mut p, mut out) = upgraded(&[&answer[..], &created].concat());
+    for piece in done.chunks(5) {
+        out.extend(send(&mut p, LlmDirection::Read, piece, None));
+    }
+    assert_eq!(count(&out, Outcome::Recorded), 1);
+    assert!(unparsed(&out).is_empty());
 }

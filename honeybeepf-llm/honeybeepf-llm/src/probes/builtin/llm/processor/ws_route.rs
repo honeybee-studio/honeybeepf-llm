@@ -76,7 +76,7 @@ enum Stage {
 /// What the server bytes of one fragment left the reading at.
 enum Read {
     Going,
-    /// The upgrade was refused, or the frames are compressed: no call to read.
+    /// The upgrade was refused: no call to read.
     Skipped,
     Broken(WsError),
 }
@@ -95,7 +95,7 @@ impl WsConn {
     }
 
     fn read(&mut self, data: &[u8], events: &mut Vec<WsEvent>) -> Read {
-        let rest = match &mut self.stage {
+        let (rest, deflate) = match &mut self.stage {
             Stage::Open(frames) => {
                 return frames
                     .feed(data, events)
@@ -105,15 +105,12 @@ impl WsConn {
                 head.extend_from_slice(data);
                 match read_handshake(head) {
                     Handshake::Partial => return Read::Going,
-                    Handshake::Refused
-                    | Handshake::Switched {
-                        deflate: Some(_), ..
-                    } => return Read::Skipped,
-                    Handshake::Switched { len, deflate: None } => head.split_off(len),
+                    Handshake::Refused => return Read::Skipped,
+                    Handshake::Switched { len, deflate } => (head.split_off(len), deflate),
                 }
             }
         };
-        let mut frames = ServerFrames::default();
+        let mut frames = ServerFrames::new(deflate);
         let read = frames.feed(&rest, events);
         self.stage = Stage::Open(frames);
         read.map_or_else(Read::Broken, |()| Read::Going)
@@ -143,7 +140,7 @@ impl StreamProcessor {
             return Outcome::Pending;
         }
         let end = offset.saturating_add(data.len() as u32);
-        // Each lost server byte breaks the framing.
+        // Each lost server byte breaks the framing, and with compression every later message.
         let lost = truncated || offset != ws.read_next || len as usize > limit;
         ws.read_next = if end as usize >= len as usize { 0 } else { end };
         if lost {
@@ -155,17 +152,14 @@ impl StreamProcessor {
         match read {
             Read::Going => outcome,
             Read::Skipped => {
-                debug!(
-                    "WebSocket of PID {} not read: refused or compressed",
-                    ctx.pid
-                );
+                debug!("WebSocket of PID {} not read: upgrade refused", ctx.pid);
                 self.end_websocket(None, true, ctx)
             }
             Read::Broken(e) => {
                 debug!("WebSocket of PID {} left unread: {e:?}", ctx.pid);
                 let reason = match e {
                     WsError::TooLarge => UnparsedReason::ResponseTooLarge,
-                    WsError::Protocol => UnparsedReason::CaptureLost,
+                    WsError::Protocol | WsError::Inflate => UnparsedReason::CaptureLost,
                 };
                 self.end_websocket(Some(reason), true, ctx)
             }

@@ -47,7 +47,8 @@ pub use crate::probes::{
 // Timing constants
 const CLEANUP_INTERVAL_SECS: u64 = 30; // How often to run cleanup
 const CONNECTION_RETENTION_SECS: u64 = 300; // Keep idle connections for 5 minutes
-/// An idle WebSocket is kept longer: a voice or agent session waits between turns.
+/// An idle WebSocket is kept longer: a voice or agent session waits between turns, and a stream forgotten
+/// mid-session cannot be read again (its compression window is gone).
 const WEBSOCKET_RETENTION_SECS: u64 = 3600;
 const STATS_LOG_INTERVAL_SECS: u64 = 60; // How often to log event counters (only when changed)
 

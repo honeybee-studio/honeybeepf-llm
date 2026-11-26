@@ -33,7 +33,7 @@ Work down this list; most cases are one of the first three.
    [What is supported](providers.md). A self-hosted server, a company gateway or a provider that is not listed needs
    an entry: [Add a provider](guides/custom-providers.md), or a [plain-HTTP provider](guides/plaintext.md) for a server
    called without TLS.
-4. **Check the protocol.** WebSocket (such as OpenAI Realtime) and HTTP/3 are not read yet.
+4. **Check the protocol.** HTTP/3 is not read yet, and a WebSocket only on OpenAI Realtime and Responses paths.
 5. **On Ubuntu nodes, keep the AppArmor setting.** The containerd AppArmor profile on Ubuntu denies the agent access to
    other containers' `libssl`, and then only pods that share the agent image's `libssl` are recorded. The chart sets
    `securityContext.appArmorProfile: Unconfined` for this; keep it if you override `securityContext`.

@@ -2,6 +2,7 @@
 //! the server's 101 answer, and the server's frames, read only for the messages that start a response or end
 //! it with its usage. Client frames are never read, and every other message is skipped unkept.
 
+use flate2::{Decompress, FlushDecompress, Status};
 use honeybeepf_llm_core::types::UsageInfo;
 use serde_json::Value;
 
@@ -17,6 +18,12 @@ const MAX_STARTED: usize = 64 * 1024;
 const MAX_USAGE: usize = 1024 * 1024;
 /// Longest frame; a longer one ends the reading.
 pub(crate) const MAX_FRAME: u64 = 16 * 1024 * 1024;
+/// Longest message after inflating; a longer one ends the reading, so a deflate bomb costs at most this.
+pub(crate) const MAX_MESSAGE: usize = 16 * 1024 * 1024;
+/// Inflate output per step.
+const INFLATE_STEP: usize = 16 * 1024;
+/// What RFC 7692 strips from the end of each compressed message.
+const DEFLATE_TAIL: [u8; 4] = [0, 0, 0xff, 0xff];
 
 /// A WebSocket upgrade request to a listed provider's Realtime or Responses path.
 #[derive(Debug, PartialEq, Eq)]
@@ -130,8 +137,10 @@ pub enum WsEvent {
 pub enum WsError {
     /// Not a frame a server may send: masked, reserved bits or opcodes, a control frame too long or split.
     Protocol,
-    /// A frame past `MAX_FRAME`.
+    /// A frame past `MAX_FRAME`, or a message past `MAX_MESSAGE` after inflating.
     TooLarge,
+    /// The compressed stream is broken.
+    Inflate,
 }
 
 /// The server's half of a WebSocket, read frame by frame.
@@ -147,6 +156,16 @@ pub struct ServerFrames {
     fin: bool,
     /// Where the bytes of the data message in progress go.
     message: Option<Sink>,
+    /// The message in progress is compressed, and how many bytes it inflated to so far.
+    compressed: bool,
+    inflated: usize,
+    /// Set when the server agreed to permessage-deflate: one window across messages, or reset after each.
+    inflater: Option<Box<Inflater>>,
+}
+
+struct Inflater {
+    state: Decompress,
+    no_context_takeover: bool,
 }
 
 /// Where a message's bytes go once its type is known.
@@ -160,6 +179,18 @@ enum Sink {
 }
 
 impl ServerFrames {
+    pub fn new(deflate: Option<Deflate>) -> Self {
+        Self {
+            inflater: deflate.map(|d| {
+                Box::new(Inflater {
+                    state: Decompress::new(false),
+                    no_context_takeover: d.no_context_takeover,
+                })
+            }),
+            ..Self::default()
+        }
+    }
+
     /// Read the next server bytes, adding what their messages told to `events`.
     pub fn feed(&mut self, mut data: &[u8], events: &mut Vec<WsEvent>) -> Result<(), WsError> {
         while !data.is_empty() {
@@ -167,7 +198,7 @@ impl ServerFrames {
                 let used = self.read_head(data)?;
                 data = &data[used..];
                 if self.in_frame && self.left == 0 {
-                    self.end_frame(events);
+                    self.end_frame(events)?;
                 }
                 continue;
             }
@@ -175,13 +206,11 @@ impl ServerFrames {
             let (chunk, rest) = data.split_at(n);
             data = rest;
             self.left -= n as u64;
-            if !self.control
-                && let Some(sink) = &mut self.message
-            {
-                sink.push(chunk);
+            if !self.control {
+                self.message_bytes(chunk)?;
             }
             if self.left == 0 {
-                self.end_frame(events);
+                self.end_frame(events)?;
             }
         }
         Ok(())
@@ -208,9 +237,12 @@ impl ServerFrames {
 
     fn start_frame(&mut self) -> Result<(), WsError> {
         let [b0, b1] = [self.head[0], self.head[1]];
-        let (fin, opcode) = (b0 & 0x80 != 0, b0 & 0x0f);
-        // A server never masks, and no extension that sets the reserved bits is read.
-        if b1 & 0x80 != 0 || b0 & 0x70 != 0 {
+        let (fin, rsv1, opcode) = (b0 & 0x80 != 0, b0 & 0x40 != 0, b0 & 0x0f);
+        // A server never masks; only permessage-deflate's reserved bit is read, on a message's first frame.
+        if b1 & 0x80 != 0
+            || b0 & 0x30 != 0
+            || rsv1 && (self.inflater.is_none() || !matches!(opcode, 1 | 2))
+        {
             return Err(WsError::Protocol);
         }
         let len = match b1 & 0x7f {
@@ -220,7 +252,10 @@ impl ServerFrames {
         };
         match opcode {
             0x8..=0xa if fin && len <= 125 => {}
-            0x1 | 0x2 if self.message.is_none() => self.message = Some(Sink::Typing(Vec::new())),
+            0x1 | 0x2 if self.message.is_none() => {
+                self.message = Some(Sink::Typing(Vec::new()));
+                (self.compressed, self.inflated) = (rsv1, 0);
+            }
             0x0 if self.message.is_some() => {}
             _ => return Err(WsError::Protocol),
         }
@@ -232,13 +267,56 @@ impl ServerFrames {
         Ok(())
     }
 
-    fn end_frame(&mut self, events: &mut Vec<WsEvent>) {
+    fn end_frame(&mut self, events: &mut Vec<WsEvent>) -> Result<(), WsError> {
         self.in_frame = false;
         if self.control || !self.fin {
-            return;
+            return Ok(());
+        }
+        if self.compressed {
+            self.message_bytes(&DEFLATE_TAIL)?;
+            if let Some(inflater) = self.inflater.as_mut().filter(|i| i.no_context_takeover) {
+                inflater.state.reset(false);
+            }
         }
         if let Some(event) = self.message.take().and_then(Sink::finish) {
             events.push(event);
+        }
+        Ok(())
+    }
+
+    /// Payload bytes of the current message, inflated first when it is compressed.
+    fn message_bytes(&mut self, chunk: &[u8]) -> Result<(), WsError> {
+        let Some(sink) = &mut self.message else {
+            return Ok(());
+        };
+        if !self.compressed {
+            sink.push(chunk);
+            return Ok(());
+        }
+        let inflater = self.inflater.as_mut().ok_or(WsError::Protocol)?;
+        let mut out = [0u8; INFLATE_STEP];
+        let mut input = chunk;
+        loop {
+            let (before_in, before_out) = (inflater.state.total_in(), inflater.state.total_out());
+            let status = inflater
+                .state
+                .decompress(input, &mut out, FlushDecompress::Sync)
+                .map_err(|_| WsError::Inflate)?;
+            let read = (inflater.state.total_in() - before_in) as usize;
+            let wrote = (inflater.state.total_out() - before_out) as usize;
+            input = &input[read..];
+            self.inflated += wrote;
+            if self.inflated > MAX_MESSAGE {
+                return Err(WsError::TooLarge);
+            }
+            sink.push(&out[..wrote]);
+            // Done once the input is used and the output did not fill.
+            if status == Status::StreamEnd || input.is_empty() && wrote < out.len() {
+                return Ok(());
+            }
+            if read == 0 && wrote == 0 {
+                return Err(WsError::Inflate);
+            }
         }
     }
 }

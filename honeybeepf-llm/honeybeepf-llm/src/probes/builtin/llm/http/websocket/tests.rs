@@ -234,3 +234,81 @@ fn the_server_answer_sets_compression_or_refuses() {
         assert_eq!(read_handshake(refused), Handshake::Refused);
     }
 }
+
+/// Messages compressed as a permessage-deflate server sends them: one stream, the sync tail cut off.
+struct Deflater(flate2::Compress);
+
+impl Deflater {
+    fn new() -> Self {
+        Self(flate2::Compress::new(flate2::Compression::default(), false))
+    }
+
+    fn message(&mut self, payload: &str) -> Vec<u8> {
+        let mut out = Vec::with_capacity(payload.len() + 64);
+        self.0
+            .compress_vec(payload.as_bytes(), &mut out, flate2::FlushCompress::Sync)
+            .expect("in-memory compression");
+        while out.capacity() == out.len() {
+            out.reserve(1024);
+            self.0
+                .compress_vec(&[], &mut out, flate2::FlushCompress::Sync)
+                .expect("in-memory compression");
+        }
+        assert!(out.ends_with(&DEFLATE_TAIL));
+        out.truncate(out.len() - DEFLATE_TAIL.len());
+        frame(true, 1 | 0x40, &out, false)
+    }
+}
+
+fn read_compressed(
+    stream: &[u8],
+    no_context_takeover: bool,
+    size: usize,
+) -> Result<Vec<WsEvent>, WsError> {
+    let mut frames = ServerFrames::new(Some(Deflate {
+        no_context_takeover,
+    }));
+    let mut events = Vec::new();
+    for piece in stream.chunks(size) {
+        frames.feed(piece, &mut events)?;
+    }
+    Ok(events)
+}
+
+#[test]
+fn compressed_messages_share_one_window_unless_the_server_resets_it() {
+    let expected = [WsEvent::Started("resp_1".into()), realtime_ended()];
+    for no_context_takeover in [false, true] {
+        let mut deflater = Deflater::new();
+        let mut stream = Vec::new();
+        for message in [CREATED.to_string(), audio_delta(20_000), DONE.into()] {
+            if no_context_takeover {
+                deflater = Deflater::new();
+            }
+            stream.extend(deflater.message(&message));
+        }
+        for size in [1, 7, 1000, stream.len()] {
+            assert_eq!(
+                read_compressed(&stream, no_context_takeover, size).as_deref(),
+                Ok(&expected[..]),
+                "pieces of {size}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_deflate_bomb_stops_at_the_message_cap_and_broken_bytes_stop_the_reading() {
+    let bomb = format!(
+        r#"{{"type":"response.done","pad":"{}"}}"#,
+        "0".repeat(MAX_MESSAGE)
+    );
+    let stream = Deflater::new().message(&bomb);
+    assert!(stream.len() < MAX_MESSAGE / 100, "{} bytes", stream.len());
+    assert_eq!(
+        read_compressed(&stream, false, 4096),
+        Err(WsError::TooLarge)
+    );
+    let broken = frame(true, 1 | 0x40, &[0xff; 64], false);
+    assert_eq!(read_compressed(&broken, false, 64), Err(WsError::Inflate));
+}

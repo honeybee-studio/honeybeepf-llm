@@ -96,9 +96,14 @@ To list the workloads in your cluster that are not seen, see [Find the workloads
 |---|:-:|
 | HTTP/1.1 (keep-alive, chunked) | ✅ |
 | HTTP/2 | ✅ |
-| WebSocket (OpenAI Realtime) | ❌ |
+| WebSocket: OpenAI Realtime, Responses over a WebSocket (OpenAI and Azure) | ✅ |
+| WebSocket: other APIs (Gemini Live) | ❌ |
 | HTTP/3 (QUIC) | ❌ |
 
+- **WebSocket** calls are read from the server's messages only: each `response.done` (Realtime) or
+  `response.completed` (Responses) is one call, with its audio tokens split out. Compressed messages are read. The
+  client's messages, such as streamed audio, are not kept. Realtime models have no built-in price yet, so they count
+  as unpriced until one is [added](guides/prices.md).
 - **HTTP/2** is recorded from the start of a connection. A connection the agent joins mid-stream is still recorded,
   with the provider host unknown; a request head lost to a capture gap counts under
   `llm_responses_unparsed_total{reason="headers_lost"}`.
