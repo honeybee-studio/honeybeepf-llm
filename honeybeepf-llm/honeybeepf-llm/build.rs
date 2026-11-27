@@ -3,7 +3,9 @@ use std::{env, path::PathBuf, process::Command};
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
+    // The probes also compile the common crate's kernel-side code (ssl_class).
     println!("cargo:rerun-if-changed=../honeybeepf-llm-ebpf/src");
+    println!("cargo:rerun-if-changed=../honeybeepf-llm-common/src");
     println!("cargo:rerun-if-env-changed=HONEYBEEPF_EBPF_TARGET_DIR");
 
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
