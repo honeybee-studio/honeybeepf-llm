@@ -1,5 +1,5 @@
 {
-  "version": "2026-11-22",
+  "version": "2026-11-27",
   "providers": [
     {
       "name": "anthropic",
@@ -195,7 +195,7 @@
     {
       "name": "gemini",
       "source": "https://ai.google.dev/gemini-api/docs/pricing",
-      "checked": "2026-11-14",
+      "checked": "2026-11-27",
       "models": {
         "gemini-4-hydrogen": {"input": 1.5, "output": 7.5, "cache_read": 0.075},
         "gemini-4-argon": {"input": 2, "output": 10, "cache_read": 0.1,
@@ -217,7 +217,14 @@
         "gemini-2.5-pro": {"input": 1.25, "output": 10, "cache_read": 0.125,
           "above_tokens": 200000, "above": {"input": 2.5, "output": 15, "cache_read": 0.25}},
         "gemini-2.5-flash": {"input": 0.3, "output": 2.5, "cache_read": 0.03},
-        "gemini-2.5-flash-lite": {"input": 0.1, "output": 0.4, "cache_read": 0.01}
+        "gemini-2.5-flash-lite": {"input": 0.1, "output": 0.4, "cache_read": 0.01},
+        "gemini-3.8-live": {"input": 0.75, "output": 4.5, "modalities": {"audio": {"input": 3, "output": 12}, "image": {"input": 1}, "video": {"input": 1}}},
+        "gemini-3.8-live-extended-thinking": {"input": 0.75, "output": 4.5, "modalities": {"audio": {"input": 3, "output": 12}, "image": {"input": 1}, "video": {"input": 1}}},
+        "gemini-3.1-flash-live-preview": {"input": 0.75, "output": 4.5, "modalities": {"audio": {"input": 3, "output": 12}, "image": {"input": 1}, "video": {"input": 1}}},
+        "gemini-2.5-flash-native-audio-preview-12-2025": {"input": 0.5, "output": 2,
+          "modalities": {"audio": {"input": 3, "output": 12}, "video": {"input": 3}}},
+        "gemini-robotics-er-2-streaming-preview": {"input": 1, "output": 5,
+          "until": "2026-12-31", "then": {"input": 2, "output": 10}}
       }
     }
   ]
