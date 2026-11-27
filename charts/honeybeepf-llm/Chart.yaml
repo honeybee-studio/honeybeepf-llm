@@ -2,8 +2,8 @@ apiVersion: v2
 name: honeybeepf-llm
 description: Count LLM API tokens and USD cost per Kubernetes pod and workload with eBPF, with no gateway or SDK
 type: application
-version: 0.4.0
-appVersion: "0.4.0"
+version: 0.5.0
+appVersion: "0.5.0"
 keywords:
   - llm
   - finops
@@ -32,21 +32,23 @@ annotations:
   artifacthub.io/containsSecurityUpdates: "true"
   artifacthub.io/changes: |
     - kind: added
-      description: Go executables are probed through crypto/tls, so LLM calls from Go services are recorded
+      description: OpenAI Realtime and Responses calls over WebSocket, compressed or not (Codex included), are recorded with no configuration
     - kind: added
-      description: 18 more hosted OpenAI-compatible providers recorded with no configuration
+      description: Prices for the OpenAI Realtime and audio models, cached audio included
     - kind: added
-      description: Alert rules for spend, budgets and capture health (alerts.prometheusRule.enabled)
+      description: builtinProbes.llm.namespaces records only the pods of the listed namespaces, checked in the kernel
     - kind: added
-      description: logFormat json and audit events of what the agent attached to and loaded
-    - kind: changed
-      description: The image is Chainguard glibc-dynamic with no shell; probes run honeybeepf-llm --check-heartbeat
+      description: Calls to a provider set as a gateway (gateway true) carry hop="gateway", so totals count a call through a gateway once
+    - kind: added
+      description: Experimental builtinProbes.llm.aead records programs with a built-in BoringSSL or aws-lc, such as Claude Code
+    - kind: added
+      description: A failed LLM call logs its HTTP status
     - kind: fixed
-      description: Kubernetes API traffic no longer counts as headers_lost unparsed LLM calls
-    - kind: removed
-      description: The file-access and process-lifecycle probes and their metrics
+      description: Executables replaced or removed after their process started, as after an update, are still probed
+    - kind: fixed
+      description: A version-named executable, such as Claude Code's versions/<n>, is matched by its program folder
     - kind: security
-      description: OpenTelemetry 0.33 (GHSA-w9wp-h8wv-79jx) and an image with no known vulnerabilities
+      description: kube 5.2 for RUSTSEC-2026-0600; the agent's rustls build was not affected
   artifacthub.io/license: Apache-2.0
   artifacthub.io/links: |
     - name: Documentation
