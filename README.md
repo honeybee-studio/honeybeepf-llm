@@ -60,7 +60,7 @@ kubectl logs -n honeybeepf ds/honeybeepf-llm -f | grep 'LLM SUCCESS'
 | | Seen | Not yet |
 |---|---|---|
 | Apps | Python, Node.js, curl and anything using OpenSSL; Go 1.20+ | rustls, Java (JSSE), GnuTLS, NSS, Go before 1.20 |
-| Protocols | HTTP/1.1 and HTTP/2, streaming included; OpenAI Realtime and Responses over a WebSocket; in-cluster plain HTTP (Ollama, vLLM), opt-in | Other WebSocket APIs, HTTP/3 |
+| Protocols | HTTP/1.1 and HTTP/2, streaming included; OpenAI Realtime, Responses and Gemini Live over a WebSocket; in-cluster plain HTTP (Ollama, vLLM), opt-in | Other WebSocket APIs, HTTP/3 |
 | Calls | chat, embeddings, image and transcription, with cache and reasoning tokens | |
 
 Cost comes from a built-in price table matched by the model name; models without a price are counted as unpriced

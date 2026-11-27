@@ -55,7 +55,7 @@ told apart from a drop in traffic.
 | `background_unfinished` | an OpenAI Responses call made with `"background": true` had no usage in any poll the node saw: not polled for an hour, more than 4096 such calls waiting, or ended without usage |
 | `usage_absent` | a complete 2xx response (an HTTP/1.1 body framed by Content-Length, or a finished HTTP/2 stream) carried no usage, for example a `gemini-embedding-001` embedding, which returns none |
 | `stream_error` | a response stream ended on a provider `event: error` frame (Gemini Interactions, Anthropic Messages or OpenAI Responses, on an otherwise 200 response) instead of its final usage, so no exact token count reached the wire |
-| `too_many_websockets` | a Realtime or Responses WebSocket opened while 1024 others were being read on the node; counted once per connection, whose calls are then not read |
+| `too_many_websockets` | a Realtime, Responses or Gemini Live WebSocket opened while 1024 others were being read on the node; counted once per connection, whose calls are then not read |
 | `agent_session` | a Claude Managed Agents session call (`POST /v1/sessions`, `/v1/sessions/{id}/events`): seen, but its usage is a running session total, so it is counted here on purpose and not read as one call's tokens — not a dropped call |
 
 Not counted here: a read lost whole because the ring buffer was full (see `llm_events_total{stage="reserve_fail"}`),

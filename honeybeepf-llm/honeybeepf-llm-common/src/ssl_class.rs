@@ -6,7 +6,7 @@
 pub enum SslClass {
     Unknown = 0,
     /// Last request is a POST, a GET of a Responses object whose usage may arrive only there, or a GET that
-    /// may open a Realtime or Responses WebSocket.
+    /// may open a Realtime, Responses or Gemini Live WebSocket.
     Send = 1,
     /// Last request is another method: drop until the next request.
     SkipRequest = 2,
@@ -71,22 +71,31 @@ impl ClassEntry {
 pub type GetHead = [u64; 4];
 
 /// Whether a GET head asks for a stored Responses object, which carries a background call's usage, or may
-/// open a WebSocket on a Realtime or Responses path; userspace reads the Upgrade header and skips the rest.
+/// open a WebSocket on a Realtime, Responses or Gemini Live (`/ws/google.…`) path; userspace reads the
+/// Upgrade header and skips the rest.
 #[inline(always)]
 pub fn requests_response(head: &GetHead) -> bool {
+    const GOOGLE_WS: u64 = first(b"/ws/goog");
     // Where the path starts after `GET `, `/v1`, `/openai`, `/openai/v1`; the prefix bytes are not
     // compared, so another prefix of the same length only sends a GET userspace ignores.
-    path_at(head, 4) || path_at(head, 7) || path_at(head, 11) || path_at(head, 14)
+    path_at(head, 4)
+        || path_at(head, 7)
+        || path_at(head, 11)
+        || path_at(head, 14)
+        // google-genai joins its base URL with a second slash: `GET //ws/google.…`.
+        || word_at(head, 4) == GOOGLE_WS
+        || word_at(head, 5) == GOOGLE_WS
+}
+
+/// The first 8 bytes of `p` as a little-endian word.
+const fn first(p: &[u8]) -> u64 {
+    u64::from_le_bytes([p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]])
 }
 
 /// Whether `/responses` then `/`, ` ` or `?`, or `/realtime` then ` ` or `?`, starts at byte `at`, read by
 /// shifting aligned words: eBPF rejects unaligned stack loads.
 #[inline(always)]
 fn path_at(head: &GetHead, at: usize) -> bool {
-    /// The first 8 bytes of `p`.
-    const fn first(p: &[u8]) -> u64 {
-        u64::from_le_bytes([p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]])
-    }
     const fn rest(a: u8, b: u8, c: u8) -> u64 {
         u32::from_le_bytes([a, b, c, 0]) as u64
     }
@@ -261,6 +270,9 @@ mod tests {
             b"GET /realtime HTTP/1.1\r\nHost: litellm:4000\r\nUpgrade: websocket\r\n",
             b"GET /v1/responses HTTP/1.1\r\nHost: api.openai.com\r\nUpgrade: websocket\r\n",
             b"GET /openai/v1/responses?api-version=1 HTTP/1.1\r\nHost: x.openai.azure.com\r\n",
+            b"GET /ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=k HTTP/1.1\r\n",
+            b"GET /ws/google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent HTTP/1.1\r\n",
+            b"GET //ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent HTTP/1.1\r\n",
         ] {
             assert_eq!(class_after(Unknown, req), Send, "{req:?}");
             assert_eq!(class_after(SkipRequest, req), Send, "{req:?}");
@@ -277,6 +289,8 @@ mod tests {
             b"GET /v1/realtimeX?model=a HTTP/1.1\r\nHost: api.openai.com\r\n",
             b"GET /v1/chat/completions/chatcmpl-1 HTTP/1.1\r\nHost: a\r\n",
             b"GET /api/openai/v1/responses/resp_1 HTTP/1.1\r\nHost: a\r\n",
+            b"GET /ws/socket.io/?EIO=4&transport=websocket HTTP/1.1\r\nHost: a\r\n",
+            b"GET /v1/ws/google.ai.generativelanguage HTTP/1.1\r\nHost: a\r\n",
         ] {
             assert_eq!(class_after(Unknown, req), SkipRequest, "{req:?}");
         }

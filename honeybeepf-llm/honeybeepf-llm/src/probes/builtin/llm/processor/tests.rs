@@ -1971,6 +1971,44 @@ fn a_realtime_websocket_records_each_response_from_the_server_frames_only() {
 }
 
 #[test]
+fn a_gemini_live_websocket_records_each_turn_with_the_setup_model() {
+    let get = b"GET /ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=k HTTP/1.1\r\nHost: generativelanguage.googleapis.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n";
+    let mut p = StreamProcessor::new();
+    let mut out = send(&mut p, LlmDirection::Write, get, None);
+    out.extend(send(&mut p, LlmDirection::Read, SWITCHED, None));
+    let setup = br#"{"setup":{"model":"models/gemini-3.8-live"}}"#;
+    let mut setup_frame = vec![0x81, 0x80 | setup.len() as u8, 9, 8, 7, 6];
+    setup_frame.extend(
+        setup
+            .iter()
+            .enumerate()
+            .map(|(i, b)| b ^ [9, 8, 7, 6][i % 4]),
+    );
+    out.extend(send(&mut p, LlmDirection::Write, &setup_frame, None));
+    assert_eq!(p.websocket_model(), Some("gemini-3.8-live"));
+    let audio = format!(
+        r#"{{"serverContent":{{"modelTurn":{{"parts":[{{"inlineData":{{"data":"{}"}}}}]}}}}}}"#,
+        "QUJD".repeat(3000)
+    );
+    let done = r#"{"serverContent":{"turnComplete":true},"usageMetadata":{"promptTokenCount":30,"responseTokenCount":12,"promptTokensDetails":[{"modality":"AUDIO","tokenCount":25}],"responseTokensDetails":[{"modality":"AUDIO","tokenCount":12}]}}"#;
+    out.extend(send(
+        &mut p,
+        LlmDirection::Read,
+        &ws_text(r#"{"setupComplete":{}}"#),
+        None,
+    ));
+    for _ in 0..2 {
+        for record in [ws_text(&audio), ws_text(done)].concat().chunks(5) {
+            out.extend(send(&mut p, LlmDirection::Read, record, None));
+            out.extend(send(&mut p, LlmDirection::Write, &client_frame(3000), None));
+        }
+    }
+    assert_eq!(count(&out, Outcome::Recorded), 2);
+    assert!(unparsed(&out).is_empty());
+    assert_eq!(p.websocket_model(), Some("gemini-3.8-live"));
+}
+
+#[test]
 fn a_lost_server_record_ends_the_reading_and_counts_the_open_response() {
     let (mut p, _) = upgraded(&[SWITCHED, &ws_text(RT_CREATED)].concat());
     let out = send(
