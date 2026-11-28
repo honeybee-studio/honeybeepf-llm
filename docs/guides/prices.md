@@ -33,7 +33,7 @@ builtinProbes:
 | a model it does not have | adds it |
 | `price_multiplier` on a provider | scales that provider's built-in prices (`0.8` = pay 80%), not the models you list; a provider with only a multiplier still needs `source`, `checked` and `models: {}` |
 
-With the built-in table `2026-10-26`, the example above gives (USD per million tokens, input / output / cache read):
+With the built-in table `2026-11-27`, the example above gives (USD per million tokens, input / output / cache read):
 
 | Model | Built-in | After | Why |
 |---|---|---|---|

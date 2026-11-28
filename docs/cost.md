@@ -15,7 +15,7 @@ Every recorded call gets an estimated cost in USD: its token counts times the mo
 |---|---|
 | By | the model name, not the host: Azure OpenAI, Bedrock, Vertex AI and regional endpoints are priced as the provider's own API, so a regional surcharge such as OpenAI data residency (+10%) is not added |
 | Prices | the providers' published list prices; each provider entry names its pricing page and the date it was checked |
-| Not included | per-request tool fees, such as web search, and audio input prices |
+| Not included | per-request tool fees, such as web search |
 
 Compare the cost with `llm_unpriced_tokens_total` before trusting a total.
 

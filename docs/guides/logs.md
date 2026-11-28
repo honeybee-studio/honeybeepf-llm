@@ -25,7 +25,7 @@ as fields, and they stay on at `info` unless `RUST_LOG` names `audit` itself.
 | `event` | When | Fields |
 |---|---|---|
 | `startup` | the agent starts | `version`, `kernel` |
-| `attach` | LLM probes attached to a library or executable | `kind` (`libssl`, `exe_openssl`, `exe_go`), `path`, `ino`, `detail` |
+| `attach` | LLM probes attached to a library or executable | `kind` (`libssl`, `exe_openssl`, `exe_go`, `exe_aead` with the experimental AEAD probes), `path`, `ino`, `detail` |
 | `attach_failed` | a library or executable with TLS code could not be probed (warn) | `path`, `error` |
 | `plaintext_capture` | plaintext capture turned on, or configured but off (warn) | `enabled`, `cgroup`, `endpoints` or `reason` |
 | `providers_loaded` | the provider set the probe runs with | `providers`, `entries`, `config_hash` |

@@ -33,7 +33,8 @@ you mark with `plaintext`, the agent copies the bytes at the socket instead (see
 
 ## 3. Turn bytes into calls
 
-In user space, the agent reassembles each connection's bytes into HTTP/1.1 or HTTP/2 requests and responses,
+In user space, the agent reassembles each connection's bytes into HTTP/1.1 or HTTP/2 requests and responses, or WebSocket
+messages (Realtime, Responses, Gemini Live),
 decompresses them (`gzip`, `br`, `zstd`, `deflate`) and follows server-sent event streams to their end. It picks the
 provider from the request's host and path and reads the token counts from the response's usage fields: prompt,
 completion, cache read and write, and reasoning tokens.
@@ -55,7 +56,7 @@ is counted in `llm_unpriced_tokens_total`, never recorded as $0.
 ## 6. Export
 
 The agent exports tokens, requests, latency and cost as OpenTelemetry metrics over OTLP, labelled by namespace, pod,
-workload and model, and logs one line per call with its model, request path, pod, latency and token counts. The
+workload and model, and logs one line per call with its model, pod, latency and token counts (the request path at `debug`). The
 captured bytes stay in the agent's memory and are dropped once parsed: prompts, responses, headers and API keys are
 never exported or logged.
 
