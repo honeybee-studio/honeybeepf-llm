@@ -38,7 +38,12 @@ prometheus_export:
   features: [application]
   instrumentations: [genai]
 """
+# AgentSight (--agentsight): `record` on the client processes by name, its token report read at the end. The mock
+# runs under another name so it is not traced: the client's calls are the ones to count.
+AGENTSIGHT_READY = "Press Ctrl+C to stop"
 OBI_TOKENS = re.compile(r"^gen_ai_client_token_usage_sum\{.*\} (\S+)$", re.M)
+USAGE_PROMPT = re.compile(rb'"prompt_tokens":\s*(\d+)')
+USAGE_COMPLETION = re.compile(rb'"completion_tokens":\s*(\d+)')
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 HZ = os.sysconf("SC_CLK_TCK")
 # name: (requests/s: None = --rate, 0 = as fast as possible; share of requests that are LLM calls)
@@ -82,9 +87,10 @@ def mock(cert, key):
             if self.path != "/v1/chat/completions":
                 return self.reply(b'{"ok":true}')
             req = json.loads(body)
-            k = req["max_tokens"]
+            k = req.get("max_tokens") or req["max_completion_tokens"]  # newer clients send the second
             usage = {"prompt_tokens": PROMPT_TOKENS, "completion_tokens": k, "total_tokens": PROMPT_TOKENS + k}
-            head = {"id": "chatcmpl-bench", "model": req["model"]}
+            # A fresh id per response, as the API gives: a tool may tell calls apart by it.
+            head = {"id": f"chatcmpl-{os.urandom(12).hex()}", "model": req["model"]}
             if not req.get("stream"):
                 msg = {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
                 return self.reply(json.dumps({**head, "object": "chat.completion", "choices": [msg], "usage": usage}).encode())
@@ -109,6 +115,7 @@ def mock(cert, key):
     ctx.load_cert_chain(cert, key)
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     server.daemon_threads = True
+    server.handle_error = lambda *_: None  # a client closing mid-stream (the openai SDK after [DONE]) is no error
     server.socket = ctx.wrap_socket(server.socket, server_side=True)
     server.serve_forever()
 
@@ -140,8 +147,8 @@ def client(seed, rate, duration, llm_share, out, delay, gateway=None):
             req = {"model": "gpt-4o-mini", "max_tokens": k, "messages": [{"role": "user", "content": "hi"}]}
             if rng.random() < 0.5:
                 req |= {"stream": True, "stream_options": {"include_usage": True}}
-            host, method, path, body = LLM_HOST, "POST", "/v1/chat/completions", json.dumps(req)
-            tokens += PROMPT_TOKENS + k
+            path = (os.environ.get("HB_GATEWAY_PREFIX", "") if gateway else "") + "/v1/chat/completions"
+            host, method, body = LLM_HOST, "POST", json.dumps(req)
             llm += 1
         elif rng.random() < 0.5:
             host, method, path, body = OTHER_HOST, "GET", "/static", None
@@ -149,31 +156,62 @@ def client(seed, rate, duration, llm_share, out, delay, gateway=None):
             host, method, path, body = OTHER_HOST, "POST", "/api/items", '{"id":1}'
         conn = conns[host]
         headers = {"Host": host, "Content-Type": "application/json"}
-        if gateway and host == LLM_HOST:
+        if gateway and host == LLM_HOST and os.environ.get("HB_GATEWAY_KEY"):
             headers["Authorization"] = "Bearer " + os.environ["HB_GATEWAY_KEY"]
         conn.request(method, path, body, headers)
         resp = conn.getresponse()
-        resp.read()
+        data = resp.read()
         if resp.status != 200:
             sys.exit(f"{method} {path}: HTTP {resp.status}; is another server on port {PORT}?")
+        if host == LLM_HOST:
+            # The usage the app received, the last one in a stream: a gateway may change the request on the way.
+            tokens += sum(int(v[-1]) for v in (USAGE_PROMPT.findall(data), USAGE_COMPLETION.findall(data)) if v)
         lat.append(time.perf_counter() - start)
     Path(out).write_text(json.dumps({"n": len(lat), "llm": llm, "tokens": tokens, "wall": time.perf_counter() - t0, "lat": lat}))
 
 
+TOOL_NAMES = {"honeybeepf-llm": "honeybeepf-llm", "obi": "OBI", "agentsight": "AgentSight"}
+
+
+def tool(args):
+    return "obi" if args.obi else "agentsight" if args.agentsight else "honeybeepf-llm"
+
+
+def tree(pid):
+    """`pid` and every process below it."""
+    children = {}
+    for d in os.listdir("/proc"):
+        if d.isdigit():
+            try:
+                ppid = int(Path(f"/proc/{d}/stat").read_text().rsplit(")", 1)[1].split()[1])
+                children.setdefault(ppid, []).append(int(d))
+            except OSError:
+                pass
+    out, todo = [], [pid]
+    while todo:
+        out.append(todo.pop())
+        todo += children.get(out[-1], [])
+    return out
+
+
 class Agent:
-    def __init__(self, binary, log, obi=False):
-        self.log, self.obi = log, obi
+    def __init__(self, binary, log, kind="honeybeepf-llm"):
+        self.binary, self.log, self.kind = binary, log, kind
         env = {**os.environ, "BUILTIN_PROBES__LLM": "true", "RUST_LOG": "info"}
         cmd, ready = [binary], READY
-        if obi:
+        if kind == "obi":
             config = Path(log).with_suffix(".yml")
             config.write_text(OBI_CONFIG)
             env = {**os.environ, "OTEL_EBPF_MIN_PROCESS_AGE": "0s", "OTEL_EBPF_DISCOVERY_POLL_INTERVAL": "500ms"}
             cmd, ready = [binary, "-config", str(config)], OBI_READY
+        elif kind == "agentsight":
+            self.db = Path(log).with_suffix(".db")
+            self.db.unlink(missing_ok=True)
+            cmd, ready = [binary, "record", "--no-server", "--db", str(self.db), "-c", "python3"], AGENTSIGHT_READY
         t0 = time.perf_counter()
         with open(log, "w") as out:
             self.proc = spawn(cmd, env=env, stdout=out, stderr=subprocess.STDOUT)
-        while ready not in self.text():
+        while ready not in self.text() or (kind == "agentsight" and len(tree(self.proc.pid)) < 3):
             if self.proc.poll() is not None or time.perf_counter() - t0 > 120:
                 sys.exit(f"agent did not start:\n{self.text()[-2000:]}")
             time.sleep(0.01)
@@ -183,28 +221,47 @@ class Agent:
         return ANSI.sub("", Path(self.log).read_text(errors="replace"))
 
     def cpu(self):
-        f = Path(f"/proc/{self.proc.pid}/stat").read_text().rsplit(")", 1)[1].split()
-        return (int(f[11]) + int(f[12])) / HZ
-
-    def mem(self):
-        pid = self.proc.pid
-        status = dict(re.findall(r"^(\w+):\s+(\d+) kB", Path(f"/proc/{pid}/status").read_text(), re.M))
-        pss = re.search(r"^Pss:\s+(\d+) kB", Path(f"/proc/{pid}/smaps_rollup").read_text(), re.M)[1]
-        maps = {}  # map_id -> memlock, as `bpftool map` shows it
-        for fd in os.listdir(f"/proc/{pid}/fd"):
+        """CPU time of the tool and the helper processes it starts (AgentSight's loaders)."""
+        total = 0.0
+        for pid in tree(self.proc.pid):
             try:
-                if os.readlink(f"/proc/{pid}/fd/{fd}") == "anon_inode:bpf-map":
-                    info = dict(re.findall(r"^(\w+):\s+(\S+)", Path(f"/proc/{pid}/fdinfo/{fd}").read_text(), re.M))
-                    maps[info["map_id"]] = int(info["memlock"])
+                f = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+                total += (int(f[11]) + int(f[12])) / HZ
             except OSError:
                 pass
-        mb = lambda kb: int(kb) / 1024
-        return mb(status["RssAnon"]), mb(status["RssFile"]), mb(pss), sum(maps.values()) / 2**20
+        return total
+
+    def mem(self):
+        anon = file = pss = 0
+        maps = {}  # map_id -> memlock, as `bpftool map` shows it
+        for pid in tree(self.proc.pid):
+            try:
+                status = dict(re.findall(r"^(\w+):\s+(\d+) kB", Path(f"/proc/{pid}/status").read_text(), re.M))
+                anon += int(status["RssAnon"])
+                file += int(status["RssFile"])
+                pss += int(re.search(r"^Pss:\s+(\d+) kB", Path(f"/proc/{pid}/smaps_rollup").read_text(), re.M)[1])
+                fds = os.listdir(f"/proc/{pid}/fd")
+            except (OSError, KeyError, TypeError):
+                continue
+            for fd in fds:
+                try:
+                    if os.readlink(f"/proc/{pid}/fd/{fd}") == "anon_inode:bpf-map":
+                        info = dict(re.findall(r"^(\w+):\s+(\S+)", Path(f"/proc/{pid}/fdinfo/{fd}").read_text(), re.M))
+                        maps[info["map_id"]] = int(info["memlock"])
+                except OSError:
+                    pass
+        mb = lambda kb: kb / 1024
+        return mb(anon), mb(file), mb(pss), sum(maps.values()) / 2**20
 
     def recorded(self):
-        """Tokens the tool recorded: the agent's `LLM SUCCESS` lines, or OBI's token histogram sums."""
-        if not self.obi:
+        """Tokens the tool recorded: the agent's `LLM SUCCESS` lines, OBI's token histogram sums, or AgentSight's
+        token report (read after it stops, when its database is written)."""
+        if self.kind == "honeybeepf-llm":
             return sum(int(t) for t in SUCCESS.findall(self.text()))
+        if self.kind == "agentsight":
+            out = subprocess.run([self.binary, "report", "token", "--db", str(self.db), "--group-by", "comm", "--json"],
+                                 capture_output=True, text=True, check=True).stdout
+            return sum(row["total_tokens"] for row in json.loads(out))
         import urllib.request
 
         metrics = urllib.request.urlopen(f"http://127.0.0.1:{OBI_PORT}/metrics", timeout=10).read().decode()
@@ -219,15 +276,28 @@ class Agent:
                 last, since = size, time.perf_counter()
             time.sleep(0.1)
 
+    def lost(self):
+        """AgentSight's count of events its ring buffer had no room for (`capture_loss`), read with bpftool."""
+        out = subprocess.run(["bpftool", "-j", "map", "dump", "name", "capture_loss"], capture_output=True, text=True)
+        try:
+            return sum(int(e["value"]) if isinstance(e["value"], (int, str)) else
+                       int.from_bytes(bytes(int(b, 16) for b in e["value"]), "little") for e in json.loads(out.stdout))
+        except (ValueError, KeyError, TypeError):
+            return None
+
     def stop(self):
         self.proc.send_signal(signal.SIGINT)
-        self.proc.wait(30)
+        try:  # AgentSight can take long to stop with many processes on the node
+            self.proc.wait(120)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait(30)
 
 
 def run_case(args, tmp, case, with_agent, seed, duration=None):
     rate, share = CASES[case]
     rate = args.rate if rate is None else rate
-    agent = Agent(args.agent, tmp / f"agent-{case}.log", args.obi) if with_agent else None
+    agent = Agent(args.agent, tmp / f"agent-{case}.log", tool(args)) if with_agent else None
     c0 = agent.cpu() if agent else 0
     outs = [tmp / f"client-{w}.json" for w in range(args.workers)]
     procs = [spawn([sys.executable, __file__, "client", str(seed * 100 + w), str(rate / args.workers),
@@ -243,10 +313,13 @@ def run_case(args, tmp, case, with_agent, seed, duration=None):
            "p99": statistics.quantiles(lat, n=100)[98] * 1e3, "sent": sum(r["tokens"] for r in res)}
     if agent:
         agent.drain()
-        cpu, mem, recorded = agent.cpu(), agent.mem(), agent.recorded()
+        cpu, mem = agent.cpu(), agent.mem()
+        lost = agent.lost() if agent.kind == "agentsight" else None
+        recorded = None if agent.kind == "agentsight" else agent.recorded()
         agent.stop()  # the agent logs its kernel counters on exit too
+        recorded = agent.recorded() if recorded is None else recorded
         text = agent.text()
-        row |= {"cpu": (cpu - c0) / n * 1000, "mem": mem, "recorded": recorded,
+        row |= {"cpu": (cpu - c0) / n * 1000, "mem": mem, "recorded": recorded, "lost": lost,
                 "unparsed": text.count("LLM UNPARSED"), "stats": ([""] + re.findall(r"\[LLM stats\] (.*)", text))[-1]}
     return row
 
@@ -257,7 +330,7 @@ def startup(args, tmp):
         spawn([sys.executable, "-c", "import ssl, time; time.sleep(3600)"] if i < args.processes // 20 else ["sleep", "3600"])
     times = []
     for _ in range(args.reps):
-        agent = Agent(args.agent, tmp / "agent-startup.log", args.obi)
+        agent = Agent(args.agent, tmp / "agent-startup.log", tool(args))
         times.append(agent.startup)
         agent.stop()
     return statistics.median(times)
@@ -271,8 +344,10 @@ def environment(args):
     return [f"- Kernel: {platform.release()} ({distro[1] if distro else '?'})",
             f"- CPU: {cpu[1] if cpu else platform.machine()}, {os.cpu_count()} vCPU; memory {mem:.1f} GiB",
             f"- Python {platform.python_version()}, {subprocess.run(['openssl', 'version'], capture_output=True, text=True).stdout.strip()}",
-            f"- {'OBI' if args.obi else 'Agent'} sha256 {agent}…; "
-            + ("GenAI capture on, Prometheus export not scraped" if args.obi else "RUST_LOG=info, no OTLP endpoint"),
+            f"- {TOOL_NAMES[tool(args)]} sha256 {agent}…; " + {
+                "obi": "GenAI capture on, Prometheus export not scraped",
+                "agentsight": "record on the `python3` clients, no web server; the mock runs as `hbmock`",
+                "honeybeepf-llm": "RUST_LOG=info, no OTLP endpoint"}[tool(args)],
             f"- {args.workers} client processes, {args.rate} req/s for fixed-rate cases, {args.duration} s per run, "
             f"{args.reps} runs per cell (median), seed {args.seed}, clients start {args.client_delay:g} s after the tool"]
 
@@ -285,7 +360,7 @@ def steal_ticks():
 
 def report(args, rows, start, steal):
     med = lambda case, on, key: statistics.median(r[key] for r in rows[case, on])
-    lines = [f"# {'OBI' if args.obi else 'honeybeepf-llm'} overhead ({time.strftime('%Y-%m-%d')})", "", *environment(args),
+    lines = [f"# {TOOL_NAMES[tool(args)]} overhead ({time.strftime('%Y-%m-%d')})", "", *environment(args),
              f"- CPU steal during the runs: {steal:.1%} (a busy VM host makes every number noisier)", "",
              "## Application impact", "",
              "| case | req/s off | req/s on | p50 ms off | p50 ms on | p99 ms off | p99 ms on |", "|---|---|---|---|---|---|---|"]
@@ -304,11 +379,14 @@ def report(args, rows, start, steal):
             lines.append(f"| {case} | {med(case, True, 'cpu'):.3f} | " + " | ".join(f"{m:.1f}" for m in mem) + f" | {acc} |")
         if args.obi:
             lines += ["", "OBI keeps no count of the calls it could not read."]
+        elif args.agentsight:
+            lines += ["", "AgentSight's `capture_loss` (events its ring buffer had no room for), per run:", ""]
+            lines += [f"- `{case}`: " + ", ".join(str(r["lost"]) for r in rows[case, True]) for case in args.cases]
         else:
             lines += ["", "Where calls were lost (per run: `LLM UNPARSED` lines; the agent's kernel counters at exit):", ""]
             lines += [f"- `{case}`: {r['unparsed']} unparsed; {r['stats']}" for case in args.cases for r in rows[case, True]
                       if r["recorded"] < r["sent"]] or ["- none"]
-        ready = OBI_READY if args.obi else READY
+        ready = {"obi": OBI_READY, "agentsight": AGENTSIGHT_READY, "honeybeepf-llm": READY}[tool(args)]
         lines += ["", "## Startup", "", f"Start to `{ready}` with {args.processes} idle processes: {start:.2f} s (median)"]
     return "\n".join(lines) + "\n"
 
@@ -317,6 +395,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--agent", help="agent binary; omit to run the baseline only")
     ap.add_argument("--obi", action="store_true", help="--agent is an OBI binary, measured the same way")
+    ap.add_argument("--agentsight", action="store_true", help="--agent is an AgentSight binary, measured the same way")
     ap.add_argument("--client-delay", type=float, default=0, help="seconds each client waits before its load")
     ap.add_argument("--rate", type=float, default=200, help="requests/s for the fixed-rate cases")
     ap.add_argument("--duration", type=float, default=30)
@@ -339,7 +418,11 @@ def main():
                        check=True, capture_output=True)
         rows, s0 = {}, steal_ticks()
         try:
-            server = spawn([sys.executable, __file__, "mock", tmp / "cert.pem", tmp / "key.pem"])
+            python = sys.executable
+            if args.agentsight:  # another process name, which `record -c python3` leaves out
+                (tmp / "hbmock").symlink_to(os.path.realpath(sys.executable))
+                python = str(tmp / "hbmock")
+            server = spawn([python, __file__, "mock", tmp / "cert.pem", tmp / "key.pem"])
             while socket.socket().connect_ex(("127.0.0.1", PORT)):
                 if server.poll() is not None:
                     sys.exit("the mock did not start")
