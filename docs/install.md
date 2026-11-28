@@ -35,7 +35,7 @@ kubectl logs -n honeybeepf ds/honeybeepf-llm -f | grep 'LLM SUCCESS'
 agent pod.
 
 ```
-2026-10-26T08:43:35.510264Z  INFO honeybeepf_llm::probes::builtin::llm::processor: LLM SUCCESS | PID: 1686847 | Model: claude-test | Latency: 0.00s | Tokens: 140 (Prompt: 125, Compl: 15, Cache read: 100, Cache write: 0) | Pod: team-b/support-bot-589db898dd-rv9ts
+2026-10-26T08:43:35.510264Z  INFO honeybeepf_llm::probes::builtin::llm::processor::background: LLM SUCCESS | PID: 1686847 | Model: claude-test | Transport: tls | Latency: 0.00s | Tokens: 140 (Prompt: 125, Compl: 15, Cache read: 100, Cache write: 0) | Pod: team-b/support-bot-589db898dd-rv9ts
 ```
 
 The bundled Prometheus is the `honeybeepf-llm-prometheus-server` service (port 80) in the `honeybeepf` namespace; the

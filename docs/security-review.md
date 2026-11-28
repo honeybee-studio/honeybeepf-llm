@@ -12,7 +12,7 @@ code or the CI workflows and describes the chart's defaults unless an option is 
 | What is it? | A DaemonSet that reads TLS plaintext in memory on its node to find LLM API calls and exports token and cost metrics. Not a proxy; it never changes a call or its result. |
 | Privileged? | No `privileged: true`. All capabilities dropped, six added back ([Privileges](#2-privileges)). AppArmor unconfined for the agent container. |
 | Runs as root? | Yes, uid 0, with `hostPID`. A compromised agent has root-level access to the node. |
-| Host filesystem? | Only the cgroup tree, read-only. `/proc/<pid>/root` still reaches other filesystems through `hostPID`. |
+| Host filesystem? | The cgroup tree, tracefs and debugfs, read-only. `/proc/<pid>/root` still reaches other filesystems through `hostPID`. |
 | Reads plaintext? | Yes, in memory only, until a connection is known not to be an LLM call ([Data handling](#3-data-handling)). |
 | What leaves the node? | OTLP metrics and log lines. Never request or response bodies, headers or keys. |
 | What did it do? | Audit events log every library and executable it attached to, plaintext capture and the providers and prices it loaded, as JSON with `LOG_FORMAT=json` ([Logs](guides/logs.md)). |
@@ -129,7 +129,7 @@ granted but unused.
 | Plaintext | decrypted request and response bytes, headers such as `Authorization` included, copied into a ring buffer (8 MB for TLS, 4 MB for plaintext when on), parsed for token counts and dropped |
 | Bounds | 16 KB per read, 4 KB per write and 64 KB per plaintext receive in the kernel; 8 MB of request and 16 MB of response per connection in user space |
 | Exported | OTLP metrics only: request, token, latency and cost series ([labels](metrics.md)), a provider-config info series and the price table version |
-| Logged | per call: model, request path without the query string, pid, pod, latency and token counts. Never a body or header; the model and an OpenAI background call's id are the only values taken from a body |
+| Logged | per call: model, pid, pod, latency and token counts (the request path without the query string at `debug`). Never a body or header; the model and an OpenAI background call's id are the only values taken from a body |
 | Network | no listening port. Outbound: the OTLP collector, the Kubernetes API, and DNS for plaintext hosts outside the cluster |
 | Disk | read-only root filesystem and host mounts; the only file written is the heartbeat in a 1 MiB in-memory `emptyDir` |
 | Scope | every pod and host process by default; with `builtinProbes.llm.namespaces`, TLS data is copied only from the containers of pods in those namespaces, checked in the kernel by cgroup before any byte is read ([guide](guides/namespace-scope.md)) |
@@ -151,11 +151,12 @@ calls. The kernel drops a connection's bytes once it knows its class:
 | Connection | Filtered in the kernel |
 |---|---|
 | HTTP/1.1 to a host no provider serves, or a server-side connection | after its first request |
-| other HTTP/1.1 | requests until the next POST |
+| other HTTP/1.1 | requests until the next POST, a GET of a stored Responses object, or a GET to a Realtime, Responses or Gemini Live WebSocket path |
 | HTTP/2, and TLS that is not HTTP | not filtered: copied to the agent, which drops what matches no provider |
 
-- **Labels an app controls.** The `model` label comes from the application's JSON; the OpenTelemetry SDK caps each
-  instrument at 2,000 series.
+- **Labels an app controls.** The `model` label comes from the application's JSON; the agent rebuilds its metrics at
+  1,500 series per instrument, at most every 10 minutes, keeping series written in the last 15 minutes; past the
+  OpenTelemetry SDK's 2,000-series limit, new series fold into `otel.metric.overflow`.
 - **Keys stay out of logs.** A test feeds fake keys in each provider's form (`Authorization: Bearer`, Gemini `?key=` and
   `x-goog-api-key`, Bedrock SigV4 presigned queries) and checks the logs never contain them; it covers HTTP/1.1.
 - **OTLP transport.** Plaintext gRPC to a `host:port` or `http://` endpoint, the in-cluster default; TLS to `https://`,
@@ -188,11 +189,11 @@ plaintext capture off, no OTLP export.
 | Application | −6.6% throughput at the saturating rate; p99 +0.1 to +0.4 ms at 200 requests/s |
 | Chart | requests 50m CPU and 128Mi, limits 1 CPU and 1Gi |
 
-- **Kernel memory is fixed by the map sizes**: ring buffers of 8 MB for TLS, 4 MB for plaintext when on (4 KB off), 1 MB
+- **Kernel memory is fixed by the map sizes**: ring buffers of 8 MB for TLS, 4 MB for plaintext when on (4 KB off),
   64 KB each for exec and libssl opens, plus hash maps of up to 65,536 entries.
   The extra memory with plaintext on has not been measured.
 - **User-space memory is bounded per connection, not per node.** Each open connection can hold 8 MB of request and 16 MB
-  of response (32 MB for HTTP/2), freed after 5 minutes idle. Many concurrent large calls can reach the 1Gi limit and
+  of response (32 MB for HTTP/2), freed after 5 minutes idle (an idle WebSocket after an hour). Many concurrent large calls can reach the 1Gi limit and
   get the agent OOM-killed; applications are unaffected. Only speculative HTTP/2 buffering has a node-wide cap, 64 MB.
 
 <details markdown>

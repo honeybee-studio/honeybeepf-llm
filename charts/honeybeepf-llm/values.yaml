@@ -63,7 +63,7 @@ builtinProbes:
     podLabels: []
     # Example:
     # podLabels: ["variant", "app.kubernetes.io/version"]
-    # Custom providers config (optional). Built-in: OpenAI, Anthropic, Gemini (also via Azure, Bedrock, Vertex AI)
+    # Custom providers config (optional). Built-in: OpenAI, Anthropic, Gemini (also via Azure, Bedrock, Vertex AI), Meta and many OpenAI-compatible APIs (docs/providers.md)
     # Add your own providers here (e.g. Ollama, vLLM, private models); a built-in name replaces every built-in entry of that name.
     # An in-cluster gateway (LiteLLM, a company proxy) gets gateway: true, so totals count its calls once (docs/cost.md).
     providers: []

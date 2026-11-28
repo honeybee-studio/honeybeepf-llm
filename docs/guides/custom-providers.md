@@ -38,7 +38,8 @@ An OpenAI-compatible API needs no `response` block. If the server is reached ove
 
 - **Added, not replacing.** Your entries are added to the built-in ones, in the format of the
   [built-in list](https://github.com/honeybee-studio/honeybeepf-llm/blob/main/honeybeepf-llm/honeybeepf-llm-core/src/providers/default_providers.json).
-- **Except built-in names.** An entry named `openai`, `anthropic`, `gemini` or `bedrock` replaces every built-in entry
+- **Except built-in names.** An entry with a built-in name (`openai`, `anthropic`, `gemini`, `bedrock`, `meta`, `openai-compatible`,
+  `anthropic-agents`) replaces every built-in entry
   of that name, so an `openai` entry must also cover the Responses API, and an `anthropic` entry Claude on Vertex AI.
 - **Usage is read by shape.** The response's fields decide how usage is read, with the built-in entries tried first: a
   gateway that returns an OpenAI-, Anthropic- or Gemini-shaped body is read with the built-in fields.

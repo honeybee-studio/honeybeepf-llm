@@ -53,6 +53,7 @@ told apart from a drop in traffic.
 | `request_too_large` | the captured request bytes (the first 4 KB of each write) passed the 8 MB buffer limit |
 | `response_too_large` | the response passed the 16 MB buffer limit and is neither an uncompressed JSON body with usage in its first or last 64 KB (for a JSON array, in its last element) nor an uncompressed SSE stream (compressed responses always count here) |
 | `background_unfinished` | an OpenAI Responses call made with `"background": true` had no usage in any poll the node saw: not polled for an hour, more than 4096 such calls waiting, or ended without usage |
+| `headers_lost` | an HTTP/2 request head was lost to a capture gap, so the call could not be matched to its provider |
 | `usage_absent` | a complete 2xx response (an HTTP/1.1 body framed by Content-Length, or a finished HTTP/2 stream) carried no usage, for example a `gemini-embedding-001` embedding, which returns none |
 | `stream_error` | a response stream ended on a provider `event: error` frame (Gemini Interactions, Anthropic Messages or OpenAI Responses, on an otherwise 200 response) instead of its final usage, so no exact token count reached the wire |
 | `too_many_websockets` | a Realtime, Responses or Gemini Live WebSocket opened while 1024 others were being read on the node; counted once per connection, whose calls are then not read |
@@ -102,4 +103,4 @@ On the [demo](demo.md) cluster:
 
 - [Cost and prices](cost.md): the cost metrics and how calls are priced.
 - [Find the workloads that are not seen](guides/coverage.md): the TLS coverage metric.
-- [Grafana dashboards](grafana/README.md): the cost and security dashboards.
+- [Grafana dashboards](grafana/README.md): the cost dashboard.

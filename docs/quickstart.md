@@ -28,7 +28,7 @@ kubectl logs -n honeybeepf ds/honeybeepf-llm -f | grep 'LLM SUCCESS'
 Each LLM call is one line, with the model, the token counts and the pod that made it:
 
 ```
-LLM SUCCESS | PID: 1686847 | Model: claude-test | Latency: 0.00s | Tokens: 140 (Prompt: 125, Compl: 15, Cache read: 100, Cache write: 0) | Pod: team-b/support-bot-589db898dd-rv9ts
+LLM SUCCESS | PID: 1686847 | Model: claude-test | Transport: tls | Latency: 0.00s | Tokens: 140 (Prompt: 125, Compl: 15, Cache read: 100, Cache write: 0) | Pod: team-b/support-bot-589db898dd-rv9ts
 ```
 
 `ds/honeybeepf-llm` follows one agent pod. On a cluster with several nodes, each node's calls are in that node's
