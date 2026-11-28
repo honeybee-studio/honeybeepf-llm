@@ -27,8 +27,8 @@ rather than dropped silently.
 ## Which providers, languages and protocols does it cover?
 
 OpenAI, Anthropic, Gemini, Bedrock, Azure OpenAI, Vertex AI, Meta and many OpenAI-compatible APIs, from Python,
-Node.js, Go, curl and anything else using OpenSSL, over HTTP/1.1 and HTTP/2 with streaming, and OpenAI Realtime and
-Responses over a WebSocket. Not yet: rustls, Java, other WebSocket APIs and HTTP/3. The full matrix is in
+Node.js, Go, curl and anything else using OpenSSL, over HTTP/1.1 and HTTP/2 with streaming, and OpenAI Realtime,
+Responses and Gemini Live over a WebSocket. Not yet: rustls, Java, other WebSocket APIs and HTTP/3. The full matrix is in
 [What is supported](providers.md), and
 [a metric](guides/coverage.md) lists the workloads in your cluster that are not seen.
 

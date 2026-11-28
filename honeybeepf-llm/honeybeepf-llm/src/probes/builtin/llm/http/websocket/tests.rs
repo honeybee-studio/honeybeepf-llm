@@ -170,6 +170,7 @@ fn an_upgrade_to_a_listed_realtime_or_responses_path_is_detected() {
             path: "/v1/realtime".into(),
             model: Some("gpt-realtime".into()),
             matched: MatchedBy::Host,
+            dialect: Dialect::OpenAi,
         })
     );
     let azure = b"GET /openai/realtime?api-version=2025-04-01-preview&deployment=rt-east&api-key=SECRET HTTP/1.1\r\nHost: x.openai.azure.com\r\nupgrade: WebSocket\r\n\r\n";
@@ -244,6 +245,11 @@ impl Deflater {
     }
 
     fn message(&mut self, payload: &str) -> Vec<u8> {
+        frame(true, 1 | 0x40, &self.payload(payload), false)
+    }
+
+    /// One message's compressed bytes.
+    fn payload(&mut self, payload: &str) -> Vec<u8> {
         let mut out = Vec::with_capacity(payload.len() + 64);
         self.0
             .compress_vec(payload.as_bytes(), &mut out, flate2::FlushCompress::Sync)
@@ -256,7 +262,7 @@ impl Deflater {
         }
         assert!(out.ends_with(&DEFLATE_TAIL));
         out.truncate(out.len() - DEFLATE_TAIL.len());
-        frame(true, 1 | 0x40, &out, false)
+        out
     }
 }
 
@@ -265,9 +271,12 @@ fn read_compressed(
     no_context_takeover: bool,
     size: usize,
 ) -> Result<Vec<WsEvent>, WsError> {
-    let mut frames = ServerFrames::new(Some(Deflate {
-        no_context_takeover,
-    }));
+    let mut frames = ServerFrames::new(
+        Some(Deflate {
+            no_context_takeover,
+        }),
+        Dialect::OpenAi,
+    );
     let mut events = Vec::new();
     for piece in stream.chunks(size) {
         frames.feed(piece, &mut events)?;
@@ -311,4 +320,154 @@ fn a_deflate_bomb_stops_at_the_message_cap_and_broken_bytes_stop_the_reading() {
     );
     let broken = frame(true, 1 | 0x40, &[0xff; 64], false);
     assert_eq!(read_compressed(&broken, false, 64), Err(WsError::Inflate));
+}
+
+const SETUP_COMPLETE: &str = r#"{"setupComplete":{}}"#;
+const TURN_DONE: &str = r#"{"serverContent":{"turnComplete":true},"usageMetadata":{"promptTokenCount":120,"responseTokenCount":40,"totalTokenCount":160,"promptTokensDetails":[{"modality":"TEXT","tokenCount":20},{"modality":"AUDIO","tokenCount":100}],"responseTokensDetails":[{"modality":"AUDIO","tokenCount":40}]}}"#;
+
+fn gemini_audio(len: usize) -> String {
+    format!(
+        r#"{{"serverContent":{{"modelTurn":{{"parts":[{{"inlineData":{{"mimeType":"audio/pcm;rate=24000","data":"{}"}}}}]}}}}}}"#,
+        "A".repeat(len)
+    )
+}
+
+fn gemini_ended() -> WsEvent {
+    WsEvent::Ended(
+        None,
+        Box::new(UsageInfo {
+            prompt_tokens: 120,
+            completion_tokens: 40,
+            input_modalities: ModalityTokens {
+                audio: 100,
+                ..Default::default()
+            },
+            output_modalities: ModalityTokens {
+                audio: 40,
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    )
+}
+
+fn read_gemini(stream: &[u8], size: usize) -> Result<Vec<WsEvent>, WsError> {
+    let mut frames = ServerFrames::new(None, Dialect::Gemini);
+    let mut events = Vec::new();
+    for piece in stream.chunks(size) {
+        frames.feed(piece, &mut events)?;
+    }
+    Ok(events)
+}
+
+#[test]
+fn a_gemini_live_session_gives_one_call_per_turn_at_every_split() {
+    let mut stream = frame(true, 2, SETUP_COMPLETE.as_bytes(), false);
+    for _ in 0..2 {
+        for message in [gemini_audio(40_000), gemini_audio(300), TURN_DONE.into()] {
+            stream.extend(frame(true, 2, message.as_bytes(), false));
+        }
+    }
+    let expected = [
+        WsEvent::Started("".into()),
+        gemini_ended(),
+        WsEvent::Started("".into()),
+        gemini_ended(),
+    ];
+    for size in [1, 3, 10, 1000, stream.len()] {
+        assert_eq!(
+            read_gemini(&stream, size).as_deref(),
+            Ok(&expected[..]),
+            "pieces of {size}"
+        );
+    }
+}
+
+#[test]
+fn a_gemini_turn_complete_without_usage_records_nothing_and_a_huge_message_is_skipped() {
+    let mut stream = Vec::new();
+    for message in [
+        gemini_audio(10),
+        r#"{"serverContent":{"turnComplete":true}}"#.to_string(),
+        gemini_audio(MAX_USAGE),
+        // Content and the end of the turn in one message, as Gemini 3.x may send.
+        TURN_DONE.replace(
+            r#""turnComplete":true"#,
+            r#""modelTurn":{"parts":[]},"turnComplete":true"#,
+        ),
+    ] {
+        stream.extend(frame(true, 2, message.as_bytes(), false));
+    }
+    assert_eq!(
+        read_gemini(&stream, 4096),
+        Ok(vec![WsEvent::Started("".into()), gemini_ended()])
+    );
+}
+
+/// A client frame: masked with `key`, compressed when `rsv1`.
+fn client_frame(payload: &[u8], key: [u8; 4], rsv1: bool) -> Vec<u8> {
+    let mut out = vec![0x80 | u8::from(rsv1) << 6 | 1];
+    match payload.len() {
+        n if n < 126 => out.push(0x80 | n as u8),
+        n => {
+            out.push(0x80 | 126);
+            out.extend((n as u16).to_be_bytes());
+        }
+    }
+    out.extend(key);
+    out.extend(payload.iter().enumerate().map(|(i, b)| b ^ key[i % 4]));
+    out
+}
+
+#[test]
+fn a_gemini_setup_names_the_model_plain_or_compressed() {
+    let key = [0x37, 0xfa, 0x21, 0x3d];
+    let setup = br#"{"setup":{"model":"models/gemini-3.8-live","generationConfig":{"responseModalities":["AUDIO"]}}}"#;
+    assert_eq!(
+        setup_model(&client_frame(setup, key, false)),
+        Some(Some("gemini-3.8-live".into()))
+    );
+    let vertex = br#"{"setup": {"model": "projects/p/locations/us-central1/publishers/google/models/gemini-live-2.5-flash"}}"#;
+    assert_eq!(
+        setup_model(&client_frame(vertex, key, false)),
+        Some(Some("gemini-live-2.5-flash".into()))
+    );
+    let compressed = Deflater::new().payload(std::str::from_utf8(setup).expect("utf-8"));
+    assert_eq!(
+        setup_model(&client_frame(&compressed, key, true)),
+        Some(Some("gemini-3.8-live".into()))
+    );
+    // A setup naming no model is still the setup; server bytes and a ping are not.
+    assert_eq!(
+        setup_model(&client_frame(br#"{"setup":{}}"#, key, false)),
+        Some(None)
+    );
+    assert_eq!(setup_model(&text(SETUP_COMPLETE)), None);
+    assert_eq!(setup_model(&[0x89, 0x80, 1, 2, 3, 4]), None);
+}
+
+#[test]
+fn an_upgrade_to_gemini_live_is_detected_without_its_key() {
+    let live = b"GET /ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=SECRET HTTP/1.1\r\nHost: generativelanguage.googleapis.com\r\nUpgrade: websocket\r\n\r\n";
+    assert_eq!(
+        detect_upgrade(live),
+        Some(Upgrade {
+            path: "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+                .into(),
+            model: None,
+            matched: MatchedBy::Host,
+            dialect: Dialect::Gemini,
+        })
+    );
+    let vertex = b"GET /ws/google.cloud.aiplatform.v1beta1.LlmBidiService/BidiGenerateContent HTTP/1.1\r\nHost: us-central1-aiplatform.googleapis.com\r\nUpgrade: websocket\r\n\r\n";
+    assert_eq!(
+        detect_upgrade(vertex).map(|u| u.dialect),
+        Some(Dialect::Gemini)
+    );
+    // google-genai's own request, with the second slash it adds after the host.
+    let sdk = b"GET //ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=k HTTP/1.1\r\nHost: generativelanguage.googleapis.com\r\nUpgrade: websocket\r\n\r\n";
+    assert_eq!(
+        detect_upgrade(sdk).map(|u| u.dialect),
+        Some(Dialect::Gemini)
+    );
 }

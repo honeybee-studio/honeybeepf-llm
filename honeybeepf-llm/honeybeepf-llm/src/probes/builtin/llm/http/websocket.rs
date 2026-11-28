@@ -1,6 +1,6 @@
-//! WebSocket calls (OpenAI Realtime, Responses over a WebSocket): the upgrade request to a listed provider,
-//! the server's 101 answer, and the server's frames, read only for the messages that start a response or end
-//! it with its usage. Client frames are never read, and every other message is skipped unkept.
+//! WebSocket calls (OpenAI Realtime and Responses, Gemini Live): the upgrade to a listed provider, its 101 answer,
+//! and the server's messages that start a response or end it with its usage. Of the client's frames only a Gemini
+//! Live setup is read, for its model; every other message is skipped unkept.
 
 use flate2::{Decompress, FlushDecompress, Status};
 use honeybeepf_llm_core::types::UsageInfo;
@@ -24,15 +24,28 @@ pub(crate) const MAX_MESSAGE: usize = 16 * 1024 * 1024;
 const INFLATE_STEP: usize = 16 * 1024;
 /// What RFC 7692 strips from the end of each compressed message.
 const DEFLATE_TAIL: [u8; 4] = [0, 0, 0xff, 0xff];
+/// Bytes of a Gemini Live setup read for its model, which the SDKs write first.
+const SETUP_WINDOW: usize = 2048;
 
-/// A WebSocket upgrade request to a listed provider's Realtime or Responses path.
+/// Whose messages a WebSocket carries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Dialect {
+    /// OpenAI Realtime and Responses: events named by a `type` member.
+    #[default]
+    OpenAi,
+    /// Gemini Live (`BidiGenerateContent`): a turn's last server message carries its `usageMetadata`.
+    Gemini,
+}
+
+/// A WebSocket upgrade request to a listed provider's Realtime, Responses or Live path.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Upgrade {
-    /// The path without its query, which can carry a credential (Azure `api-key=`).
+    /// The path without its query, which can carry a credential (Azure `api-key=`, Gemini `key=`).
     pub path: String,
     /// `model` or `deployment` from the query, the only query parameters read.
     pub model: Option<String>,
     pub matched: MatchedBy,
+    pub dialect: Dialect,
 }
 
 /// The WebSocket upgrade a complete GET head asks for; only a listed host counts, not a shape match.
@@ -67,7 +80,58 @@ pub fn detect_upgrade(buffer: &[u8]) -> Option<Upgrade> {
         path: path.to_string(),
         model,
         matched: matched_by(Some(provider)),
+        dialect: if path.contains("BidiGenerateContent") {
+            Dialect::Gemini
+        } else {
+            Dialect::OpenAi
+        },
     })
+}
+
+/// The model a Gemini Live client names in its first frame, `{"setup":{"model":"models/…"}}`, read from its
+/// first `SETUP_WINDOW` bytes and inflated that far when compressed; None when `data` starts no client message.
+pub fn setup_model(data: &[u8]) -> Option<Option<String>> {
+    let (&b0, &b1) = (data.first()?, data.get(1)?);
+    // A client frame is masked; a setup is a whole text or binary message.
+    if b1 & 0x80 == 0 || !matches!(b0 & 0x0f, 1 | 2) {
+        return None;
+    }
+    let (len, at) = match b1 & 0x7f {
+        126 => (
+            u64::from(u16::from_be_bytes(data.get(2..4)?.try_into().ok()?)),
+            4,
+        ),
+        127 => (u64::from_be_bytes(data.get(2..10)?.try_into().ok()?), 10),
+        n => (u64::from(n), 2),
+    };
+    let mask: [u8; 4] = data.get(at..at + 4)?.try_into().ok()?;
+    let end = data
+        .len()
+        .min(at + 4 + usize::try_from(len).unwrap_or(usize::MAX));
+    let mut payload: Vec<u8> = data[at + 4..end]
+        .iter()
+        .take(SETUP_WINDOW)
+        .enumerate()
+        .map(|(i, b)| b ^ mask[i % 4])
+        .collect();
+    if b0 & 0x40 != 0 {
+        let mut out = vec![0u8; SETUP_WINDOW];
+        let mut state = Decompress::new(false);
+        let _ = state.decompress(&payload, &mut out, FlushDecompress::Sync);
+        out.truncate(state.total_out() as usize);
+        payload = out;
+    }
+    Some(model_member(&payload))
+}
+
+/// The first `"model"` string in `json`, without its `models/` resource prefix.
+fn model_member(json: &[u8]) -> Option<String> {
+    let at = json.windows(7).position(|w| w == b"\"model\"")? + 7;
+    let rest = json[at..].trim_ascii_start().strip_prefix(b":")?;
+    let rest = rest.trim_ascii_start().strip_prefix(b"\"")?;
+    let value = std::str::from_utf8(&rest[..rest.iter().position(|&b| b == b'"')?]).ok()?;
+    let model = value.rsplit_once("models/").map_or(value, |(_, m)| m);
+    super::request_model::from_query(model)
 }
 
 /// How far the server's answer to the upgrade has come.
@@ -161,6 +225,9 @@ pub struct ServerFrames {
     inflated: usize,
     /// Set when the server agreed to permessage-deflate: one window across messages, or reset after each.
     inflater: Option<Box<Inflater>>,
+    dialect: Dialect,
+    /// A Gemini turn's content has started and its `turnComplete` has not come yet.
+    turn_open: bool,
 }
 
 struct Inflater {
@@ -174,13 +241,16 @@ enum Sink {
     Typing(Vec<u8>),
     Started(Vec<u8>),
     Usage(Vec<u8>),
+    /// A whole Gemini message; one past `MAX_USAGE` is media, skipped.
+    Gemini(Vec<u8>),
     TooLong,
     Skip,
 }
 
 impl ServerFrames {
-    pub fn new(deflate: Option<Deflate>) -> Self {
+    pub fn new(deflate: Option<Deflate>, dialect: Dialect) -> Self {
         Self {
+            dialect,
             inflater: deflate.map(|d| {
                 Box::new(Inflater {
                     state: Decompress::new(false),
@@ -253,7 +323,10 @@ impl ServerFrames {
         match opcode {
             0x8..=0xa if fin && len <= 125 => {}
             0x1 | 0x2 if self.message.is_none() => {
-                self.message = Some(Sink::Typing(Vec::new()));
+                self.message = Some(match self.dialect {
+                    Dialect::OpenAi => Sink::Typing(Vec::new()),
+                    Dialect::Gemini => Sink::Gemini(Vec::new()),
+                });
                 (self.compressed, self.inflated) = (rsv1, 0);
             }
             0x0 if self.message.is_some() => {}
@@ -278,10 +351,38 @@ impl ServerFrames {
                 inflater.state.reset(false);
             }
         }
-        if let Some(event) = self.message.take().and_then(Sink::finish) {
-            events.push(event);
+        match self.message.take() {
+            Some(Sink::Gemini(bytes)) => self.gemini_message(&bytes, events),
+            Some(sink) => events.extend(sink.finish()),
+            None => {}
         }
         Ok(())
+    }
+
+    /// A Gemini server message: the first content of a turn starts it, and its `turnComplete` ends it with the
+    /// turn's usage, so each turn is one call.
+    fn gemini_message(&mut self, bytes: &[u8], events: &mut Vec<WsEvent>) {
+        // Audio chunks of an open turn are skipped unparsed.
+        if self.turn_open && !bytes.windows(14).any(|w| w == b"\"turnComplete\"") {
+            return;
+        }
+        let Ok(message) = serde_json::from_slice::<Value>(bytes) else {
+            return;
+        };
+        let Some(content) = message.get("serverContent") else {
+            return;
+        };
+        if content.get("turnComplete") == Some(&Value::Bool(true)) {
+            self.turn_open = false;
+            if message.get("usageMetadata").is_some()
+                && let Some(usage) = parse_response_json_value(&message)
+            {
+                events.push(WsEvent::Ended(None, Box::new(usage)));
+            }
+        } else if !self.turn_open {
+            self.turn_open = true;
+            events.push(WsEvent::Started("".into()));
+        }
     }
 
     /// Payload bytes of the current message, inflated first when it is compressed.
@@ -332,7 +433,10 @@ impl Sink {
             }
             Self::Started(kept) if kept.len() + bytes.len() > MAX_STARTED => *self = Self::Skip,
             Self::Usage(kept) if kept.len() + bytes.len() > MAX_USAGE => *self = Self::TooLong,
-            Self::Started(kept) | Self::Usage(kept) => kept.extend_from_slice(bytes),
+            Self::Gemini(kept) if kept.len() + bytes.len() > MAX_USAGE => *self = Self::Skip,
+            Self::Started(kept) | Self::Usage(kept) | Self::Gemini(kept) => {
+                kept.extend_from_slice(bytes);
+            }
             Self::TooLong | Self::Skip => {}
         }
     }
@@ -361,7 +465,7 @@ impl Sink {
                 Some(WsEvent::Ended(id, Box::new(usage)))
             }
             Self::TooLong => Some(WsEvent::Unread),
-            Self::Typing(_) | Self::Skip => None,
+            Self::Typing(_) | Self::Gemini(_) | Self::Skip => None,
         }
     }
 }

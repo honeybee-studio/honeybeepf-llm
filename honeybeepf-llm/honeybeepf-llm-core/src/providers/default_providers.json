@@ -175,6 +175,33 @@
     },
     {
       "name": "gemini",
+      "note": "Gemini Live over a WebSocket (Gemini API and Vertex AI): usageMetadata of the server message that carries a turn's turnComplete, one call per turn. Live counts the output as responseTokenCount, which required_field also uses to keep this entry before and apart from generateContent's candidatesTokenCount. The messages name no model: it comes from the client's setup.",
+      "hosts": [
+        "generativelanguage.googleapis.com",
+        "aiplatform.googleapis.com",
+        "aiplatform.*.rep.googleapis.com"
+      ],
+      "paths": [
+        "GenerativeService.BidiGenerateContent$",
+        "GenerativeService.BidiGenerateContentConstrained$",
+        "LlmBidiService/BidiGenerateContent$"
+      ],
+      "response": {
+        "usage_path": "usageMetadata",
+        "prompt_tokens": "promptTokenCount",
+        "completion_tokens": "responseTokenCount",
+        "extra_prompt_tokens": "toolUsePromptTokenCount",
+        "thoughts_tokens": "thoughtsTokenCount",
+        "completion_excludes_thoughts": true,
+        "cache_read_tokens": "cachedContentTokenCount",
+        "required_field": "responseTokenCount",
+        "input_modality_array": "promptTokensDetails",
+        "output_modality_array": "responseTokensDetails"
+      },
+      "request_extractor": "none"
+    },
+    {
+      "name": "gemini",
       "note": "Gemini generateContent and streamGenerateContent across Gemini API and Vertex AI (global, {region}-aiplatform, multi-region us/eu); path matching is case-sensitive (the streaming method is :streamGenerateContent).",
       "hosts": [
         "generativelanguage.googleapis.com",

@@ -1106,8 +1106,8 @@ fn test_bedrock_converse_prompt_adds_cache_read_and_write() {
 #[test]
 fn test_new_defaults_parse_existing_bodies_like_before() {
     let registry = ProviderRegistry::with_defaults();
-    // Entries 0-8 are the OpenAI (embeddings, chat, image, Responses, transcription, Realtime), Anthropic and Gemini (embeddings, chat) first-party providers.
-    let (before, _) = registry.providers.split_at(9);
+    // Entries 0-9 are the OpenAI (embeddings, chat, image, Responses, transcription, Realtime), Anthropic and Gemini (embeddings, Live, chat) first-party providers.
+    let (before, _) = registry.providers.split_at(10);
 
     for response in [
         json!({"model": "gpt-4o", "usage": {"prompt_tokens": 2000, "completion_tokens": 40,
@@ -1148,6 +1148,24 @@ fn test_realtime_usage_is_read_with_its_audio_tokens() {
     // The cached audio pays its own cache price on the mini models.
     assert_eq!(usage.cache_read_modalities.audio, 64);
     assert_eq!(usage.model, None);
+}
+
+// A Gemini Live turn's usage: `responseTokenCount` for the output, with thinking added and audio split out.
+#[test]
+fn test_gemini_live_usage_is_read_with_its_audio_and_thoughts() {
+    let registry = ProviderRegistry::with_defaults();
+    let message = json!({"serverContent": {"turnComplete": true},
+        "usageMetadata": {"promptTokenCount": 120, "responseTokenCount": 40, "thoughtsTokenCount": 6,
+            "toolUsePromptTokenCount": 4, "totalTokenCount": 170,
+            "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 20}, {"modality": "AUDIO", "tokenCount": 100}],
+            "responseTokensDetails": [{"modality": "AUDIO", "tokenCount": 40}]}});
+    let usage = parse_in_order(&registry.providers, &message).expect("live usage");
+    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (124, 46));
+    assert_eq!(
+        (usage.input_modalities.audio, usage.output_modalities.audio),
+        (100, 40)
+    );
+    assert_eq!((usage.thoughts_tokens, usage.model), (Some(6), None));
 }
 
 #[test]

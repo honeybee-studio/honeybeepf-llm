@@ -6,11 +6,12 @@ use honeybeepf_llm_core::types::ModalityTokens;
 
 const NOV_21: u32 = 20_778; // 2026-11-21
 const NOV_30: u32 = 20_787; // 2026-11-30
+const DEC_31: u32 = 20_818; // 2026-12-31
 
 #[test]
 fn test_builtin_prices_match_the_pricing_pages() {
     let table = PriceTable::builtin().expect("built-in table loads");
-    assert_eq!(table.version(), "2026-11-22");
+    assert_eq!(table.version(), "2026-11-27");
     let sources: Vec<_> = table
         .sources()
         .iter()
@@ -21,7 +22,7 @@ fn test_builtin_prices_match_the_pricing_pages() {
         [
             ("anthropic", "2026-11-10"),
             ("openai", "2026-11-22"),
-            ("gemini", "2026-11-14")
+            ("gemini", "2026-11-27")
         ]
     );
     // Opus 5.5 fast in the US: (10000×$4 + 500×$5 + 1500×$8 + 2000×$20) × 2 × 1.1.
@@ -128,6 +129,15 @@ fn test_builtin_realtime_and_audio_prices_split_audio_from_text() {
         audio: tokens,
         ..Default::default()
     };
+    let video = |tokens| ModalityTokens {
+        video: tokens,
+        ..Default::default()
+    };
+    let gemini_voice = |model: &str| {
+        call(model, 120, 40)
+            .in_modalities(audio(100))
+            .out_modalities(audio(40))
+    };
     // A Realtime voice turn: 250 input (200 audio, 64 of it cached), 80 output (60 audio).
     let voice = |model: &str| {
         call(model, 250, 80)
@@ -149,6 +159,16 @@ fn test_builtin_realtime_and_audio_prices_split_audio_from_text() {
         // Chat Completions audio: 1M audio input ×$32; gpt-audio has no cached-input price.
         (NOV_30, million("gpt-audio").in_modalities(audio(1_000_000)), Ok(32.0)),
         (NOV_30, call("gpt-audio-mini", 1000, 0).read(500), MISSING),
+        // A Gemini Live voice turn, 120 input (100 audio), 40 audio output: 100×$3 + 20×$0.75 + 40×$12.
+        (NOV_30, gemini_voice("gemini-3.8-live"), Ok(0.000795)),
+        (NOV_30, gemini_voice("gemini-3.8-live-extended-thinking"), Ok(0.000795)),
+        // The 2.5 native-audio preview: 100×$3 + 20×$0.50 + 40×$12.
+        (NOV_30, gemini_voice("gemini-2.5-flash-native-audio-preview-12-2025"), Ok(0.00079)),
+        (NOV_30, million("gemini-3.1-flash-live-preview").in_modalities(video(1_000_000)), Ok(1.0)),
+        // No Live model lists a cached-input price.
+        (NOV_30, call("gemini-3.8-live", 1000, 0).read(500), MISSING),
+        (NOV_30, million("gemini-robotics-er-2-streaming-preview"), Ok(1.0)),
+        (DEC_31 + 1, million("gemini-robotics-er-2-streaming-preview"), Ok(2.0)),
     ];
     for (day, call, want) in cases {
         assert_eq!(table.cost_on(&call, day).map(total), want, "{call:?}");

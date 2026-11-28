@@ -30,7 +30,7 @@ struct ProviderUrls {
 #[test]
 fn test_default_providers() {
     let registry = ProviderRegistry::with_defaults();
-    assert_eq!(registry.providers.len(), 18);
+    assert_eq!(registry.providers.len(), 19);
 }
 
 // Shape detection: the path-only fallback matches an LLM path on a host no entry lists.
@@ -152,7 +152,7 @@ fn test_default_provider_hosts() {
         "api.upstage.ai",
         "api.ai21.com",
     ];
-    let expected: [&[&str]; 18] = [
+    let expected: [&[&str]; 19] = [
         &openai,
         &openai,
         &media,
@@ -170,6 +170,7 @@ fn test_default_provider_hosts() {
             "claude.googleapis.com",
             "services.ai.azure.com",
         ],
+        &gemini,
         &gemini,
         &gemini,
         &gemini,
@@ -392,6 +393,7 @@ fn test_user_providers_are_added_to_the_defaults() {
             "gemini",
             "gemini",
             "gemini",
+            "gemini",
             "anthropic",
             "bedrock",
             "bedrock",
@@ -441,6 +443,7 @@ fn test_user_provider_replaces_defaults_with_its_name_in_their_place() {
             "openai",
             "anthropic",
             "anthropic",
+            "gemini",
             "gemini",
             "gemini",
             "gemini",

@@ -1,11 +1,12 @@
 //! WebSocket fragment routing: the server's answer to the upgrade, then its frames. Client frames are dropped
-//! unread. Anything that leaves the server's bytes unreadable ends the reading, and the connection is skipped.
+//! unread, but for a Gemini Live setup's model. Anything that leaves the server's bytes unreadable ends the
+//! reading, and the connection is skipped.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::probes::builtin::llm::http::websocket::{
-    Handshake, ServerFrames, Upgrade, WsError, WsEvent, read_handshake,
+    Dialect, Handshake, ServerFrames, Upgrade, WsError, WsEvent, read_handshake, setup_model,
 };
 
 use super::background::record_usage;
@@ -58,9 +59,12 @@ pub(super) fn count_too_many(ctx: &CallContext) {
 /// An upgraded connection's server side.
 pub(super) struct WsConn {
     stage: Stage,
-    /// From the upgrade's query; a Realtime response names no model.
+    /// From the upgrade's query, or a Gemini Live setup; a Realtime or Live response names no model.
     model: Option<String>,
     matched: MatchedBy,
+    dialect: Dialect,
+    /// A Gemini Live client's first message is still to come.
+    awaits_setup: bool,
     started: VecDeque<(Box<str>, Instant)>,
     /// Offset the next fragment of the server call in progress must have; 0 between calls.
     read_next: u32,
@@ -88,6 +92,8 @@ impl WsConn {
             stage: Stage::Handshake(Vec::new()),
             model: upgrade.model,
             matched: upgrade.matched,
+            dialect: upgrade.dialect,
+            awaits_setup: upgrade.dialect == Dialect::Gemini,
             started: VecDeque::new(),
             read_next: 0,
             _slot: Slot::take(&SOCKETS, MAX_SOCKETS)?,
@@ -110,7 +116,7 @@ impl WsConn {
                 }
             }
         };
-        let mut frames = ServerFrames::new(deflate);
+        let mut frames = ServerFrames::new(deflate, self.dialect);
         let read = frames.feed(&rest, events);
         self.stage = Stage::Open(frames);
         read.map_or_else(Read::Broken, |()| Read::Going)
@@ -137,6 +143,13 @@ impl StreamProcessor {
             return Outcome::Pending;
         };
         if direction != LlmDirection::Read {
+            if ws.awaits_setup
+                && offset == 0
+                && let Some(model) = setup_model(data)
+            {
+                ws.awaits_setup = false;
+                ws.model = ws.model.take().or(model);
+            }
             return Outcome::Pending;
         }
         let end = offset.saturating_add(data.len() as u32);
@@ -166,6 +179,14 @@ impl StreamProcessor {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn websocket_model(&self) -> Option<&str> {
+        match &self.state {
+            ProcessorState::WebSocket(ws) => ws.model.as_deref(),
+            _ => None,
+        }
+    }
+
     fn record_ws_events(&mut self, events: Vec<WsEvent>, ctx: &CallContext) -> Outcome {
         let ProcessorState::WebSocket(ws) = &mut self.state else {
             return Outcome::Pending;
@@ -180,7 +201,11 @@ impl StreamProcessor {
                     ws.started.push_back((id, Instant::now()));
                 }
                 WsEvent::Ended(id, mut usage) => {
-                    let at = ws.started.iter().position(|(s, _)| Some(s) == id.as_ref());
+                    // A Gemini turn has no id: it ends the oldest one started.
+                    let at = match &id {
+                        Some(id) => ws.started.iter().position(|(s, _)| s == id),
+                        None => (!ws.started.is_empty()).then_some(0),
+                    };
                     let start = at
                         .and_then(|at| ws.started.remove(at))
                         .map_or_else(Instant::now, |(_, start)| start);
