@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use honeybeepf_llm_common::{capture_limit, plain_capture_limit};
 use honeybeepf_llm_core::types::{LlmDirection, UsageInfo};
-use log::{debug, info};
+use log::{debug, info, warn};
 
 use crate::probes::builtin::llm::background::BackgroundCalls;
 use crate::probes::builtin::llm::http::{self, ProtocolParser};
@@ -552,6 +552,9 @@ impl StreamProcessor {
                             }
                         };
                         let usage = usage.map(|u| self.named_by_request(u));
+                        if let Some(u) = &usage {
+                            self.check_output_cap(u, &ctx.with_match(self.matched));
+                        }
                         let state = self.read_progress.take_background();
                         // A framed 2xx response that ended with no usage is the provider omitting it, not
                         // capture loss, so count it apart from the next-request and close reasons. An
@@ -701,12 +704,52 @@ impl StreamProcessor {
     /// A background poll is a GET with no model; its create request settles the call.
     fn named_by_request(&self, mut usage: UsageInfo) -> UsageInfo {
         if usage.model.is_none() && self.continuation.is_none() {
-            let end = self
-                .next_request
-                .map_or(self.write_buf.len(), |(at, _)| at.min(self.write_buf.len()));
-            usage.model = http::request_model::from_h1(&self.write_buf[..end]);
+            usage.model = http::request_model::from_h1(self.request());
         }
         usage
+    }
+
+    /// Count and log a response reporting more output than its request allowed: the provider counted, and
+    /// bills, tokens it could not have generated. Fallback attempts relate to the cap differently.
+    fn check_output_cap(&self, usage: &UsageInfo, ctx: &CallContext) {
+        let Some((cap, over)) = self.over_cap(usage) else {
+            return;
+        };
+        let model = usage.model.as_deref().unwrap_or("unknown");
+        #[cfg(feature = "k8s")]
+        let pod_str = fmt_pod(ctx.pod_info.as_ref());
+        #[cfg(not(feature = "k8s"))]
+        let pod_str = "";
+        warn!(
+            "LLM USAGE OVER CAP | PID: {} | Model: {} | Output: {} | Cap: {} | Over by: {}{}",
+            ctx.pid, model, usage.completion_tokens, cap.tokens, over, pod_str
+        );
+        crate::telemetry::record_usage_over_cap(
+            model,
+            ctx.matched,
+            #[cfg(feature = "k8s")]
+            ctx.pod_info.as_ref(),
+        );
+    }
+
+    /// The request's output cap and how far `usage` goes over it.
+    fn over_cap(&self, usage: &UsageInfo) -> Option<(http::output_cap::OutputCap, u64)> {
+        if usage.completion_tokens == 0
+            || !usage.iterations.is_empty()
+            || self.continuation.is_some()
+        {
+            return None;
+        }
+        let cap = http::output_cap::from_h1(self.request())?;
+        Some((cap, cap.excess(usage)?))
+    }
+
+    /// The request this response answers, without a next request written before it ended.
+    fn request(&self) -> &[u8] {
+        let end = self
+            .next_request
+            .map_or(self.write_buf.len(), |(at, _)| at.min(self.write_buf.len()));
+        &self.write_buf[..end]
     }
 
     fn reset(&mut self) {

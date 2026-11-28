@@ -106,6 +106,7 @@ pub struct HoneyBeeMetrics {
     pub llm_responses_unparsed_total: Counter<u64>,
     pub llm_h2_resynced_total: Counter<u64>,
     pub llm_h2_midjoin_recorded_total: Counter<u64>,
+    pub llm_usage_over_cap_total: Counter<u64>,
     pub llm_cost_usd_total: Counter<f64>,
     pub llm_cache_savings_ceiling_usd_total: Counter<f64>,
     pub llm_unpriced_tokens_total: Counter<u64>,
@@ -244,6 +245,13 @@ impl HoneyBeeMetrics {
                 )
                 .with_unit("responses")
                 .build(),
+            llm_usage_over_cap_total: meter
+                .u64_counter("llm_usage_over_cap_total")
+                .with_description(
+                    "LLM calls whose response reports more output tokens than the request allowed",
+                )
+                .with_unit("responses")
+                .build(),
             llm_cost_usd_total,
             llm_cache_savings_ceiling_usd_total,
             llm_unpriced_tokens_total,
@@ -276,6 +284,7 @@ impl HoneyBeeMetrics {
             "llm_responses_unparsed_total" => &self.llm_responses_unparsed_total,
             "llm_h2_resynced_total" => &self.llm_h2_resynced_total,
             "llm_h2_midjoin_recorded_total" => &self.llm_h2_midjoin_recorded_total,
+            "llm_usage_over_cap_total" => &self.llm_usage_over_cap_total,
             "llm_unpriced_tokens_total" => &self.llm_unpriced_tokens_total,
             _ => return None,
         })
@@ -505,6 +514,12 @@ impl HoneyBeeMetrics {
         self.budget
             .note("llm_h2_midjoin_recorded_total", &attrs, 1u64.into());
         self.llm_h2_midjoin_recorded_total.add(1, &attrs);
+    }
+
+    fn record_over_cap(&self, attrs: Vec<KeyValue>) {
+        self.budget
+            .note("llm_usage_over_cap_total", &attrs, 1u64.into());
+        self.llm_usage_over_cap_total.add(1, &attrs);
     }
 }
 
@@ -805,6 +820,26 @@ pub fn record_h2_midjoin(#[cfg(feature = "k8s")] pod_info: Option<&std::sync::Ar
         push_pod_attrs(&mut attrs, pod_info);
 
         m.record_midjoin(attrs);
+    }
+}
+
+/// Count an LLM call whose response reports more output tokens than its request allowed, by model.
+pub fn record_usage_over_cap(
+    model: &str,
+    matched: MatchedBy,
+    #[cfg(feature = "k8s")] pod_info: Option<&std::sync::Arc<PodInfo>>,
+) {
+    if let Some(m) = metrics() {
+        let mut attrs = vec![KeyValue::new("model", model.to_string())];
+        match matched {
+            MatchedBy::Host => {}
+            MatchedBy::Gateway => attrs.push(KeyValue::new("hop", "gateway")),
+            MatchedBy::Shape => attrs.push(KeyValue::new("match", "shape")),
+        }
+        #[cfg(feature = "k8s")]
+        push_pod_attrs(&mut attrs, pod_info);
+
+        m.record_over_cap(attrs);
     }
 }
 

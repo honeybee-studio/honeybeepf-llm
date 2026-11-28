@@ -88,6 +88,13 @@ Spend and call rules group by target_namespace, the calling pod's namespace: `na
     annotations:
       summary: {{`"LLM tokens in {{ $labels.target_namespace }} have no price ({{ $labels.reason }})"`}}
       description: {{`"{{ $value | humanize }} tokens in the last hour were recorded without a price, so cost is under-reported. Add the model to a price file."`}}
+  - alert: LLMUsageOverCap
+    expr: sum by (target_namespace, model) (increase(honeybeepf_llm_llm_usage_over_cap_total[1h])) > 0
+    labels:
+      severity: warning
+    annotations:
+      summary: {{`"LLM responses in {{ $labels.target_namespace }} report more output than requested ({{ $labels.model }})"`}}
+      description: {{`"{{ $value | humanize }} responses in the last hour reported more output tokens than their request allowed, and are billed that way. The agent's LLM USAGE OVER CAP log lines have the numbers."`}}
   - alert: LLMCaptureEventsDropped
     expr: sum by (k8s_node_name) (rate(honeybeepf_llm_llm_events_total{stage="reserve_fail"}[5m])) > 0
     for: 10m

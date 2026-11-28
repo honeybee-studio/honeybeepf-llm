@@ -2069,3 +2069,30 @@ fn a_compressed_realtime_websocket_is_recorded() {
     assert_eq!(count(&out, Outcome::Recorded), 1);
     assert!(unparsed(&out).is_empty());
 }
+
+/// A response reporting more output than its request allowed is flagged against that request, not the next.
+#[test]
+fn test_output_over_the_request_cap_is_flagged() {
+    let body = r#"{"model":"gpt-5.6","input":"hi","max_output_tokens":16}"#;
+    let request = format!(
+        "POST /v1/responses HTTP/1.1\r\nHost: api.openai.com\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let mut p = StreamProcessor::new();
+    send(&mut p, LlmDirection::Write, request.as_bytes(), None);
+    let usage = |completion_tokens| UsageInfo {
+        completion_tokens,
+        ..UsageInfo::default()
+    };
+    assert_eq!(p.over_cap(&usage(16)), None);
+    assert_eq!(p.over_cap(&usage(100)).map(|(_, over)| over), Some(84));
+
+    // A next request written before the response ended is not the one it answers.
+    p.next_request = Some((p.write_buf.len(), Instant::now()));
+    p.write_buf.extend_from_slice(REQUEST);
+    assert_eq!(p.over_cap(&usage(100)).map(|(_, over)| over), Some(84));
+
+    let mut fallback = usage(100);
+    fallback.iterations.push(usage(1));
+    assert_eq!(p.over_cap(&fallback), None);
+}
