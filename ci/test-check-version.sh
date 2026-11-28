@@ -30,7 +30,7 @@ type: application
 version: 0.1.0
 appVersion: "0.1.0"
 EOF
-  mkdir -p "$root/docs"
+  mkdir -p "$root/docs/en"
   echo 'helm install x oci://ghcr.io/honeybee-studio/charts/honeybeepf-llm --version 0.1.0 -n x' >"$root/README.md"
   echo 'git clone --branch v0.1.0 https://github.com/honeybee-studio/honeybeepf-llm.git' >"$root/docs/en/install.md"
 }
