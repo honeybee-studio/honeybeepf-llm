@@ -29,9 +29,10 @@ Cases (4 client processes, each with one keep-alive connection per host):
 | `max` | as fast as the clients can go for 30 s | all LLM calls |
 
 Every LLM call asks for a random `max_tokens` (1–512) from a seeded generator; the mock returns exactly that many
-completion tokens and 13 prompt tokens, with the response headers api.openai.com sends (`openai-version`,
-`openai-organization`, `openai-processing-ms`, `x-request-id`). The seed, rate, duration, rounds, process count and
-a delay before the clients start (`--client-delay`, 0 by default) are flags; the defaults are the numbers above.
+completion tokens and 13 prompt tokens, a fresh response id, and the response headers api.openai.com sends
+(`openai-version`, `openai-organization`, `openai-processing-ms`, `x-request-id`). The tokens a tool should record are
+the ones in the responses the clients received. The seed, rate, duration, rounds, process count and a delay before
+the clients start (`--client-delay`, 0 by default) are flags; the defaults are the numbers above.
 
 The agent runs as the Helm chart runs it: `BUILTIN_PROBES__LLM=true`, `RUST_LOG=info`. No OTLP endpoint is set, so
 export cost is not included.
@@ -60,87 +61,131 @@ It takes about 10 minutes with the defaults. Use an otherwise idle host: the age
 on a VM a busy host shows as CPU steal in the report. Without `--agent` only the baseline runs, which checks the
 harness without root. `--cases` runs a subset; `--help` lists the flags.
 
-The comparisons below use the same script: `--agent ./obi --obi` measures OBI the same way, and
-`tests/benchmark/overhead/gateway.py --litellm <litellm command>` sends the same calls through LiteLLM.
+The comparisons below use the same mock, clients and load:
+
+- `overhead.py --agent ./obi --obi` and `--agent ./agentsight --agentsight` measure the other eBPF agents the same way.
+- `gateway.py --gateway litellm|bifrost|envoy-ai-gateway --binary <path>` sends the calls through a gateway (as root:
+  a CA made for the run joins the system certificate store while it lasts, so each gateway verifies the mock).
+- `sdk.py --python <env> --instrument otel|openllmetry|openlit` makes the calls with the official `openai` SDK, with
+  and without an instrumentation library turned on in the same environment.
 
 ## Compared with other tools
 
-Measured on the same VM as the v0.5.0 results, with the same load, five rounds per cell. Each tool runs with the
-least it needs to count tokens; every setting is in the scripts. If a setting here is not how a tool should be run,
-please [open an issue](https://github.com/honeybee-studio/honeybeepf-llm/issues): the numbers will be measured again.
+Measured on the same VM as the v0.5.0 results on 2026-11-28, with the same load and five rounds per cell;
+honeybeepf-llm was measured again with the others (0.055 s per 1,000 `llm` calls, within the noise of the 0.052 below). Each tool
+runs as its docs say to run it, with the least it needs to count tokens; every setting is in the scripts. If one is
+not how a tool should be run, please [open an issue](https://github.com/honeybee-studio/honeybeepf-llm/issues): it
+will be measured again.
 
-At a glance, the `llm` case (200 requests/s, all LLM calls):
+The tools count tokens in three ways, which cost in different places: an **agent** on the node (its own process), a
+**gateway** every call passes through (its own processes, and a hop on every call), or a **library** in the app (CPU
+in the app's own processes). The table puts the cost each way adds side by side; the sections below give the
+settings and the full numbers.
 
-| | honeybeepf-llm v0.5.0 | OBI v1.0.0 | LiteLLM 1.110.0 |
+| `llm` case, 200 calls/s | Way | Added CPU s / 1,000 calls | Added memory | App p99 ms, without → with | Tokens recorded (`llm` · `max`) |
+|---|---|---|---|---|---|
+| honeybeepf-llm v0.5.0 | agent | 0.055 | 18 MB | 2.32 → 2.68 | 100% · 100% |
+| OBI v1.0.0 | agent | 0.376 | 84 MB | 2.24 → 3.04 | 99.3% · 99.98% |
+| AgentSight v1.0.35 | agent | 1.171 | 198 MB | 2.12 → 2.62 | 100% · 0.02% |
+| Envoy AI Gateway v1.2.1 | gateway | 1.711 | 284 MB | 2.90 → 6.44 | 100% · 100% |
+| Bifrost v2.5.1 | gateway | 2.537 | 491 MB | 2.40 → 8.04 | 100% · 100% |
+| LiteLLM 1.110.0 | gateway | 12.56 | 2,365 MB | 2.26 → 4,000 (fell behind) | not exported |
+| OpenTelemetry openai-v2 2.4b0 | library | 0.246 | 10 MB per app process | 10.76 → 8.84 | 100% · 100% |
+| OpenLIT 1.45.0 | library | 0.993 | 56 MB per app process | 11.99 → 10.60 | 100% · 100% |
+| OpenLLMetry 0.63.0 | library | 1.445 | 28 MB per app process | 9.25 → 11.26 | 100% · 100% |
+
+- Every row is what counting adds, and nothing the app spends anyway: for an agent or a gateway, its own processes
+  (CPU, and PSS of all of them); for a library, the app's CPU and each app process's maximum RSS with the library on,
+  minus the same with it off. With many app processes on a node, a library's memory adds up per process.
+- The library rows on their own: the app's CPU with the `openai` SDK alone was 2.67, 2.80 and 2.68 s per 1,000 calls
+  (openai-v2, OpenLIT, OpenLLMetry), and 2.91, 3.80 and 4.13 s with the library on; max RSS per app process went
+  from 83, 101 and 83 MB to 93, 156 and 111 MB. Their p99 moves more between runs than the library adds.
+- A gateway does more than count: keys, routing, retries, budgets and caching. A library also builds traces. The
+  agents only record.
+
+### Agents on the node
+
+All three read TLS with eBPF uprobes on the shared `libssl`; the agent runs as a separate process.
+
+| | honeybeepf-llm v0.5.0 | OBI v1.0.0 | AgentSight v1.0.35 |
 |---|---|---|---|
-| How it sees the calls | an agent on the node | an agent on the node | every call passes through it |
-| CPU s / 1,000 calls | 0.052 | 0.383 | 12.38 |
-| Memory (PSS) | 19 MB | 86 MB | 2,368 MB |
-| App p99 latency added | +0.85 ms | +0.75 ms | +20.4 ms |
-| Tokens recorded | 100% | 99.2% | not measured |
+| CPU s / 1k calls: `llm` · `non-llm` · `max` | 0.055 · 0.020 · 0.006 | 0.376 · 0.238 · 0.127 | 1.171 · 0.515 · 0.107 |
+| PSS MB · BPF maps MB (`llm`) | 18.3 · 22.5 | 84.4 · 180.9 | 198.4 · 40.2 |
+| `max` calls/s, without → with | 11,159 → 10,569 (−5.3%) | 11,061 → 7,111 (−35.7%) | 11,140 → 10,025 (−10.0%) |
+| `max` p99 ms, without → with | 0.81 → 0.91 | 0.82 → 2.69 | 0.81 → 0.90 |
+| Tokens recorded: `llm` · `non-llm` · `max` | 100% · 100% · 100% | 99.3% · 98.3% · 99.98% | 100% · 100% · 0.02% |
+| Start, 1,000 idle processes | 0.13 s | 3.39 s | 0.32 s |
 
-- The tools do different jobs: OBI traces all HTTP and the GenAI capture is one part of it; LiteLLM is a gateway with
-  keys, routing, retries and budgets. The sections below give each tool's settings and full numbers.
-- The added p99 moves a lot between runs at this rate: honeybeepf-llm's second run added 0.05 ms.
+- **OBI** instruments the `python3` processes with its OpenAI GenAI capture, a 64 KB HTTP buffer (as in OBI's own
+  GenAI tests) and only its `genai` metrics, kept for Prometheus and not scraped during a run; tokens come from its
+  `gen_ai_client_token_usage` sums. It tells an OpenAI call over HTTP/1.1 by the response headers the mock sends, and
+  instruments a process only once it has found it, so the clients of all three agents start 5 s after the agent.
+  OBI keeps no count of the calls it could not read. It builds an HTTP span for every request it sees: the table is
+  what counting LLM tokens with it costs, not a measure of OBI as a whole.
+- **AgentSight** runs `record -c python3 --no-server`; tokens come from `report token`, and CPU and memory include
+  the two loaders it starts (`sslsniff`, `process`). The mock runs under another name so AgentSight does not trace
+  it, which spares it the mock's half of the work that the other two agents do. At `max` it recorded 0.02% of the
+  tokens: its `capture_loss` counter showed 1.9 to 3.3 million events dropped per run (0 in the other cases), as each
+  SSL call reserves a 256 KB slot in a 16 MB ring buffer, so 64 calls in flight fill it. Its lower CPU at `max`
+  reflects the calls it dropped.
+- honeybeepf-llm keeps every call it cannot read in `llm_responses_unparsed_total` with a reason; none were lost.
 
-### OBI v1.0.0
+### Gateways
 
-[OpenTelemetry eBPF Instrumentation](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation) also reads
-LLM token counts from TLS with eBPF. It instruments the `python3` processes only, with its OpenAI GenAI capture on,
-a 64 KB HTTP buffer (as in OBI's own GenAI tests) and only its `genai` metrics, kept for Prometheus and not scraped
-during a run; token accuracy comes from its `gen_ai_client_token_usage` sums at the end of each run. OBI tells an
-OpenAI call over HTTP/1.1 by its response headers, which the mock sends. OBI instruments a process only once it has
-found it, so the clients of both tools start 5 s after the tool (`--client-delay 5`); without it, OBI missed the first
-calls of each run.
+`gateway.py` runs the `llm` and `max` cases straight to the mock and through the gateway, which the clients call
+over plain HTTP on the node, as an in-cluster app would. Each gateway verifies the mock's certificate and starts
+after 5 s of warm-up calls from 8 threads, so its workers have loaded their code.
 
-| Case | | honeybeepf-llm v0.5.0 | OBI v1.0.0 |
+| | LiteLLM 1.110.0 | Bifrost v2.5.1 | Envoy AI Gateway v1.2.1 |
 |---|---|---|---|
-| `llm` | CPU s / 1k req | 0.052 | 0.383 |
-| `non-llm` | CPU s / 1k req | 0.022 | 0.212 |
-| `max` | CPU s / 1k req | 0.006 | 0.124 |
-| `llm` | PSS MB · BPF maps MB | 18.9 · 22.5 | 86.2 · 180.9 |
-| `max` | req/s off → on | 11,440 → 10,703 (−6.4%) | 11,426 → 7,296 (−36.1%) |
-| `max` | p99 ms off → on | 0.78 → 0.89 | 0.78 → 2.64 |
-| `llm` | p99 ms off → on | 1.70 → 2.55 | 1.98 → 2.73 |
-| all | tokens recorded (`llm` · `non-llm` · `max`) | 100% · 100% · 100% | 99.2% · 97.8% · 99.99% |
-| | start, 1,000 idle processes | 0.14 s | 3.41 s |
+| Settings | its production guide for one VM: a worker per vCPU (4), production mode, a master key, error logs only, no database | its 4-vCPU profile: pool 15,000, buffer 20,000, concurrency 5,000, `GOGC=200`; no inference auth (it needs virtual keys) | `aigw run` with its generated OpenAI config (its docs present it for local use; production runs the Kubernetes controller) |
+| CPU s / 1k calls: `llm` · `max` | 12.56 · 11.12 | 2.54 · 0.97 | 1.71 · 0.68 |
+| PSS MB (processes) | 2,365 (6) | 491 (1) | 284 (2) |
+| `llm` calls/s and p99 ms through it (target 200/s) | 186 · 4,000 | 200 · 8.04 | 200 · 6.44 |
+| `max` calls/s through it (11,000 straight) | 252 | 1,866 | 3,084 |
+| Tokens counted by its metrics | not exported | 100% | 100% |
+| Start to its health check | 5.8 s | 0.4 s | 2.0 s |
 
-- OBI is a general instrumentation tool: it builds HTTP spans for every request it sees, and the GenAI capture is
-  one part of it. The table is what it costs to count LLM tokens with it, not a measure of OBI as a whole. With its
-  `http` metrics on as well, its CPU was the same (0.365 s per 1,000 `llm` calls).
-- OBI keeps no count of the calls it could not read, so its missed tokens have no cause listed.
-- honeybeepf-llm was measured before and after OBI to check for drift: 0.052 and 0.060 s per 1,000 `llm` calls, the
-  same memory, −6.4% and −6.0% at `max`; the `llm` p99 (2.55 and 2.20 ms on) moves as much between the runs.
+- `max` through a gateway is bound by its CPU and by the clients, each with one call in flight. The clients, the
+  mock and the gateway share 4 vCPU.
+- LiteLLM needs about 2.5 cores for 200 calls/s here, which leaves it at the edge of this VM: in this run it fell
+  behind (186 calls/s, p99 4 s); in an earlier run on the same VM, with certificate verification off, it kept up
+  (200 calls/s, p99 22 ms). Bifrost's profile preallocates 15,000 objects (`initial_pool_size`), which its docs
+  describe as more memory for more speed.
+- A real provider call takes seconds, which hides the milliseconds a gateway adds.
 
-### A gateway: LiteLLM 1.110.0
+### Libraries in the app
 
-A gateway counts calls the apps send to it instead of the provider, so it is another way to get the same numbers
-rather than the same kind of tool. `gateway.py` runs the `llm` and `max` cases straight to the mock and through
-LiteLLM over plain HTTP, as an in-cluster app would call it. LiteLLM runs as its production guide says for one VM:
-a worker per vCPU (4), `LITELLM_MODE=PRODUCTION`, a master key, error logs only, no database. The one change from
-production is `ssl_verify: false`, as the mock's certificate is self-signed. Each run starts after 5 s of warm-up
-calls, so every worker has loaded its code; LiteLLM kept its connections to the mock open across calls.
+`sdk.py` makes the same calls with the official `openai` SDK (sync client, JSON and `stream=True` with usage) and
+compares the app's CPU, memory and latency with the library off and on in the same Python 3.14 environment. Each
+library runs with its defaults, its data kept in memory (an OpenTelemetry in-memory span exporter and metric reader),
+so nothing is exported; tokens come from the `gen_ai.usage.*` attributes on its spans.
 
-| Case | | straight to the mock | through LiteLLM |
+| | OpenTelemetry openai-v2 2.4b0 | OpenLLMetry 0.63.0 | OpenLIT 1.45.0 |
 |---|---|---|---|
-| `llm` | req/s | 200.13 | 200.01 |
-| `llm` | p50 · p99 ms | 0.97 · 1.99 | 13.83 · 22.43 |
-| `max` | req/s | 11,346 | 257 |
-| `llm` | LiteLLM CPU s / 1k req | | 12.38 (2.5 cores at 200 req/s) |
-| `llm` | LiteLLM RSS anon · PSS MB (server and 4 workers) | | 2,326 · 2,368 |
-| | start to `/health/liveliness` | | 5.8 s |
+| Records prompts and completions by default | no | yes | yes |
+| App CPU s / 1k calls, off → on (`llm`) | 2.67 → 2.91 (+0.25) | 2.68 → 4.13 (+1.45) | 2.80 → 3.80 (+0.99) |
+| Max RSS per app process MB, off → on | 83 → 93 | 83 → 111 | 101 → 156 |
+| `max` calls/s, off → on | 1,832 → 1,645 (−10.2%) | 1,839 → 1,274 (−30.7%) | 1,874 → 1,424 (−24.0%) |
+| Tokens recorded: `llm` · `max` | 100% · 100% | 100% · 100% | 100% · 100% |
 
-- A gateway does more than count: keys, routing, retries, budgets and caching, which an agent on the node does not.
-- `max` through LiteLLM is bound both by its CPU (about 2.8 of the 4 vCPU, shared with the clients and the mock) and by
-  the clients, each with one call in flight: at 13.6 ms a call, 4 clients reach about 290 calls/s. More CPU, replicas
-  or concurrent clients raise it. A real provider call takes seconds, which the added 13 ms hides.
+- openai-v2 is installed with `opentelemetry-util-genai==0.4b0`: later releases of that package rename the module
+  2.4b0 imports. By its code, it records the tokens of a streamed call on its span only, not in its token metric. OpenLLMetry's tests cover Python up to 3.13; it ran on 3.14 here. OpenLIT
+  1.45.0 requires `openai` below 3, so its environment has `openai` 2.54.0 (3.51.0 in the others), and it also
+  instruments `httpx` by default; it is given a local copy of its price file, which it downloads at start otherwise.
 
 ### Not compared
 
 | Tool | Why |
 |---|---|
 | Grafana Beyla | OBI started as Beyla, and Beyla is now built on OBI: the same engine |
+| Coroot node agent | its eBPF LLM support counts requests and latency, not tokens |
+| Pixie | no LLM token parsing, and it needs Kubernetes |
 | Aurva AIOStack | the repository holds Helm charts only; the agent is a prebuilt image that needs an account and sends its data to the vendor's service, where the token counts are shown |
+| Portkey Gateway | its released open-source version (1.15.2) counts no tokens; analytics are in its hosted product |
+| Helicone AI Gateway | it exports no token metric, and its repository has had no code change since July 2025 |
+| TensorZero | archived and no longer maintained |
+| Langfuse | it records nothing without a Langfuse server and keys |
 | groundcover, New Relic, Sysdig AI Defense, Netskope | commercial products that need an account; some licenses limit publishing benchmarks |
 
 ## Results
