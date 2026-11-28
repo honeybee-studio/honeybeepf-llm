@@ -49,23 +49,23 @@ builtinProbes:
     # Calls kept this way carry match="shape" on their metrics; host-matched calls have no match label.
     detectByShape: false
     # Experimental: also record programs with their own BoringSSL or aws-lc and no TLS symbols, such as Claude
-    # Code, by probing the cipher of each TLS 1.3 record (docs/guides/built-in-tls.md).
+    # Code, by probing the cipher of each TLS 1.3 record (docs/en/guides/built-in-tls.md).
     aead: false
     # With aead on, only scan executables of these names (with or without an extension: claude matches claude.exe),
     # e.g. [claude, codex]. Empty scans any executable with BoringSSL or aws-lc built in.
     # A name is compared with the file a process runs, not a symlink to it: a renamed install is left out.
     aeadExecutables: []
     # Record only the pods of these namespaces, e.g. [team-a, team-b]: the TLS data of every other pod and of
-    # host processes is never copied out of the kernel (docs/guides/namespace-scope.md). Needs cgroup v2.
+    # host processes is never copied out of the kernel (docs/en/guides/namespace-scope.md). Needs cgroup v2.
     namespaces: []
     # Pod labels copied onto LLM metrics as target_pod_label_<name> ("." "/" "-" become "_"), e.g. for A/B variants.
     # Each label multiplies the series by its distinct values: list only low-cardinality labels.
     podLabels: []
     # Example:
     # podLabels: ["variant", "app.kubernetes.io/version"]
-    # Custom providers config (optional). Built-in: OpenAI, Anthropic, Gemini (also via Azure, Bedrock, Vertex AI), Meta and many OpenAI-compatible APIs (docs/providers.md)
+    # Custom providers config (optional). Built-in: OpenAI, Anthropic, Gemini (also via Azure, Bedrock, Vertex AI), Meta and many OpenAI-compatible APIs (docs/en/providers.md)
     # Add your own providers here (e.g. Ollama, vLLM, private models); a built-in name replaces every built-in entry of that name.
-    # An in-cluster gateway (LiteLLM, a company proxy) gets gateway: true, so totals count its calls once (docs/cost.md).
+    # An in-cluster gateway (LiteLLM, a company proxy) gets gateway: true, so totals count its calls once (docs/en/cost.md).
     providers: []
     # Example:
     # providers:
@@ -121,7 +121,7 @@ securityContext:
     drop:
       - ALL
     # NET_ADMIN and SYS_RESOURCE are only needed on older kernels: drop NET_ADMIN if every node runs 6.9 or
-    # later, and SYS_RESOURCE if every node runs 5.11 or later (set this list in your values; see docs/install.md).
+    # later, and SYS_RESOURCE if every node runs 5.11 or later (set this list in your values; see docs/en/install.md).
     add:
       - BPF         # load eBPF programs and maps
       - PERFMON     # uprobe/tracepoint/fentry attach and bpf_probe_read_user
@@ -130,7 +130,7 @@ securityContext:
       - NET_ADMIN   # create the plaintext sockhash map, made at load even with plaintext off (kernels before 6.9 refuse it without NET_ADMIN)
       - SYS_RESOURCE  # raise RLIMIT_MEMLOCK for the BPF maps; kernels before 5.11 charge map memory to it, not to the cgroup
 
-# Requests follow docs/benchmark.md (plaintext capture off): about 50 MB in use (RSS plus BPF maps) and under
+# Requests follow docs/en/benchmark.md (plaintext capture off): about 50 MB in use (RSS plus BPF maps) and under
 # 0.1 CPU at 11k LLM calls/s. The limits leave room for large calls, which are buffered per connection.
 resources:
   limits:
@@ -140,7 +140,7 @@ resources:
     cpu: "50m"
     memory: "128Mi"
 
-# Prometheus alert rules for LLM spend and capture health (docs/alerts.md). The same rules ship in the bundled
+# Prometheus alert rules for LLM spend and capture health (docs/en/alerts.md). The same rules ship in the bundled
 # Prometheus chart; set prometheusRule.enabled to get them as a PrometheusRule for the Prometheus Operator.
 alerts:
   prometheusRule:

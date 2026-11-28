@@ -40,7 +40,6 @@ theme:
     - navigation.sections
     - navigation.footer
     - navigation.top
-    - navigation.instant
     - toc.follow
     - content.code.copy
     - content.tabs.link
@@ -59,6 +58,110 @@ extra:
     - icon: fontawesome/brands/github
       link: https://github.com/honeybee-studio/honeybeepf-llm
       name: honeybeepf-llm on GitHub
+
+
+plugins:
+  - search
+  # Translated pages are <page>.<locale>.md next to the English one; a page without one falls back to English.
+  - i18n:
+      docs_structure: folder
+      fallback_to_default: true
+      reconfigure_search: true
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+        - locale: ko
+          name: 한국어
+          build: true
+          nav_translations:
+            Home: 홈
+            Get started: 시작하기
+            Quickstart: 빠른 시작
+            Install: 설치
+            Concepts: 개념
+            How it works: 동작 원리
+            Cost and prices: 비용과 가격
+            Guides: 가이드
+            Reference: 참고
+            Operations: 운영
+            FAQ: 자주 묻는 질문
+        - locale: zh
+          name: 简体中文
+          build: true
+          nav_translations:
+            Home: 首页
+            Get started: 开始使用
+            Quickstart: 快速开始
+            Install: 安装
+            Concepts: 概念
+            How it works: 工作原理
+            Cost and prices: 成本与价格
+            Guides: 指南
+            Reference: 参考
+            Operations: 运维
+            FAQ: 常见问题
+        - locale: ja
+          name: 日本語
+          build: true
+          nav_translations:
+            Home: ホーム
+            Get started: はじめに
+            Quickstart: クイックスタート
+            Install: インストール
+            Concepts: 概念
+            How it works: 仕組み
+            Cost and prices: コストと価格
+            Guides: ガイド
+            Reference: リファレンス
+            Operations: 運用
+            FAQ: よくある質問
+        - locale: es
+          name: Español
+          build: true
+          nav_translations:
+            Home: Inicio
+            Get started: Primeros pasos
+            Quickstart: Inicio rápido
+            Install: Instalación
+            Concepts: Conceptos
+            How it works: Cómo funciona
+            Cost and prices: Costos y precios
+            Guides: Guías
+            Reference: Referencia
+            Operations: Operación
+            FAQ: Preguntas frecuentes
+        - locale: pt-BR
+          name: Português (Brasil)
+          build: true
+          nav_translations:
+            Home: Início
+            Get started: Primeiros passos
+            Quickstart: Início rápido
+            Install: Instalação
+            Concepts: Conceitos
+            How it works: Como funciona
+            Cost and prices: Custos e preços
+            Guides: Guias
+            Reference: Referência
+            Operations: Operação
+            FAQ: Perguntas frequentes
+        - locale: de
+          name: Deutsch
+          build: true
+          nav_translations:
+            Home: Start
+            Get started: Erste Schritte
+            Quickstart: Schnellstart
+            Install: Installation
+            Concepts: Konzepte
+            How it works: Funktionsweise
+            Cost and prices: Kosten und Preise
+            Guides: Anleitungen
+            Reference: Referenz
+            Operations: Betrieb
+            FAQ: FAQ
 
 markdown_extensions:
   - admonition

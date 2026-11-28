@@ -19,7 +19,7 @@ shows LLM traffic, tokens, latency and cost by team, workload, pod and model, fr
 Filters at the top: **Datasource**, **Team**, **Workload**, **Pod** and **Model**.
 
 ??? example "See the whole dashboard"
-    ![LLM Cost Observability dashboard on the demo cluster: token usage, requests and latency by namespace, pod and workload; estimated spend per workload and per model in USD; and Cost-Waste Signals showing the measured cost of refused fallback attempts and the estimated savings from prompt caching, across team-a, team-b and team-c](../images/grafana.png)
+    ![LLM Cost Observability dashboard on the demo cluster: token usage, requests and latency by namespace, pod and workload; estimated spend per workload and per model in USD; and Cost-Waste Signals showing the measured cost of refused fallback attempts and the estimated savings from prompt caching, across team-a, team-b and team-c](../../images/grafana.png)
 
     On the [demo](../demo.md) cluster: a mock provider and fake keys.
 

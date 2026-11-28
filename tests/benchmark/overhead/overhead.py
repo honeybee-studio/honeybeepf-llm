@@ -1,4 +1,4 @@
-"""Runs each case with and without the agent on this host and writes a Markdown report (see docs/benchmark.md)."""
+"""Runs each case with and without the agent on this host and writes a Markdown report (see docs/en/benchmark.md)."""
 import argparse
 import json
 import os

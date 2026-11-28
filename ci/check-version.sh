@@ -29,7 +29,7 @@ fail() {
 # The install docs pin the release chart and tag, so a version bump must move them too.
 readme_pin="oci://ghcr.io/honeybee-studio/charts/honeybeepf-llm --version $crate"
 grep -qF -- "$readme_pin" "$root/README.md" || fail README.md "Quickstart does not install '$readme_pin'"
-for doc in README.md docs/install.md; do
+for doc in README.md docs/en/install.md; do
   [[ -f $root/$doc ]] || continue
   while read -r pinned; do
     [[ $pinned == "$crate" ]] || fail "$doc" "pins release $pinned, not the agent crate's $crate"

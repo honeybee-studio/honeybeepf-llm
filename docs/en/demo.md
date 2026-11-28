@@ -41,7 +41,7 @@ kubectl -n monitoring port-forward svc/grafana 3000:80
 Then open <http://localhost:3000> and the **LLM Cost Observability** dashboard. Calls show in the agent log within
 seconds, and in Grafana after the first scrape, about a minute.
 
-![Agent log on k3s: LLM calls from pods in team-a (OpenAI), team-b (Anthropic) and team-c (Gemini), each line showing the model and the token counts the agent recorded, then the USD spent per team from Prometheus](images/demo.svg)
+![Agent log on k3s: LLM calls from pods in team-a (OpenAI), team-b (Anthropic) and team-c (Gemini), each line showing the model and the token counts the agent recorded, then the USD spent per team from Prometheus](../images/demo.svg)
 
 `team-c` uses the official Node.js image, whose `node` binary has OpenSSL built in, so the agent hooks the executable
 rather than a shared `libssl`.

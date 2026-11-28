@@ -4,7 +4,7 @@ An app that calls an LLM provider hands the request to its TLS library in plaint
 in plaintext. honeybeepf-llm reads a copy of those bytes at that point, on the node, with eBPF. The app, its SDK and the
 network path to the provider stay as they are.
 
-![uprobes on SSL_write/SSL_read copy plaintext into a ring buffer; the agent parses HTTP, matches the provider, maps the cgroup to a pod and exports OTLP metrics](images/how-it-works.svg)
+![uprobes on SSL_write/SSL_read copy plaintext into a ring buffer; the agent parses HTTP, matches the provider, maps the cgroup to a pod and exports OTLP metrics](../images/how-it-works.svg)
 
 ## 1. Find the TLS code
 
