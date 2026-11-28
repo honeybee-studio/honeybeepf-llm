@@ -1,4 +1,4 @@
-<!-- translated from docs/cost.md at 250d516 -->
+<!-- translated from docs/en/cost.md, git blob 4ec534e1959d -->
 
 # 비용과 가격 { #cost-and-prices }
 

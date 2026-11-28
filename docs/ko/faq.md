@@ -1,4 +1,4 @@
-<!-- translated from docs/faq.md at 250d516 -->
+<!-- translated from docs/en/faq.md, git blob 66c7c3dff217 -->
 
 # 자주 묻는 질문 { #faq }
 

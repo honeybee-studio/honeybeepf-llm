@@ -1,4 +1,4 @@
-<!-- translated from docs/how-it-works.md at 250d516 -->
+<!-- translated from docs/en/how-it-works.md, git blob 4df014123bcb -->
 
 # 동작 원리 { #how-it-works }
 
@@ -9,7 +9,7 @@ LLM 프로바이더를 호출하는 앱은 요청을 평문으로 TLS 라이브�
 돌려받습니다. honeybeepf-llm은 노드에서 eBPF로 바로 그 지점의 바이트 사본을 읽습니다. 앱, 앱의 SDK, 프로바이더까지의
 네트워크 경로는 그대로입니다.
 
-![SSL_write/SSL_read의 uprobe가 평문을 링 버퍼에 복사하고, 에이전트가 HTTP를 파싱해 프로바이더를 찾고 cgroup을 파드에 매핑한 뒤 OTLP 메트릭을 내보냄](images/how-it-works.svg)
+![SSL_write/SSL_read의 uprobe가 평문을 링 버퍼에 복사하고, 에이전트가 HTTP를 파싱해 프로바이더를 찾고 cgroup을 파드에 매핑한 뒤 OTLP 메트릭을 내보냄](../images/how-it-works.svg)
 
 ## 1. TLS 코드 찾기 { #1-find-the-tls-code }
 

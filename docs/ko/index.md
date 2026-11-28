@@ -5,7 +5,7 @@ hide:
   - navigation
   - toc
 ---
-<!-- translated from docs/index.md at 250d516 -->
+<!-- translated from docs/en/index.md, git blob 16eafce5ce85 -->
 
 <div class="hb-hero" markdown>
 
@@ -76,7 +76,7 @@ hide:
 </div>
 
 <div class="hb-step" markdown>
-<div class="hb-step__art hb-step__art--shot"><img src="images/grafana-cost-narrow.png" alt="Grafana 패널: 워크로드별 예상 지출, team-b support-bot $1.96, team-a chat-api $0.85, team-c summarizer $0.17"></div>
+<div class="hb-step__art hb-step__art--shot" markdown>![Grafana 패널: 워크로드별 예상 지출, team-b support-bot $1.96, team-a chat-api $0.85, team-c summarizer $0.17](../images/grafana-cost-narrow.png)</div>
 <div class="hb-step__n">3</div>
 <h3>팀별 비용 확인</h3>
 
@@ -126,7 +126,7 @@ hide:
 
 ## 동작 원리 { #how-it-works }
 
-![SSL_write/SSL_read의 uprobe가 평문을 링 버퍼에 복사하고, 에이전트가 HTTP를 파싱해 프로바이더를 찾고 cgroup을 파드에 매핑한 뒤 OTLP 메트릭을 내보냄](images/how-it-works.svg)
+![SSL_write/SSL_read의 uprobe가 평문을 링 버퍼에 복사하고, 에이전트가 HTTP를 파싱해 프로바이더를 찾고 cgroup을 파드에 매핑한 뒤 OTLP 메트릭을 내보냄](../images/how-it-works.svg)
 
 1. 에이전트는 프로세스가 매핑한 모든 `libssl`의 `SSL_write`와 `SSL_read`에, 그리고 Go 실행 파일의 `crypto/tls`에
    uprobe를 붙입니다.
