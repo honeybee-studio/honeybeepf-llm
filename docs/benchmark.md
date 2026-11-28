@@ -82,7 +82,7 @@ The tools count tokens in three ways, which cost in different places: an **agent
 in the app's own processes). The table puts the cost each way adds side by side; the sections below give the
 settings and the full numbers.
 
-| `llm` case, 200 calls/s | Way | CPU s / 1,000 calls | Memory | App p99 ms, without → with | Tokens recorded (`llm` · `max`) |
+| `llm` case, 200 calls/s | Way | Added CPU s / 1,000 calls | Added memory | App p99 ms, without → with | Tokens recorded (`llm` · `max`) |
 |---|---|---|---|---|---|
 | honeybeepf-llm v0.5.0 | agent | 0.055 | 18 MB | 2.32 → 2.68 | 100% · 100% |
 | OBI v1.0.0 | agent | 0.376 | 84 MB | 2.24 → 3.04 | 99.3% · 99.98% |
@@ -90,14 +90,16 @@ settings and the full numbers.
 | Envoy AI Gateway v1.2.1 | gateway | 1.711 | 284 MB | 2.90 → 6.44 | 100% · 100% |
 | Bifrost v2.5.1 | gateway | 2.537 | 491 MB | 2.40 → 8.04 | 100% · 100% |
 | LiteLLM 1.110.0 | gateway | 12.56 | 2,365 MB | 2.26 → 4,000 (fell behind) | not exported |
-| OpenTelemetry openai-v2 2.4b0 | library | +0.246 | +10 MB per app process | 10.76 → 8.84 | 100% · 100% |
-| OpenLIT 1.45.0 | library | +0.993 | +56 MB per app process | 11.99 → 10.60 | 100% · 100% |
-| OpenLLMetry 0.63.0 | library | +1.445 | +28 MB per app process | 9.25 → 11.26 | 100% · 100% |
+| OpenTelemetry openai-v2 2.4b0 | library | 0.246 | 10 MB per app process | 10.76 → 8.84 | 100% · 100% |
+| OpenLIT 1.45.0 | library | 0.993 | 56 MB per app process | 11.99 → 10.60 | 100% · 100% |
+| OpenLLMetry 0.63.0 | library | 1.445 | 28 MB per app process | 9.25 → 11.26 | 100% · 100% |
 
-- Memory is PSS for an agent and a gateway (all its processes), and the added maximum RSS of each app process for a
-  library: with many app processes on a node, a library's memory adds up per process.
-- The library rows start from the `openai` SDK's own cost, 2.7 to 2.8 s of CPU per 1,000 calls in these clients;
-  their p99 moves more between runs than the library adds.
+- Every row is what counting adds, and nothing the app spends anyway: for an agent or a gateway, its own processes
+  (CPU, and PSS of all of them); for a library, the app's CPU and each app process's maximum RSS with the library on,
+  minus the same with it off. With many app processes on a node, a library's memory adds up per process.
+- The library rows on their own: the app's CPU with the `openai` SDK alone was 2.67, 2.80 and 2.68 s per 1,000 calls
+  (openai-v2, OpenLIT, OpenLLMetry), and 2.91, 3.80 and 4.13 s with the library on; max RSS per app process went
+  from 83, 101 and 83 MB to 93, 156 and 111 MB. Their p99 moves more between runs than the library adds.
 - A gateway does more than count: keys, routing, retries, budgets and caching. A library also builds traces. The
   agents only record.
 
