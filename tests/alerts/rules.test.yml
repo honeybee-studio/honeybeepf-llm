@@ -81,6 +81,11 @@ tests:
     input_series:
       - series: 'honeybeepf_llm_llm_unpriced_tokens_total{target_namespace="team-j",reason="unknown_model",model="new-model"}'
         values: '0+100x90'
+      - series: 'honeybeepf_llm_llm_usage_over_cap_total{target_namespace="team-l",model="gpt-5.6"}'
+        values: '0x30 1x60'
+      # A count from before the last hour no longer fires.
+      - series: 'honeybeepf_llm_llm_usage_over_cap_total{target_namespace="team-m",model="gpt-5.6"}'
+        values: '1x90'
       - series: 'honeybeepf_llm_llm_events_total{stage="reserve_fail",k8s_node_name="node-1"}'
         values: '0+5x90'
       - series: 'honeybeepf_llm_llm_events_total{stage="reserve_fail",k8s_node_name="node-2"}'
@@ -94,6 +99,10 @@ tests:
         alertname: LLMTokensUnpriced
         exp_alerts:
           - exp_labels: {severity: info, target_namespace: team-j, reason: unknown_model}
+      - eval_time: 60m
+        alertname: LLMUsageOverCap
+        exp_alerts:
+          - exp_labels: {severity: warning, target_namespace: team-l, model: gpt-5.6}
       - eval_time: 60m
         alertname: LLMCaptureEventsDropped
         exp_alerts:

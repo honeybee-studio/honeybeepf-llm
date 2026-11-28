@@ -14,6 +14,7 @@ prefix. Cost metrics are on [Cost and prices](cost.md).
 | `honeybeepf_llm_llm_reasoning_tokens_total` | counter | same as requests (subset of completion tokens) |
 | `honeybeepf_llm_llm_latency_seconds` | histogram | same as requests |
 | `honeybeepf_llm_llm_responses_unparsed_total` | counter | `reason`, `target_namespace`, `target_pod_name`, `target_workload_kind`, `target_workload_name` |
+| `honeybeepf_llm_llm_usage_over_cap_total` | counter | `model`, `target_namespace`, `target_pod_name`, `target_workload_kind`, `target_workload_name` |
 
 ## Labels
 
@@ -78,6 +79,26 @@ For a panel, calls whose response had no usage:
 ```promql
 sum by (target_namespace) (rate(honeybeepf_llm_llm_responses_unparsed_total{reason="usage_absent"}[5m])) * 60
 ```
+
+## Output over the request's cap
+
+`llm_usage_over_cap_total` counts responses that report more output tokens than their request allowed. The provider
+could not have generated them, but bills them: in July 2026 GPT-5.6 reported 273,250 output tokens for a request
+capped at 16,384 ([report](https://community.openai.com/t/gpt-5-6-usage-output-tokens-is-9x-actual-generation-re-summed-once-per-reasoning-item-exceeds-max-output-tokens-and-is-what-gets-billed/1386467)).
+Each one also logs a warning with the numbers to take to the provider:
+
+```text
+LLM USAGE OVER CAP | PID: 4242 | Model: gpt-5.6 | Output: 273250 | Cap: 16384 | Over by: 256866 | Pod: team-a/agent-7f9c
+```
+
+The cap is `max_completion_tokens` or `max_output_tokens` (OpenAI; reasoning counts toward it), or `max_tokens`,
+`generationConfig.maxOutputTokens` or `inferenceConfig.maxTokens`, where only the visible output is compared because
+providers differ on whether reasoning counts. It is times `n`, `best_of` or `candidateCount` when the request asks for
+several choices, and non-text output (audio, images) is left out. Not checked, as the cap may not bound all the output:
+
+- a request with server-side tools (web search, code execution, an MCP server), Predicted Outputs or Anthropic
+  context management, which can bill more than one generation under one cap, and a server-side fallback;
+- HTTP/2 requests and WebSocket sessions, for now: only HTTP/1.1 request bodies are read.
 
 ## Example
 

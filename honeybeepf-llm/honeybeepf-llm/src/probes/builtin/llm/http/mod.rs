@@ -11,6 +11,7 @@ mod eventstream;
 mod h1;
 mod h2;
 mod json_ends;
+pub(crate) mod output_cap;
 mod provider_report;
 mod registry;
 pub(crate) mod request_model;

@@ -19,14 +19,17 @@ struct Named {
 
 /// The model an HTTP/1.1 request names in its path or, failing that, in its JSON body.
 pub(crate) fn from_h1(request: &[u8]) -> Option<String> {
+    let (path, body) = h1_parts(request)?;
+    path.and_then(from_path).or_else(|| from_body(body?))
+}
+
+/// The path and the body (None when shorter than its `Content-Length`) of an HTTP/1.1 request.
+pub(crate) fn h1_parts(request: &[u8]) -> Option<(Option<&str>, Option<&[u8]>)> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
     let httparse::Status::Complete(head) = req.parse(request).ok()? else {
         return None;
     };
-    if let Some(model) = req.path.and_then(from_path) {
-        return Some(model);
-    }
     let body = &request[head..];
     let len = req
         .headers
@@ -39,10 +42,11 @@ pub(crate) fn from_h1(request: &[u8]) -> Option<String> {
                 .parse::<usize>()
                 .ok()
         });
-    from_body(match len {
-        Some(len) => body.get(..len)?,
-        None => body,
-    })
+    let body = match len {
+        Some(len) => body.get(..len),
+        None => Some(body),
+    };
+    Some((req.path, body))
 }
 
 /// The model in a Bedrock runtime path, percent-decoded. None for other paths and for ARNs, which name an

@@ -49,6 +49,7 @@ yesterday, so a normal weekday-to-weekend change can trigger it; it is `info` fo
 | `LLMCallsWentSilent` | a namespace that made at least `alerts.silentMinCalls` (20) calls in this hour yesterday made none in the last hour | 30m | warning |
 | `LLMCallsNotRecorded` | over `alerts.notRecordedRatio` (5%) of the calls seen from a namespace in 15 minutes, and at least 5, could not be recorded (`agent_session` and `usage_absent` are not counted) | 15m | warning |
 | `LLMTokensUnpriced` | tokens were recorded without a price (a new model, or a price past its last day), so cost is under-reported | 30m | info |
+| `LLMUsageOverCap` | a response reported more output tokens than its request allowed, which the provider bills ([metrics.md](metrics.md#output-over-the-requests-cap)) | — | warning |
 | `LLMCaptureEventsDropped` | the ring buffer on a node was full and captured data was dropped | 10m | warning |
 | `LLMWorkloadNotHooked` | a workload has pods that map a libssl the probes are not attached to | 30m | warning |
 
