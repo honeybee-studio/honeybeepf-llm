@@ -1,4 +1,4 @@
-<!-- translated from docs/cost.md at 250d516 -->
+<!-- translated from docs/en/cost.md at 250d516 -->
 
 # 비용과 가격 { #cost-and-prices }
 

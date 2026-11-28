@@ -1,4 +1,4 @@
-<!-- translated from docs/quickstart.md at 250d516 -->
+<!-- translated from docs/en/quickstart.md at 250d516 -->
 
 # 빠른 시작 { #quickstart }
 

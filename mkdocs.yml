@@ -64,7 +64,7 @@ plugins:
   - search
   # Translated pages are <page>.<locale>.md next to the English one; a page without one falls back to English.
   - i18n:
-      docs_structure: suffix
+      docs_structure: folder
       fallback_to_default: true
       reconfigure_search: true
       languages:

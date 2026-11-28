@@ -75,7 +75,7 @@ Each call is read in the kernel, where your app hands it to TLS, and matched to 
 </div>
 
 <div class="hb-step" markdown>
-<div class="hb-step__art hb-step__art--shot"><img src="images/grafana-cost-narrow.png" alt="Grafana panel: estimated spend per workload, team-b support-bot $1.96, team-a chat-api $0.85, team-c summarizer $0.17"></div>
+<div class="hb-step__art hb-step__art--shot" markdown>![Grafana panel: estimated spend per workload, team-b support-bot $1.96, team-a chat-api $0.85, team-c summarizer $0.17](../images/grafana-cost-narrow.png)</div>
 <div class="hb-step__n">3</div>
 <h3>See the cost per team</h3>
 
@@ -125,7 +125,7 @@ Tokens and dollars per namespace, pod and model in Prometheus, with a [Grafana d
 
 ## How it works
 
-![uprobes on SSL_write/SSL_read copy plaintext into a ring buffer; the agent parses HTTP, matches the provider, maps the cgroup to a pod and exports OTLP metrics](images/how-it-works.svg)
+![uprobes on SSL_write/SSL_read copy plaintext into a ring buffer; the agent parses HTTP, matches the provider, maps the cgroup to a pod and exports OTLP metrics](../images/how-it-works.svg)
 
 1. The agent attaches uprobes to `SSL_write` and `SSL_read` in every `libssl` a process maps, and to `crypto/tls` in
    Go executables.

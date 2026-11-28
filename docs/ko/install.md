@@ -1,4 +1,4 @@
-<!-- translated from docs/install.md at 250d516 -->
+<!-- translated from docs/en/install.md at 250d516 -->
 
 # 설치 { #install }
 

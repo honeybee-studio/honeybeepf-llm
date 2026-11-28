@@ -224,6 +224,6 @@ jobs:
             "" \
             "Binaries for running without Kubernetes: \`honeybeepf-llm-$VERSION-linux-amd64.tar.gz\` and \`-arm64\`, glibc 2.28 or later" \
             "" \
-            "The image, the chart and the binaries are signed with keyless cosign; see docs/verify.md to verify them." >notes.md
+            "The image, the chart and the binaries are signed with keyless cosign; see docs/en/verify.md to verify them." >notes.md
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "honeybeepf-llm $VERSION" --notes-file notes.md --generate-notes dist/*

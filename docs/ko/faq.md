@@ -1,4 +1,4 @@
-<!-- translated from docs/faq.md at 250d516 -->
+<!-- translated from docs/en/faq.md at 250d516 -->
 
 # 자주 묻는 질문 { #faq }
 
