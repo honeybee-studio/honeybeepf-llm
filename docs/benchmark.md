@@ -69,6 +69,20 @@ Measured on the same VM as the v0.5.0 results, with the same load, five rounds p
 least it needs to count tokens; every setting is in the scripts. If a setting here is not how a tool should be run,
 please [open an issue](https://github.com/honeybee-studio/honeybeepf-llm/issues): the numbers will be measured again.
 
+At a glance, the `llm` case (200 requests/s, all LLM calls):
+
+| | honeybeepf-llm v0.5.0 | OBI v1.0.0 | LiteLLM 1.110.0 |
+|---|---|---|---|
+| How it sees the calls | an agent on the node | an agent on the node | every call passes through it |
+| CPU s / 1,000 calls | 0.052 | 0.383 | 12.38 |
+| Memory (PSS) | 19 MB | 86 MB | 2,368 MB |
+| App p99 latency added | +0.85 ms | +0.75 ms | +20.4 ms |
+| Tokens recorded | 100% | 99.2% | not measured |
+
+- The tools do different jobs: OBI traces all HTTP and the GenAI capture is one part of it; LiteLLM is a gateway with
+  keys, routing, retries and budgets. The sections below give each tool's settings and full numbers.
+- The added p99 moves a lot between runs at this rate: honeybeepf-llm's second run added 0.05 ms.
+
 ### OBI v1.0.0
 
 [OpenTelemetry eBPF Instrumentation](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation) also reads
@@ -117,8 +131,9 @@ calls, so every worker has loaded its code; LiteLLM kept its connections to the 
 | | start to `/health/liveliness` | | 5.8 s |
 
 - A gateway does more than count: keys, routing, retries, budgets and caching, which an agent on the node does not.
-- The clients, the mock and LiteLLM share 4 vCPU, so `max` through LiteLLM is bound by its CPU on this VM; more CPU
-  or more replicas raise it. A real provider call takes seconds, which the added 13 ms hides.
+- `max` through LiteLLM is bound both by its CPU (about 2.8 of the 4 vCPU, shared with the clients and the mock) and by
+  the clients, each with one call in flight: at 13.6 ms a call, 4 clients reach about 290 calls/s. More CPU, replicas
+  or concurrent clients raise it. A real provider call takes seconds, which the added 13 ms hides.
 
 ### Not compared
 
