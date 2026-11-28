@@ -1,4 +1,4 @@
-<!-- translated from docs/en/quickstart.md at 250d516 -->
+<!-- translated from docs/en/quickstart.md, git blob 39a92ae8a6a4 -->
 
 # 빠른 시작 { #quickstart }
 

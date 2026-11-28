@@ -1,4 +1,4 @@
-<!-- translated from docs/en/install.md at 250d516 -->
+<!-- translated from docs/en/install.md, git blob 0b2ef7c4e900 -->
 
 # 설치 { #install }
 

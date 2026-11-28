@@ -1,4 +1,4 @@
-<!-- translated from docs/en/how-it-works.md at 250d516 -->
+<!-- translated from docs/en/how-it-works.md, git blob 4df014123bcb -->
 
 # 동작 원리 { #how-it-works }
 

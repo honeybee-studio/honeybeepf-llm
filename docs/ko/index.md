@@ -5,7 +5,7 @@ hide:
   - navigation
   - toc
 ---
-<!-- translated from docs/en/index.md at 250d516 -->
+<!-- translated from docs/en/index.md, git blob 16eafce5ce85 -->
 
 <div class="hb-hero" markdown>
 
