@@ -20,6 +20,25 @@ OTHER_HOST = "internal.example"
 PROMPT_TOKENS = 13
 READY = "Active probe registered: llm"
 SUCCESS = re.compile(r"LLM SUCCESS .*? Tokens: (\d+)")
+# OBI (--obi): GenAI capture on; its metrics are kept for Prometheus and not scraped during a run, like the agent's
+OBI_READY = "Launching p.Tracer"
+OBI_PORT = 9400
+OBI_CONFIG = f"""discovery:
+  instrument:
+    - exe_path: "*python3*"
+ebpf:
+  buffer_sizes:
+    http: 65536
+  payload_extraction:
+    http:
+      genai:
+        openai: {{enabled: true}}
+prometheus_export:
+  port: {OBI_PORT}
+  features: [application]
+  instrumentations: [genai]
+"""
+OBI_TOKENS = re.compile(r"^gen_ai_client_token_usage_sum\{.*\} (\S+)$", re.M)
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 HZ = os.sysconf("SC_CLK_TCK")
 # name: (requests/s: None = --rate, 0 = as fast as possible; share of requests that are LLM calls)
@@ -43,8 +62,16 @@ def mock(cert, key):
         def log_message(self, *_):
             pass
 
+        def provider_headers(self):
+            # What api.openai.com sends; OBI tells OpenAI calls over HTTP/1.1 apart by these.
+            if self.path == "/v1/chat/completions":
+                for name, value in [("openai-organization", "org-bench"), ("openai-processing-ms", "1"),
+                                    ("openai-version", "2020-10-01"), ("x-request-id", "req_bench")]:
+                    self.send_header(name, value)
+
         def reply(self, body, ctype="application/json"):
             self.send_response(200)
+            self.provider_headers()
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -62,6 +89,7 @@ def mock(cert, key):
                 msg = {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
                 return self.reply(json.dumps({**head, "object": "chat.completion", "choices": [msg], "usage": usage}).encode())
             self.send_response(200)
+            self.provider_headers()
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
@@ -85,14 +113,18 @@ def mock(cert, key):
     server.serve_forever()
 
 
-def client(seed, rate, duration, llm_share, out):
+def client(seed, rate, duration, llm_share, out, delay, gateway=None):
     import http.client
     import ssl
+
+    time.sleep(delay)  # --client-delay: OBI instruments a process only after it finds it
 
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     conns = {h: http.client.HTTPSConnection("127.0.0.1", PORT, context=ctx) for h in (LLM_HOST, OTHER_HOST)}
+    if gateway:  # gateway.py: LLM calls go to a gateway on this port over plain HTTP, as in-cluster apps call one
+        conns[LLM_HOST] = http.client.HTTPConnection("127.0.0.1", int(gateway))
     rng = random.Random(seed)
     lat, tokens, llm = [], 0, 0
     t0 = time.perf_counter()
@@ -116,7 +148,10 @@ def client(seed, rate, duration, llm_share, out):
         else:
             host, method, path, body = OTHER_HOST, "POST", "/api/items", '{"id":1}'
         conn = conns[host]
-        conn.request(method, path, body, {"Host": host, "Content-Type": "application/json"})
+        headers = {"Host": host, "Content-Type": "application/json"}
+        if gateway and host == LLM_HOST:
+            headers["Authorization"] = "Bearer " + os.environ["HB_GATEWAY_KEY"]
+        conn.request(method, path, body, headers)
         resp = conn.getresponse()
         resp.read()
         if resp.status != 200:
@@ -126,13 +161,19 @@ def client(seed, rate, duration, llm_share, out):
 
 
 class Agent:
-    def __init__(self, binary, log):
-        self.log = log
+    def __init__(self, binary, log, obi=False):
+        self.log, self.obi = log, obi
         env = {**os.environ, "BUILTIN_PROBES__LLM": "true", "RUST_LOG": "info"}
+        cmd, ready = [binary], READY
+        if obi:
+            config = Path(log).with_suffix(".yml")
+            config.write_text(OBI_CONFIG)
+            env = {**os.environ, "OTEL_EBPF_MIN_PROCESS_AGE": "0s", "OTEL_EBPF_DISCOVERY_POLL_INTERVAL": "500ms"}
+            cmd, ready = [binary, "-config", str(config)], OBI_READY
         t0 = time.perf_counter()
         with open(log, "w") as out:
-            self.proc = spawn([binary], env=env, stdout=out, stderr=subprocess.STDOUT)
-        while READY not in self.text():
+            self.proc = spawn(cmd, env=env, stdout=out, stderr=subprocess.STDOUT)
+        while ready not in self.text():
             if self.proc.poll() is not None or time.perf_counter() - t0 > 120:
                 sys.exit(f"agent did not start:\n{self.text()[-2000:]}")
             time.sleep(0.01)
@@ -160,6 +201,15 @@ class Agent:
         mb = lambda kb: int(kb) / 1024
         return mb(status["RssAnon"]), mb(status["RssFile"]), mb(pss), sum(maps.values()) / 2**20
 
+    def recorded(self):
+        """Tokens the tool recorded: the agent's `LLM SUCCESS` lines, or OBI's token histogram sums."""
+        if not self.obi:
+            return sum(int(t) for t in SUCCESS.findall(self.text()))
+        import urllib.request
+
+        metrics = urllib.request.urlopen(f"http://127.0.0.1:{OBI_PORT}/metrics", timeout=10).read().decode()
+        return round(sum(float(v) for v in OBI_TOKENS.findall(metrics)))
+
     def drain(self):
         """Waits until the log has been quiet for 2 s, so calls still in the ringbuf are counted."""
         last, since = -1, time.perf_counter()
@@ -177,11 +227,12 @@ class Agent:
 def run_case(args, tmp, case, with_agent, seed, duration=None):
     rate, share = CASES[case]
     rate = args.rate if rate is None else rate
-    agent = Agent(args.agent, tmp / f"agent-{case}.log") if with_agent else None
+    agent = Agent(args.agent, tmp / f"agent-{case}.log", args.obi) if with_agent else None
     c0 = agent.cpu() if agent else 0
     outs = [tmp / f"client-{w}.json" for w in range(args.workers)]
     procs = [spawn([sys.executable, __file__, "client", str(seed * 100 + w), str(rate / args.workers),
-                    str(duration or args.duration), str(share), str(o)]) for w, o in enumerate(outs)]
+                    str(duration or args.duration), str(share), str(o), str(args.client_delay)])
+             for w, o in enumerate(outs)]
     for p in procs:
         if p.wait():
             sys.exit(f"client failed in case {case}")
@@ -192,10 +243,10 @@ def run_case(args, tmp, case, with_agent, seed, duration=None):
            "p99": statistics.quantiles(lat, n=100)[98] * 1e3, "sent": sum(r["tokens"] for r in res)}
     if agent:
         agent.drain()
-        cpu, mem = agent.cpu(), agent.mem()
+        cpu, mem, recorded = agent.cpu(), agent.mem(), agent.recorded()
         agent.stop()  # the agent logs its kernel counters on exit too
         text = agent.text()
-        row |= {"cpu": (cpu - c0) / n * 1000, "mem": mem, "recorded": sum(int(t) for t in SUCCESS.findall(text)),
+        row |= {"cpu": (cpu - c0) / n * 1000, "mem": mem, "recorded": recorded,
                 "unparsed": text.count("LLM UNPARSED"), "stats": ([""] + re.findall(r"\[LLM stats\] (.*)", text))[-1]}
     return row
 
@@ -206,7 +257,7 @@ def startup(args, tmp):
         spawn([sys.executable, "-c", "import ssl, time; time.sleep(3600)"] if i < args.processes // 20 else ["sleep", "3600"])
     times = []
     for _ in range(args.reps):
-        agent = Agent(args.agent, tmp / "agent-startup.log")
+        agent = Agent(args.agent, tmp / "agent-startup.log", args.obi)
         times.append(agent.startup)
         agent.stop()
     return statistics.median(times)
@@ -220,9 +271,10 @@ def environment(args):
     return [f"- Kernel: {platform.release()} ({distro[1] if distro else '?'})",
             f"- CPU: {cpu[1] if cpu else platform.machine()}, {os.cpu_count()} vCPU; memory {mem:.1f} GiB",
             f"- Python {platform.python_version()}, {subprocess.run(['openssl', 'version'], capture_output=True, text=True).stdout.strip()}",
-            f"- Agent sha256 {agent}…; RUST_LOG=info, no OTLP endpoint",
+            f"- {'OBI' if args.obi else 'Agent'} sha256 {agent}…; "
+            + ("GenAI capture on, Prometheus export not scraped" if args.obi else "RUST_LOG=info, no OTLP endpoint"),
             f"- {args.workers} client processes, {args.rate} req/s for fixed-rate cases, {args.duration} s per run, "
-            f"{args.reps} runs per cell (median), seed {args.seed}"]
+            f"{args.reps} runs per cell (median), seed {args.seed}, clients start {args.client_delay:g} s after the tool"]
 
 
 def steal_ticks():
@@ -233,7 +285,7 @@ def steal_ticks():
 
 def report(args, rows, start, steal):
     med = lambda case, on, key: statistics.median(r[key] for r in rows[case, on])
-    lines = [f"# honeybeepf-llm overhead ({time.strftime('%Y-%m-%d')})", "", *environment(args),
+    lines = [f"# {'OBI' if args.obi else 'honeybeepf-llm'} overhead ({time.strftime('%Y-%m-%d')})", "", *environment(args),
              f"- CPU steal during the runs: {steal:.1%} (a busy VM host makes every number noisier)", "",
              "## Application impact", "",
              "| case | req/s off | req/s on | p50 ms off | p50 ms on | p99 ms off | p99 ms on |", "|---|---|---|---|---|---|---|"]
@@ -250,16 +302,22 @@ def report(args, rows, start, steal):
             sent = sum(r["sent"] for r in rows[case, True])
             acc = f"{sum(r['recorded'] for r in rows[case, True]) / sent:.2%}" if sent else "no LLM calls"
             lines.append(f"| {case} | {med(case, True, 'cpu'):.3f} | " + " | ".join(f"{m:.1f}" for m in mem) + f" | {acc} |")
-        lines += ["", "Where calls were lost (per run: `LLM UNPARSED` lines; the agent's kernel counters at exit):", ""]
-        lines += [f"- `{case}`: {r['unparsed']} unparsed; {r['stats']}" for case in args.cases for r in rows[case, True]
-                  if r["recorded"] < r["sent"]] or ["- none"]
-        lines += ["", "## Startup", "", f"Agent start to `{READY}` with {args.processes} idle processes: {start:.2f} s (median)"]
+        if args.obi:
+            lines += ["", "OBI keeps no count of the calls it could not read."]
+        else:
+            lines += ["", "Where calls were lost (per run: `LLM UNPARSED` lines; the agent's kernel counters at exit):", ""]
+            lines += [f"- `{case}`: {r['unparsed']} unparsed; {r['stats']}" for case in args.cases for r in rows[case, True]
+                      if r["recorded"] < r["sent"]] or ["- none"]
+        ready = OBI_READY if args.obi else READY
+        lines += ["", "## Startup", "", f"Start to `{ready}` with {args.processes} idle processes: {start:.2f} s (median)"]
     return "\n".join(lines) + "\n"
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--agent", help="agent binary; omit to run the baseline only")
+    ap.add_argument("--obi", action="store_true", help="--agent is an OBI binary, measured the same way")
+    ap.add_argument("--client-delay", type=float, default=0, help="seconds each client waits before its load")
     ap.add_argument("--rate", type=float, default=200, help="requests/s for the fixed-rate cases")
     ap.add_argument("--duration", type=float, default=30)
     ap.add_argument("--workers", type=int, default=4)
@@ -312,6 +370,6 @@ if __name__ == "__main__":
         mock(*sys.argv[2:])
     elif sys.argv[1:2] == ["client"]:
         a = sys.argv[2:]
-        client(int(a[0]), float(a[1]), float(a[2]), float(a[3]), a[4])
+        client(int(a[0]), float(a[1]), float(a[2]), float(a[3]), a[4], float(a[5]), *a[6:7])
     else:
         main()
